@@ -115,10 +115,15 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         else -> throw IllegalArgumentException("Unsupported SVG image source")
     }
 
-    private fun openUrlInputStream(src: String) = URL(src).openConnection().run {
-        connectTimeout = URL_CONNECTION_TIMEOUT_MS
-        readTimeout = URL_CONNECTION_TIMEOUT_MS
-        getInputStream()
+    private fun openUrlInputStream(src: String) = URL(src).run {
+        require(protocol == "http" || protocol == "https" || protocol == "file") {
+            "Unsupported SVG URL protocol"
+        }
+        openConnection().run {
+            connectTimeout = URL_CONNECTION_TIMEOUT_MS
+            readTimeout = URL_CONNECTION_TIMEOUT_MS
+            getInputStream()
+        }
     }
 
     private fun resolveSvgWidth(svg: SVG, imageLoadOption: HRImageLoadOption): Int {
@@ -145,7 +150,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             ?: svg.documentViewBox?.width
         val documentHeight = svg.documentHeight.takeIf { it > 0f }
             ?: svg.documentViewBox?.height
-        return if (documentWidth != null && documentHeight != null && documentWidth > 0f && documentHeight > 0f) {
+        return if (documentWidth != null && documentHeight != null) {
             (width * documentHeight / documentWidth).roundToInt().coerceAtLeast(1)
         } else {
             DEFAULT_SVG_SIZE
@@ -245,6 +250,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
     }
 
     private fun decodeBase64ImageSource(src: String): ByteArray {
+        require(src.contains(",")) { "Invalid Base64 image source" }
         val data = src.substringAfter(",")
         return if (src.substringBefore(",").contains(";base64")) {
             Base64.decode(data, Base64.DEFAULT)
@@ -281,11 +287,12 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
     }
 
     private fun HRImageLoadOption.isSvg(): Boolean {
-        if (src.startsWith(SCHEME_BASE64) && src.substringBefore(",").contains("image/svg+xml")) {
-            return true
+        return if (src.startsWith(SCHEME_BASE64)) {
+            src.substringBefore(",").contains("image/svg+xml")
+        } else {
+            val path = src.substringBefore("?").substringBefore("#")
+            path.endsWith(".svg", ignoreCase = true)
         }
-        val path = src.substringBefore("?").substringBefore("#")
-        return path.endsWith(".svg", ignoreCase = true)
     }
 
     companion object {
