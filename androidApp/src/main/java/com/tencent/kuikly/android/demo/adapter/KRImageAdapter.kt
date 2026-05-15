@@ -48,10 +48,14 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         imageLoadOption: HRImageLoadOption,
         callback: (drawable: Drawable?) -> Unit,
     ) {
-        if (imageLoadOption.isSvg()) {
+        if (imageLoadOption.isBase64()) {
+            if (imageLoadOption.isSvg()) {
+                loadSvg(imageLoadOption, callback)
+            } else {
+                loadFromBase64(imageLoadOption, callback)
+            }
+        } else if (imageLoadOption.isSvg()) {
             loadSvg(imageLoadOption, callback)
-        } else if (imageLoadOption.isBase64()) {
-            loadFromBase64(imageLoadOption, callback)
         } else if (imageLoadOption.isWebUrl() || imageLoadOption.isAssets() || imageLoadOption.isFile()) {
             // http/assets/file 图片使用 glide 加载
             requestImage(imageLoadOption, callback)
@@ -100,19 +104,14 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
 
     private fun openSvgInputStream(imageLoadOption: HRImageLoadOption) = when {
         imageLoadOption.isBase64() -> {
-            val data = imageLoadOption.src.substringAfter(",")
-            val bytes = if (imageLoadOption.src.substringBefore(",").contains(";base64")) {
-                Base64.decode(data, Base64.DEFAULT)
-            } else {
-                URLDecoder.decode(data, "UTF-8").toByteArray(Charsets.UTF_8)
-            }
-            ByteArrayInputStream(bytes)
+            ByteArrayInputStream(decodeBase64ImageSource(imageLoadOption.src))
         }
         imageLoadOption.isAssets() -> {
             val assetPath = imageLoadOption.src.substring(HRImageLoadOption.SCHEME_ASSETS.length)
             context.assets.open(assetPath)
         }
-        else -> URL(imageLoadOption.src).openStream()
+        imageLoadOption.isWebUrl() || imageLoadOption.isFile() -> URL(imageLoadOption.src).openStream()
+        else -> throw IllegalArgumentException("Unsupported SVG image source")
     }
 
     private fun resolveSvgWidth(svg: SVG, imageLoadOption: HRImageLoadOption): Int {
@@ -139,7 +138,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             ?: svg.documentViewBox?.width
         val documentHeight = svg.documentHeight.takeIf { it > 0f }
             ?: svg.documentViewBox?.height
-        return if (documentWidth != null && documentHeight != null && documentWidth > 0f) {
+        return if (documentWidth != null && documentHeight != null && documentWidth > 0f && documentHeight > 0f) {
             (width * documentHeight / documentWidth).roundToInt().coerceAtLeast(1)
         } else {
             DEFAULT_SVG_SIZE
@@ -206,7 +205,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         execOnSubThread {
             val options = BitmapFactory.Options()
             options.inJustDecodeBounds = true
-            val bytes = Base64.decode(imageLoadOption.src.split(",")[1], Base64.DEFAULT)
+            val bytes = decodeBase64ImageSource(imageLoadOption.src)
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
             try {
                 options.inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -225,6 +224,15 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             } catch (e: OutOfMemoryError) {
                 Log.d(TAG, "OutOfMemoryError occurred during Base64 image loading: $e")
             }
+        }
+    }
+
+    private fun decodeBase64ImageSource(src: String): ByteArray {
+        val data = src.substringAfter(",")
+        return if (src.substringBefore(",").contains(";base64")) {
+            Base64.decode(data, Base64.DEFAULT)
+        } else {
+            URLDecoder.decode(data, "UTF-8").toByteArray(Charsets.UTF_8)
         }
     }
 
