@@ -155,9 +155,9 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             return height
         }
         val documentWidth = svg.documentWidth.takeIf { it > 0f }
-            ?: svg.documentViewBox?.width
+            ?: svg.documentViewBox?.width?.takeIf { it > 0f }
         val documentHeight = svg.documentHeight.takeIf { it > 0f }
-            ?: svg.documentViewBox?.height
+            ?: svg.documentViewBox?.height?.takeIf { it > 0f }
         return if (documentWidth != null && documentHeight != null) {
             (width * documentHeight / documentWidth).roundToInt().coerceAtLeast(1)
         } else {
