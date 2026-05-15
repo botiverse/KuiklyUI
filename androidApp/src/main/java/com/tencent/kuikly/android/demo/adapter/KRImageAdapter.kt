@@ -89,10 +89,10 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
                     callback.invoke(BitmapDrawable(context.resources, bitmap))
                 }
             } catch (e: Exception) {
-                Log.d("ECHRImageAdapter", "loadSvg: $e")
+                Log.d(TAG, "loadSvg: $e")
                 callback.invoke(null)
             } catch (e: OutOfMemoryError) {
-                Log.d("ECHRImageAdapter", "loadSvg oom happen: $e")
+                Log.d(TAG, "OutOfMemoryError occurred during SVG loading: $e")
                 callback.invoke(null)
             }
         }
@@ -218,12 +218,12 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
                         imageLoadOption.requestHeight
                     )
                 } catch (e: ArithmeticException) { // 偶现报除以0，可能是inSampleSize超过int的范围溢出了。这里catch兜底使用原始inSampleSize
-                    Log.d("ECHRImageAdapter", "loadFromBase64: $e")
+                    Log.d(TAG, "loadFromBase64: $e")
                 }
                 val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
                 callback.invoke(BitmapDrawable(Resources.getSystem(), bitmap))
             } catch (e: OutOfMemoryError) {
-                Log.d("ECHRImageAdapter", "oom happen: $e")
+                Log.d(TAG, "OutOfMemoryError occurred during Base64 image loading: $e")
             }
         }
     }
@@ -264,6 +264,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
     }
 
     companion object {
+        private const val TAG = "KRImageAdapter"
         private const val DEFAULT_SVG_SIZE = 100
     }
 
