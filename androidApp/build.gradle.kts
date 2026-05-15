@@ -47,6 +47,7 @@ dependencies {
     implementation(Dependencies.androidXCoreKtx)
 
     implementation("com.github.bumptech.glide:glide:4.12.0") // Glide主库，确保这里的版本是最新的
+    implementation("com.caverock:androidsvg-aar:1.4")
     annotationProcessor("com.github.bumptech.glide:compiler:4.12.0") // Glide注解处理
     implementation("com.tencent.tav:libpag:4.1.49-noffavc")
     implementation("com.google.android.exoplayer:exoplayer:2.16.1")

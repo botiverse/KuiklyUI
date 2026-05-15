@@ -19,6 +19,7 @@ import android.content.Context
 import android.content.res.Resources
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.util.Base64
@@ -28,10 +29,14 @@ import com.bumptech.glide.Glide
 import com.bumptech.glide.RequestBuilder
 import com.bumptech.glide.request.target.CustomTarget
 import com.bumptech.glide.request.transition.Transition
+import com.caverock.androidsvg.SVG
 import com.tencent.kuikly.android.demo.KRApplication
 import com.tencent.kuikly.core.render.android.KuiklyRenderViewContext
 import com.tencent.kuikly.core.render.android.adapter.HRImageLoadOption
 import com.tencent.kuikly.core.render.android.adapter.IKRImageAdapter
+import java.io.ByteArrayInputStream
+import java.net.URL
+import java.net.URLDecoder
 import kotlin.math.roundToInt
 
 /**
@@ -43,7 +48,9 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         imageLoadOption: HRImageLoadOption,
         callback: (drawable: Drawable?) -> Unit,
     ) {
-        if (imageLoadOption.isBase64()) {
+        if (imageLoadOption.isSvg()) {
+            loadSvg(imageLoadOption, callback)
+        } else if (imageLoadOption.isBase64()) {
             loadFromBase64(imageLoadOption, callback)
         } else if (imageLoadOption.isWebUrl() || imageLoadOption.isAssets() || imageLoadOption.isFile()) {
             // http/assets/file 图片使用 glide 加载
@@ -63,6 +70,78 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         drawable: Drawable
     ): Float {
         return drawable.intrinsicHeight.toFloat()
+    }
+
+
+    private fun loadSvg(
+        imageLoadOption: HRImageLoadOption,
+        callback: (drawable: Drawable?) -> Unit,
+    ) {
+        execOnSubThread {
+            try {
+                openSvgInputStream(imageLoadOption).use { inputStream ->
+                    val svg = SVG.getFromInputStream(inputStream)
+                    val bitmapWidth = resolveSvgWidth(svg, imageLoadOption)
+                    val bitmapHeight = resolveSvgHeight(svg, imageLoadOption, bitmapWidth)
+                    svg.setDocumentWidth(bitmapWidth.toFloat())
+                    svg.setDocumentHeight(bitmapHeight.toFloat())
+                    val bitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
+                    svg.renderToCanvas(Canvas(bitmap))
+                    callback.invoke(BitmapDrawable(context.resources, bitmap))
+                }
+            } catch (throwable: Throwable) {
+                Log.d("ECHRImageAdapter", "loadSvg: $throwable")
+                callback.invoke(null)
+            }
+        }
+    }
+
+    private fun openSvgInputStream(imageLoadOption: HRImageLoadOption) = when {
+        imageLoadOption.isBase64() -> {
+            val data = imageLoadOption.src.substringAfter(",")
+            val bytes = if (imageLoadOption.src.substringBefore(",").contains(";base64")) {
+                Base64.decode(data, Base64.DEFAULT)
+            } else {
+                URLDecoder.decode(data, "UTF-8").toByteArray(Charsets.UTF_8)
+            }
+            ByteArrayInputStream(bytes)
+        }
+        imageLoadOption.isAssets() -> {
+            val assetPath = imageLoadOption.src.substring(HRImageLoadOption.SCHEME_ASSETS.length)
+            context.assets.open(assetPath)
+        }
+        else -> URL(imageLoadOption.src).openStream()
+    }
+
+    private fun resolveSvgWidth(svg: SVG, imageLoadOption: HRImageLoadOption): Int {
+        if (imageLoadOption.needResize && imageLoadOption.requestWidth > 0) {
+            return imageLoadOption.requestWidth
+        }
+        return svg.documentWidth.takeIf { it > 0f }?.roundToInt()
+            ?: svg.documentViewBox?.width?.roundToInt()
+            ?: imageLoadOption.requestWidth.takeIf { it > 0 }
+            ?: DEFAULT_SVG_SIZE
+    }
+
+    private fun resolveSvgHeight(svg: SVG, imageLoadOption: HRImageLoadOption, width: Int): Int {
+        if (imageLoadOption.needResize && imageLoadOption.requestHeight > 0) {
+            return imageLoadOption.requestHeight
+        }
+        val height = svg.documentHeight.takeIf { it > 0f }?.roundToInt()
+            ?: svg.documentViewBox?.height?.roundToInt()
+            ?: imageLoadOption.requestHeight.takeIf { it > 0 }
+        if (height != null) {
+            return height
+        }
+        val documentWidth = svg.documentWidth.takeIf { it > 0f }
+            ?: svg.documentViewBox?.width
+        val documentHeight = svg.documentHeight.takeIf { it > 0f }
+            ?: svg.documentViewBox?.height
+        return if (documentWidth != null && documentHeight != null && documentWidth > 0f) {
+            (width * documentHeight / documentWidth).roundToInt().coerceAtLeast(1)
+        } else {
+            DEFAULT_SVG_SIZE
+        }
     }
 
     private fun requestImage(
@@ -168,6 +247,19 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         } else {
             1
         }
+    }
+
+
+    private fun HRImageLoadOption.isSvg(): Boolean {
+        if (src.startsWith(SCHEME_BASE64) && src.substringBefore(",").contains("image/svg+xml")) {
+            return true
+        }
+        val path = src.substringBefore("?").substringBefore("#")
+        return path.endsWith(".svg", ignoreCase = true)
+    }
+
+    companion object {
+        private const val DEFAULT_SVG_SIZE = 100
     }
 
 }
