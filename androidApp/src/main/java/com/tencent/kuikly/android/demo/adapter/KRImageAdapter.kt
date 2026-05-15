@@ -36,6 +36,7 @@ import com.tencent.kuikly.core.render.android.KuiklyRenderViewContext
 import com.tencent.kuikly.core.render.android.adapter.HRImageLoadOption
 import com.tencent.kuikly.core.render.android.adapter.IKRImageAdapter
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.net.URL
 import kotlin.math.roundToInt
 
@@ -119,11 +120,37 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         require(protocol == "http" || protocol == "https" || protocol == "file") {
             "Unsupported SVG URL protocol"
         }
+        require(protocol == "file" || !host.isNullOrBlank()) {
+            "SVG network URL must include a host"
+        }
         openConnection().run {
             connectTimeout = URL_CONNECTION_TIMEOUT_MS
             readTimeout = URL_CONNECTION_TIMEOUT_MS
-            getInputStream()
+            if (contentLengthLong > MAX_SVG_SOURCE_BYTES) {
+                throw IllegalArgumentException("SVG source is too large")
+            }
+            getInputStream().use { inputStream ->
+                ByteArrayInputStream(inputStream.readBytes(MAX_SVG_SOURCE_BYTES))
+            }
         }
+    }
+
+    private fun java.io.InputStream.readBytes(maxBytes: Long): ByteArray {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        val output = ByteArrayOutputStream()
+        var totalBytes = 0L
+        while (true) {
+            val read = read(buffer)
+            if (read == -1) {
+                break
+            }
+            totalBytes += read.toLong()
+            if (totalBytes > maxBytes) {
+                throw IllegalArgumentException("SVG source is too large")
+            }
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
     }
 
     private fun resolveSvgWidth(svg: SVG, imageLoadOption: HRImageLoadOption): Int {
@@ -250,7 +277,9 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
     }
 
     private fun decodeBase64ImageSource(src: String): ByteArray {
-        require(src.contains(",")) { "Invalid Base64 image source" }
+        require(src.contains(",")) {
+            "Base64 image source must contain a comma separator between metadata and data"
+        }
         val data = src.substringAfter(",")
         return if (src.substringBefore(",").contains(";base64")) {
             Base64.decode(data, Base64.DEFAULT)
@@ -297,8 +326,11 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
 
     companion object {
         private const val TAG = "KRImageAdapter"
+        // Pixels used when an SVG does not declare width, height, or viewBox.
         private const val DEFAULT_SVG_SIZE = 100
+        // Keep generated bitmaps within a safe size for typical Android devices.
         private const val MAX_SVG_BITMAP_SIZE = 4096
+        private const val MAX_SVG_SOURCE_BYTES = 10 * 1024 * 1024L
         private const val URL_CONNECTION_TIMEOUT_MS = 15000
     }
 
