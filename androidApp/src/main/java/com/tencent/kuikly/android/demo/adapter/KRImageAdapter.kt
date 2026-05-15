@@ -72,7 +72,6 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         return drawable.intrinsicHeight.toFloat()
     }
 
-
     private fun loadSvg(
         imageLoadOption: HRImageLoadOption,
         callback: (drawable: Drawable?) -> Unit,
@@ -89,8 +88,11 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
                     svg.renderToCanvas(Canvas(bitmap))
                     callback.invoke(BitmapDrawable(context.resources, bitmap))
                 }
-            } catch (throwable: Throwable) {
-                Log.d("ECHRImageAdapter", "loadSvg: $throwable")
+            } catch (e: Exception) {
+                Log.d("ECHRImageAdapter", "loadSvg: $e")
+                callback.invoke(null)
+            } catch (e: OutOfMemoryError) {
+                Log.d("ECHRImageAdapter", "loadSvg oom happen: $e")
                 callback.invoke(null)
             }
         }
@@ -117,8 +119,8 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         if (imageLoadOption.needResize && imageLoadOption.requestWidth > 0) {
             return imageLoadOption.requestWidth
         }
-        return svg.documentWidth.takeIf { it > 0f }?.roundToInt()
-            ?: svg.documentViewBox?.width?.roundToInt()
+        return svg.documentWidth.toPositiveInt()
+            ?: svg.documentViewBox?.width.toPositiveInt()
             ?: imageLoadOption.requestWidth.takeIf { it > 0 }
             ?: DEFAULT_SVG_SIZE
     }
@@ -127,8 +129,8 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         if (imageLoadOption.needResize && imageLoadOption.requestHeight > 0) {
             return imageLoadOption.requestHeight
         }
-        val height = svg.documentHeight.takeIf { it > 0f }?.roundToInt()
-            ?: svg.documentViewBox?.height?.roundToInt()
+        val height = svg.documentHeight.toPositiveInt()
+            ?: svg.documentViewBox?.height.toPositiveInt()
             ?: imageLoadOption.requestHeight.takeIf { it > 0 }
         if (height != null) {
             return height
@@ -142,6 +144,10 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         } else {
             DEFAULT_SVG_SIZE
         }
+    }
+
+    private fun Float?.toPositiveInt(): Int? {
+        return this?.roundToInt()?.takeIf { it > 0 }
     }
 
     private fun requestImage(
@@ -248,7 +254,6 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             1
         }
     }
-
 
     private fun HRImageLoadOption.isSvg(): Boolean {
         if (src.startsWith(SCHEME_BASE64) && src.substringBefore(",").contains("image/svg+xml")) {
