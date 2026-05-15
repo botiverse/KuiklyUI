@@ -22,6 +22,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import android.widget.ImageView
@@ -36,7 +37,6 @@ import com.tencent.kuikly.core.render.android.adapter.HRImageLoadOption
 import com.tencent.kuikly.core.render.android.adapter.IKRImageAdapter
 import java.io.ByteArrayInputStream
 import java.net.URL
-import java.net.URLDecoder
 import kotlin.math.roundToInt
 
 /**
@@ -84,8 +84,9 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             try {
                 openSvgInputStream(imageLoadOption).use { inputStream ->
                     val svg = SVG.getFromInputStream(inputStream)
-                    val bitmapWidth = resolveSvgWidth(svg, imageLoadOption)
-                    val bitmapHeight = resolveSvgHeight(svg, imageLoadOption, bitmapWidth)
+                    val resolvedWidth = resolveSvgWidth(svg, imageLoadOption)
+                    val resolvedHeight = resolveSvgHeight(svg, imageLoadOption, resolvedWidth)
+                    val (bitmapWidth, bitmapHeight) = limitSvgSize(resolvedWidth, resolvedHeight)
                     svg.setDocumentWidth(bitmapWidth.toFloat())
                     svg.setDocumentHeight(bitmapHeight.toFloat())
                     val bitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
@@ -110,8 +111,14 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             val assetPath = imageLoadOption.src.substring(HRImageLoadOption.SCHEME_ASSETS.length)
             context.assets.open(assetPath)
         }
-        imageLoadOption.isWebUrl() || imageLoadOption.isFile() -> URL(imageLoadOption.src).openStream()
+        imageLoadOption.isWebUrl() || imageLoadOption.isFile() -> openUrlInputStream(imageLoadOption.src)
         else -> throw IllegalArgumentException("Unsupported SVG image source")
+    }
+
+    private fun openUrlInputStream(src: String) = URL(src).openConnection().run {
+        connectTimeout = URL_CONNECTION_TIMEOUT_MS
+        readTimeout = URL_CONNECTION_TIMEOUT_MS
+        getInputStream()
     }
 
     private fun resolveSvgWidth(svg: SVG, imageLoadOption: HRImageLoadOption): Int {
@@ -147,6 +154,16 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
 
     private fun Float?.toPositiveInt(): Int? {
         return this?.roundToInt()?.takeIf { it > 0 }
+    }
+
+    private fun limitSvgSize(width: Int, height: Int): Pair<Int, Int> {
+        val maxDimension = maxOf(width, height)
+        if (maxDimension <= MAX_SVG_BITMAP_SIZE) {
+            return width to height
+        }
+        val scale = MAX_SVG_BITMAP_SIZE.toFloat() / maxDimension.toFloat()
+        return (width * scale).roundToInt().coerceAtLeast(1) to
+            (height * scale).roundToInt().coerceAtLeast(1)
     }
 
     private fun requestImage(
@@ -232,7 +249,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         return if (src.substringBefore(",").contains(";base64")) {
             Base64.decode(data, Base64.DEFAULT)
         } else {
-            URLDecoder.decode(data, "UTF-8").toByteArray(Charsets.UTF_8)
+            Uri.decode(data).toByteArray(Charsets.UTF_8)
         }
     }
 
@@ -274,6 +291,8 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
     companion object {
         private const val TAG = "KRImageAdapter"
         private const val DEFAULT_SVG_SIZE = 100
+        private const val MAX_SVG_BITMAP_SIZE = 4096
+        private const val URL_CONNECTION_TIMEOUT_MS = 15000
     }
 
 }
