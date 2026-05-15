@@ -36,7 +36,8 @@ import com.tencent.kuikly.core.render.android.KuiklyRenderViewContext
 import com.tencent.kuikly.core.render.android.adapter.HRImageLoadOption
 import com.tencent.kuikly.core.render.android.adapter.IKRImageAdapter
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
+import java.io.FilterInputStream
+import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.roundToInt
 
@@ -129,28 +130,8 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             if (contentLengthLong > MAX_SVG_SOURCE_BYTES) {
                 throw IllegalArgumentException("SVG source is too large")
             }
-            getInputStream().use { inputStream ->
-                ByteArrayInputStream(inputStream.readBytes(MAX_SVG_SOURCE_BYTES))
-            }
+            LimitedInputStream(this, getInputStream(), MAX_SVG_SOURCE_BYTES)
         }
-    }
-
-    private fun java.io.InputStream.readBytes(maxBytes: Long): ByteArray {
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        val output = ByteArrayOutputStream()
-        var totalBytes = 0L
-        while (true) {
-            val read = read(buffer)
-            if (read == -1) {
-                break
-            }
-            totalBytes += read.toLong()
-            if (totalBytes > maxBytes) {
-                throw IllegalArgumentException("SVG source is too large")
-            }
-            output.write(buffer, 0, read)
-        }
-        return output.toByteArray()
     }
 
     private fun resolveSvgWidth(svg: SVG, imageLoadOption: HRImageLoadOption): Int {
@@ -158,7 +139,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             return imageLoadOption.requestWidth
         }
         return svg.documentWidth.toPositiveInt()
-            ?: svg.documentViewBox?.width.toPositiveInt()
+            ?: (svg.documentViewBox?.width).toPositiveInt()
             ?: imageLoadOption.requestWidth.takeIf { it > 0 }
             ?: DEFAULT_SVG_SIZE
     }
@@ -168,7 +149,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             return imageLoadOption.requestHeight
         }
         val height = svg.documentHeight.toPositiveInt()
-            ?: svg.documentViewBox?.height.toPositiveInt()
+            ?: (svg.documentViewBox?.height).toPositiveInt()
             ?: imageLoadOption.requestHeight.takeIf { it > 0 }
         if (height != null) {
             return height
@@ -284,6 +265,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         return if (src.substringBefore(",").contains(";base64")) {
             Base64.decode(data, Base64.DEFAULT)
         } else {
+            // Supports data:image/svg+xml,<svg...> URI-encoded SVG sources.
             Uri.decode(data).toByteArray(Charsets.UTF_8)
         }
     }
@@ -332,6 +314,46 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         private const val MAX_SVG_BITMAP_SIZE = 4096
         private const val MAX_SVG_SOURCE_BYTES = 10 * 1024 * 1024L
         private const val URL_CONNECTION_TIMEOUT_MS = 15000
+    }
+
+    private class LimitedInputStream(
+        private val connection: java.net.URLConnection,
+        inputStream: java.io.InputStream,
+        private val maxBytes: Long,
+    ) : FilterInputStream(inputStream) {
+
+        private var bytesRead = 0L
+
+        override fun read(): Int {
+            val value = super.read()
+            if (value != -1) {
+                increaseBytesRead(1)
+            }
+            return value
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            val read = super.read(buffer, offset, length)
+            if (read > 0) {
+                increaseBytesRead(read)
+            }
+            return read
+        }
+
+        override fun close() {
+            try {
+                super.close()
+            } finally {
+                (connection as? HttpURLConnection)?.disconnect()
+            }
+        }
+
+        private fun increaseBytesRead(read: Int) {
+            bytesRead += read.toLong()
+            if (bytesRead > maxBytes) {
+                throw IllegalArgumentException("SVG source is too large")
+            }
+        }
     }
 
 }
