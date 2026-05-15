@@ -114,12 +114,12 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             context.assets.open(assetPath)
         }
         imageLoadOption.isWebUrl() || imageLoadOption.isFile() -> openUrlInputStream(imageLoadOption.src)
-        else -> throw IllegalArgumentException("Unsupported SVG image source")
+        else -> throw IllegalArgumentException("Unsupported SVG image source type")
     }
 
     private fun openUrlInputStream(src: String) = URL(src).run {
         require(protocol == "http" || protocol == "https" || protocol == "file") {
-            "Unsupported SVG URL protocol"
+            "Unsupported SVG URL protocol: $protocol (supported: http, https, file)"
         }
         require(protocol == "file" || !host.isNullOrBlank()) {
             "SVG network URL must include a host"
@@ -128,7 +128,9 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
             connectTimeout = URL_CONNECTION_TIMEOUT_MS
             readTimeout = URL_CONNECTION_TIMEOUT_MS
             if (contentLengthLong > MAX_SVG_SOURCE_BYTES) {
-                throw IllegalArgumentException("SVG source is too large")
+                throw IllegalArgumentException(
+                    "SVG source is too large: $contentLengthLong bytes (max: $MAX_SVG_SOURCE_BYTES bytes)"
+                )
             }
             LimitedInputStream(this, getInputStream(), MAX_SVG_SOURCE_BYTES)
         }
@@ -259,7 +261,8 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
 
     private fun decodeBase64ImageSource(src: String): ByteArray {
         require(src.contains(",")) {
-            "Base64 image source must contain a comma separator between metadata and data"
+            "Base64 image source must contain a comma separator between metadata and data: " +
+                src.take(DATA_URI_METADATA_PREVIEW_LENGTH)
         }
         val data = src.substringAfter(",")
         return if (src.substringBefore(",").contains(";base64")) {
@@ -314,6 +317,7 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         private const val MAX_SVG_BITMAP_SIZE = 4096
         private const val MAX_SVG_SOURCE_BYTES = 10 * 1024 * 1024L
         private const val URL_CONNECTION_TIMEOUT_MS = 15000
+        private const val DATA_URI_METADATA_PREVIEW_LENGTH = 50
     }
 
     private class LimitedInputStream(
@@ -351,7 +355,9 @@ class KRImageAdapter(val context: Context) : IKRImageAdapter {
         private fun increaseBytesRead(read: Int) {
             bytesRead += read.toLong()
             if (bytesRead > maxBytes) {
-                throw IllegalArgumentException("SVG source is too large")
+                throw IllegalArgumentException(
+                    "SVG source exceeds size limit: $bytesRead bytes (max: $maxBytes bytes)"
+                )
             }
         }
     }
