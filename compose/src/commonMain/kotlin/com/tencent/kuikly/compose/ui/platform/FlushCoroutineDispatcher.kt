@@ -20,7 +20,6 @@ import com.tencent.kuikly.compose.ui.createSynchronizedObject
 import com.tencent.kuikly.compose.ui.synchronized
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletionHandlerException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Delay
@@ -137,10 +136,6 @@ internal class FlushCoroutineDispatcher(
             task.run()
         } catch (_: CancellationException) {
             // Expected when a queued coroutine task has already been cancelled.
-        } catch (exception: CompletionHandlerException) {
-            if (exception.cause !is CancellationException) {
-                throw exception
-            }
         }
     }
 

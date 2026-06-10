@@ -112,7 +112,7 @@ static NSString * const kTurboDisplayTestPageName = @"TurboDisplayAppLoadTestPag
         [_delegator.performanceManager setMonitorType:KRMonitorType_ALL];
         _delegator.delegate = self;
         [_delegator addDelegatorLifeCycleListener:_delegatorProxy];
-        
+
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleKuiklyException:) name:kKuiklyFatalExceptionNotification object:nil];
     }
     return self;
@@ -132,7 +132,7 @@ static NSString * const kTurboDisplayTestPageName = @"TurboDisplayAppLoadTestPag
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    
+
     self.fd_prefersNavigationBarHidden = YES;
     self.view.backgroundColor = [UIColor whiteColor];
     [_delegator viewDidLoadWithView:self.view];
@@ -166,14 +166,14 @@ static NSString * const kTurboDisplayTestPageName = @"TurboDisplayAppLoadTestPag
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
     [_delegator viewDidDisappear];
-    
+
     KRPerformanceManager *manager = [_delegator performanceManager];
     NSDictionary *startTimes = manager.stageStartTimes;
     NSDictionary *durations = manager.stageDurations;
     KRMemoryMonitor *mem = [manager memoryMonitor];
     KRFPSMonitor *fps1 = [manager mainFPS];
     KRFPSMonitor *fps2 = [manager kotlinFPS];
-    
+
     int m = [mem avgIncrementMemory] / 1024 / 1024;
     float fps11 = fps1.avgFPS;
     float fps22 = fps2.avgFPS;
@@ -200,9 +200,9 @@ static NSString * const kTurboDisplayTestPageName = @"TurboDisplayAppLoadTestPag
 
 - (void)onPageLoadComplete:(BOOL)isSucceed error:(NSError *)error mode:(KuiklyContextMode)mode {
     if (error) {
-        
+
     }
-    
+
     id<KRPerformanceDataProtocol> performance = _delegator.performanceManager;
     // 获取performance相关信息
     NSDictionary *data = [performance performanceData];
@@ -213,7 +213,7 @@ static NSString * const kTurboDisplayTestPageName = @"TurboDisplayAppLoadTestPag
 
 - (NSDictionary *)p_mergeExtParamsWithOriditalParam:(NSDictionary *)pageParam {
     NSMutableDictionary *mParam = [(pageParam ?: @{}) mutableCopy];
- 
+
     return mParam;
 }
 
@@ -274,9 +274,21 @@ static NSString * const kTurboDisplayTestPageName = @"TurboDisplayAppLoadTestPag
     //    [config enableAutoUpdateTurboDisplay];
     //    [config disablePersistentRealTree];
         return config;
-      
+
     }
     return nil;
+}
+
+
+/// 控制 Native -> Kotlin 事件是否以同步方式发送，避免事件异步派发后晚于当前原生布局/上屏时机生效。
+/// 典型场景：页面旋转、分屏或宿主容器尺寸突变时，可对 `rootViewSizeDidChanged` 返回 YES，避免尺寸变化晚一帧生效导致白屏。
+- (BOOL)syncSendEvent:(NSString *)event {
+    // 若页面尺寸发生变化时，出现白屏，可恢复以下被注释的代码
+    if ([event isEqualToString:@"rootViewSizeDidChanged"]) {
+        return YES;
+    }
+
+    return NO;
 }
 
 

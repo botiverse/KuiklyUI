@@ -63,7 +63,7 @@
 - (void)addTaskToMainQueueWithTask:(dispatch_block_t)taskBlock {
     KR_ASSERT_CONTEXT_HTREAD;
     if (!_mainThreadTasksOnContextQueue) {
-        
+
         _mainThreadTasksOnContextQueue = [[NSMutableArray alloc] init];
     }
     [_mainThreadTasksOnContextQueue addObject:taskBlock];
@@ -77,6 +77,15 @@
     if (self.needSyncMainQueueTasksBlock) {
         self.needSyncMainQueueTasksBlock();
         self.needSyncMainQueueTasksBlock = nil;
+    }
+}
+
+- (void)performMainThreadTaskWaitToSyncBlockIfNeed {
+    NSAssert([NSThread isMainThread], @"performMainThreadTaskWaitToSyncBlockIfNeed must be called on main thread");
+    dispatch_block_t block = self.mainThreadTaskWaitToSyncBlock;
+    self.mainThreadTaskWaitToSyncBlock = nil;
+    if (block) {
+        block();
     }
 }
 /*
@@ -107,32 +116,43 @@
         KR_WEAK_SELF
         self.needSyncMainQueueTasksBlock = ^{
             KR_STRONG_SELF_RETURN_IF_NIL
-           // 同步主线程任务前，需要告诉kotlin侧 去 layoutIfNeed, 避免viewFrame设置时机和创建view时机不同步
+            // 同步主线程任务前，需要告诉kotlin侧 去 layoutIfNeed, 避免viewFrame设置时机和创建view时机不同步
             [strongSelf p_dispatchWillPerformUITasksDelegator];
             NSArray *tasks = weakSelf.mainThreadTasksOnContextQueue;
             weakSelf.mainThreadTasksOnContextQueue = nil;
             [weakSelf.threadLock threadSafeInBlock:^{
-            [weakSelf.mainThreadTasks addObjectsFromArray:tasks ?: [NSArray new]];
-         }];
-        [KuiklyRenderThreadManager performOnMainQueueWithTask:^{
-            KR_STRONG_SELF_RETURN_IF_NIL
-            __block NSArray* mainThreadTasks = nil;
-            [strongSelf.threadLock threadSafeInBlock:^{
-                mainThreadTasks = [weakSelf.mainThreadTasks copy];
-                [weakSelf.mainThreadTasks removeAllObjects];
+                [weakSelf.mainThreadTasks addObjectsFromArray:tasks ?: [NSArray new]];
             }];
-            strongSelf.performingMainQueueTask = YES;
-            for (dispatch_block_t task in (mainThreadTasks ?: [NSArray new])) {
-                task();
+
+            dispatch_block_t uiTaskBlock = ^{
+
+                KR_STRONG_SELF_RETURN_IF_NIL
+                __block NSArray* mainThreadTasks = nil;
+                [strongSelf.threadLock threadSafeInBlock:^{
+                    mainThreadTasks = [weakSelf.mainThreadTasks copy];
+                    [weakSelf.mainThreadTasks removeAllObjects];
+                }];
+                strongSelf.performingMainQueueTask = YES;
+                for (dispatch_block_t task in (mainThreadTasks ?: [NSArray new])) {
+                    task();
+                }
+                strongSelf.performingMainQueueTask = NO;
+                [strongSelf p_performTaskAfterViewDidLoadOnOnce];
+            };
+
+
+            if (weakSelf.mainThreadTaskWaitToSyncBlock != nil) {
+                // sync 事件场景：不 dispatch，存到闭包里等主线程恢复后立即执行
+                weakSelf.mainThreadTaskWaitToSyncBlock = uiTaskBlock;
+            } else {
+                // 普通场景：走原来的 dispatch 路径
+                [KuiklyRenderThreadManager performOnMainQueueWithTask:uiTaskBlock sync:[NSThread isMainThread]];
             }
-            strongSelf.performingMainQueueTask = NO;
-            [strongSelf p_performTaskAfterViewDidLoadOnOnce];
-          } sync:[NSThread isMainThread]];
-    };
-    [KuiklyRenderThreadManager performOnContextQueueWithBlock:^{
-        [weakSelf performSyncMainQueueTasksBlockIfNeed];
-    }];
-  }
+        };
+        [KuiklyRenderThreadManager performOnContextQueueWithBlock:^{
+            [weakSelf performSyncMainQueueTasksBlockIfNeed];
+        }];
+    }
 }
 
 // 分发代理
@@ -163,7 +183,7 @@
     } else {
         dispatch_async(dispatch_get_main_queue(), block);
     }
-    
+
 }
 
 @end
