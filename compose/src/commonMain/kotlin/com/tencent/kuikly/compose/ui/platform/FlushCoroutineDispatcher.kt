@@ -20,6 +20,7 @@ import com.tencent.kuikly.compose.ui.createSynchronizedObject
 import com.tencent.kuikly.compose.ui.synchronized
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletionHandlerException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Delay
@@ -91,7 +92,7 @@ internal class FlushCoroutineDispatcher(
                 immediateTasks = tmp
             }
 
-            immediateTasksSwap.forEach(Runnable::run)
+            immediateTasksSwap.forEach(::runTaskSafely)
             immediateTasksSwap.clear()
         }
     }
@@ -116,13 +117,7 @@ internal class FlushCoroutineDispatcher(
                 immediateTasks = tmp
             }
 
-            immediateTasksSwap.forEach { task ->
-                try {
-                    task.run()
-                } catch (_: CancellationException) {
-                    // Expected during shutdown — the task's coroutine was already cancelled.
-                }
-            }
+            immediateTasksSwap.forEach(::runTaskSafely)
             immediateTasksSwap.clear()
         }
     }
@@ -134,6 +129,18 @@ internal class FlushCoroutineDispatcher(
             body()
         } finally {
             isPerformingRun = false
+        }
+    }
+
+    private fun runTaskSafely(task: Runnable) {
+        try {
+            task.run()
+        } catch (_: CancellationException) {
+            // Expected when a queued coroutine task has already been cancelled.
+        } catch (exception: CompletionHandlerException) {
+            if (exception.cause !is CancellationException) {
+                throw exception
+            }
         }
     }
 

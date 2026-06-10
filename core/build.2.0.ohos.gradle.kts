@@ -55,7 +55,7 @@ kotlin {
             includeDirs(file("src/ohosArm64Main/ohosInterop/include"))
 
             // Add HarmonyOS SDK include paths (Windows only)
-            if (System.getProperty("os.name").lowercase().contains("windows")) {
+            if (System.getProperty("os.name").toLowerCase().contains("windows")) {
                 val ohosSdkHome = System.getenv("OHOS_SDK_HOME")
                 if (!ohosSdkHome.isNullOrEmpty()) {
                     includeDirs(
