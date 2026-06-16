@@ -36,10 +36,11 @@ import com.tencent.kuikly.compose.ui.util.fastAny
 import com.tencent.kuikly.compose.ui.util.fastForEach
 import com.tencent.kuikly.compose.platform.GlobalTapManager
 import com.tencent.kuikly.compose.platform.TapEventType
+import kotlin.concurrent.Volatile
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
 
 /**
  * Receiver scope for [detectTapGestures]'s `onPress` lambda. This offers
@@ -371,35 +372,38 @@ internal class PressGestureScopeImpl(
 ) : PressGestureScope, Density by density {
     private var isReleased = false
     private var isCanceled = false
-    private val mutex = Mutex(locked = false)
+    @Volatile
+    private var releaseSignal = CompletableDeferred(Unit)
 
     /**
      * Called when a gesture has been canceled.
      */
     fun cancel() {
-        isCanceled = true
-        if (mutex.isLocked) {
-            mutex.unlock()
+        if (isCanceled || isReleased) {
+            return
         }
+        isCanceled = true
+        releaseSignal.complete(Unit)
     }
 
     /**
      * Called when all pointers are up.
      */
     fun release() {
-        isReleased = true
-        if (mutex.isLocked) {
-            mutex.unlock()
+        if (isCanceled || isReleased) {
+            return
         }
+        isReleased = true
+        releaseSignal.complete(Unit)
     }
 
     /**
      * Called when a new gesture has started.
      */
     suspend fun reset() {
-        mutex.lock()
         isReleased = false
         isCanceled = false
+        releaseSignal = CompletableDeferred()
     }
 
     override suspend fun awaitRelease() {
@@ -410,8 +414,7 @@ internal class PressGestureScopeImpl(
 
     override suspend fun tryAwaitRelease(): Boolean {
         if (!isReleased && !isCanceled) {
-            mutex.lock()
-            mutex.unlock()
+            releaseSignal.await()
         }
         return isReleased
     }
