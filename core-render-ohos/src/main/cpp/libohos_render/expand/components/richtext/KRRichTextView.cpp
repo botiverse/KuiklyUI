@@ -198,6 +198,14 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
     auto *drawingHandle = reinterpret_cast<OH_Drawing_Canvas *>(OH_ArkUI_DrawContext_GetCanvas(drawContext));
     auto frameWidth = GetFrame().width;
     bool needReLayout = false;
+    // [kmp#161 experimental, do NOT submit as formal fix]
+    // 首次绘制时 last_draw_frame_width_ == -1.0，原逻辑不会进入 re-layout 分支。
+    // 这里在 first-draw 上强制 re-layout，作为 Path 1 的对比实验，验证「first-draw
+    // relayout 是否能减少『paragraph not formatted』warning 次数」。如果对比实验
+    // 能消除大部分 warning，再讨论是否改成正式修复。
+    if (last_draw_frame_width_ < 0) {
+        needReLayout = true;
+    }
     if (last_draw_frame_width_ > 0 && fabs(last_draw_frame_width_ - frameWidth) > 0.01) {
         needReLayout = true;
     }
