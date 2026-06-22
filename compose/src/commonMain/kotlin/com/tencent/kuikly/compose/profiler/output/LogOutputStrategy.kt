@@ -21,7 +21,6 @@ import com.tencent.kuikly.compose.profiler.RecompositionFrameEndEvent
 import com.tencent.kuikly.compose.profiler.RecompositionFrameStartEvent
 import com.tencent.kuikly.compose.profiler.RecompositionOutputStrategy
 import com.tencent.kuikly.compose.profiler.RecompositionReport
-import com.tencent.kuikly.core.log.KLog
 
 /**
  * 日志输出策略。
@@ -128,19 +127,11 @@ class LogOutputStrategy(
     }
 
     private fun logDebug(message: String) {
-        safeKLog(message) { KLog.d(TAG, message) }
+        profilerLogDebug(TAG, message)
     }
 
     private fun logInfo(message: String) {
-        safeKLog(message) { KLog.i(TAG, message) }
-    }
-
-    private inline fun safeKLog(message: String, block: () -> Unit) {
-        try {
-            block()
-        } catch (_: Throwable) {
-            println("[KLog][$TAG]:$message")
-        }
+        profilerLogInfo(TAG, message)
     }
 
     private fun indentStr(level: Int): String = "  ".repeat(level)
@@ -160,3 +151,7 @@ class LogOutputStrategy(
         return "$intPart.$fracPart"
     }
 }
+
+internal expect fun profilerLogDebug(tag: String, message: String)
+
+internal expect fun profilerLogInfo(tag: String, message: String)
