@@ -51,8 +51,6 @@ import com.tencent.kuikly.core.render.android.css.ktx.toPxF
 import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
 import org.json.JSONObject
-import kotlin.math.ceil
-import kotlin.math.floor
 import kotlin.math.max
 
 /**
@@ -451,8 +449,9 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
         fm: Paint.FontMetricsInt
     ) {
         val additional: Int = height - (-fm.top + fm.bottom)
-        fm.top -= ceil((additional / 2.0f).toDouble()).toInt()
-        fm.bottom += floor((additional / 2.0f).toDouble()).toInt()
+        val topExtra = additional / 2
+        fm.top -= topExtra
+        fm.bottom += additional - topExtra
         fm.ascent = fm.top
         fm.descent = fm.bottom
     }

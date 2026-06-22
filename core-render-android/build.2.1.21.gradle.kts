@@ -79,4 +79,5 @@ dependencies {
     compileOnly(project(":core"))
     implementation("androidx.appcompat:appcompat:1.4.2")
     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
+    testImplementation("junit:junit:4.13.2")
 }
