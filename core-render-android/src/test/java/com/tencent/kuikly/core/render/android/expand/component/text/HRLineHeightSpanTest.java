@@ -38,4 +38,21 @@ public class HRLineHeightSpanTest {
         assertEquals(7, metrics.descent);
         assertEquals(22, metrics.bottom - metrics.top);
     }
+
+    @Test
+    public void lineHeightCentersAroundGlyphMetricsWhenFontPaddingDiffers() {
+        Paint.FontMetricsInt metrics = new Paint.FontMetricsInt();
+        metrics.top = -18;
+        metrics.ascent = -13;
+        metrics.descent = 4;
+        metrics.bottom = 6;
+
+        new HRLineHeightSpan(22).chooseHeight("", 0, 0, 0, 0, metrics);
+
+        assertEquals(-15, metrics.top);
+        assertEquals(-15, metrics.ascent);
+        assertEquals(7, metrics.bottom);
+        assertEquals(7, metrics.descent);
+        assertEquals(22, metrics.bottom - metrics.top);
+    }
 }

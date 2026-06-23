@@ -448,12 +448,12 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
         lineHeight: Int,
         fm: Paint.FontMetricsInt
     ) {
-        val additional: Int = height - (-fm.top + fm.bottom)
-        val topExtra = additional / 2
-        fm.top -= topExtra
-        fm.bottom += additional - topExtra
-        fm.ascent = fm.top
-        fm.descent = fm.bottom
+        val additional: Int = height - (fm.descent - fm.ascent)
+        val ascentExtra = additional / 2
+        fm.ascent -= ascentExtra
+        fm.descent += additional - ascentExtra
+        fm.top = fm.ascent
+        fm.bottom = fm.descent
     }
 }
 
