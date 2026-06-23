@@ -19,6 +19,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -438,7 +439,16 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
     }
 }
 
-class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
+class HRLineHeightSpan(internal val height: Int) : LineHeightSpan, LineHeightSpan.WithDensity {
+
+    internal companion object {
+        fun applyCenteredLineHeight(height: Int, fm: Paint.FontMetricsInt, center: Int) {
+            fm.ascent = center - height / 2
+            fm.descent = fm.ascent + height
+            fm.top = fm.ascent
+            fm.bottom = fm.descent
+        }
+    }
 
     override fun chooseHeight(
         text: CharSequence?,
@@ -448,12 +458,43 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
         lineHeight: Int,
         fm: Paint.FontMetricsInt
     ) {
-        val additional: Int = height - (fm.descent - fm.ascent)
-        val ascentExtra = additional / 2
-        fm.ascent -= ascentExtra
-        fm.descent += additional - ascentExtra
-        fm.top = fm.ascent
-        fm.bottom = fm.descent
+        applyCenteredLineHeight(fm, (fm.ascent + fm.descent) / 2)
+    }
+
+    override fun chooseHeight(
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        spanstartv: Int,
+        lineHeight: Int,
+        fm: Paint.FontMetricsInt,
+        paint: TextPaint
+    ) {
+        val visualCenter = glyphVisualCenter(text, start, end, paint)
+            ?: ((fm.ascent + fm.descent) / 2)
+        applyCenteredLineHeight(fm, visualCenter)
+    }
+
+    private fun applyCenteredLineHeight(fm: Paint.FontMetricsInt, center: Int) {
+        applyCenteredLineHeight(height, fm, center)
+    }
+
+    private fun glyphVisualCenter(
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        paint: TextPaint
+    ): Int? {
+        if (text == null || start >= end) {
+            return null
+        }
+        val bounds = Rect()
+        paint.getTextBounds(text, start, end, bounds)
+        return if (bounds.isEmpty) {
+            null
+        } else {
+            (bounds.top + bounds.bottom) / 2
+        }
     }
 }
 
