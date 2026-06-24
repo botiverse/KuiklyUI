@@ -51,6 +51,7 @@ import com.tencent.kuikly.core.render.android.css.ktx.toColor
 import com.tencent.kuikly.core.render.android.css.ktx.toPxF
 import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
+import com.tencent.kuikly.core.views.TextConst
 import org.json.JSONObject
 import kotlin.math.max
 
@@ -203,6 +204,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         if (spanProps.backgroundImage.isNotEmpty()) {
             textSpans.add(LinearGradientForegroundSpan(spanProps.backgroundImage, layoutSizeGetter))
         }
+        if (spanProps.slockInlineCode) {
+            textSpans.add(KRSlockInlineCodeSpan())
+        }
 
         spanProps.textShadow?.let {
             if (!it.isEmpty()) {
@@ -251,6 +255,7 @@ class TextSpanProps(
     val textDecoration: String
     val lineHeight: Float
     val backgroundImage: String
+    val slockInlineCode: Boolean
     var textShadow: BoxShadow? = null
     var useDpFontSizeDim = false
 
@@ -297,6 +302,8 @@ class TextSpanProps(
             defaultProps.lineHeight
         }
         backgroundImage = spanValue.optString(KRTextProps.PROP_KEY_BACKGROUND_IMAGE, defaultProps.backgroundImage)
+        slockInlineCode = spanValue.optInt(TextConst.SLOCK_INLINE_CODE, 0) == 1 ||
+            spanValue.optBoolean(TextConst.SLOCK_INLINE_CODE, false)
         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
         textShadow = BoxShadow(textShadowStr, kuiklyContext)
         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
@@ -329,6 +336,8 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
         return "{$index, $start, $end}"
     }
 }
+
+class KRSlockInlineCodeSpan
 
 /**
  * 字重span

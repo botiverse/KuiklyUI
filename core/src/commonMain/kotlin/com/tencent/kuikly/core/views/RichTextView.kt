@@ -412,6 +412,11 @@ open class TextSpan : TextAttr(), ISpan {
     internal var text: String = ""
     private var clickHandlerFn: ((ClickParams) -> Unit)? = null
 
+    fun slockInlineCode(enabled: Boolean = true): TextSpan {
+        setProp(TextConst.SLOCK_INLINE_CODE, if (enabled) 1 else 0)
+        return this
+    }
+
     /**
      * 单击事件的定义
      * @param handler 事件处理函数

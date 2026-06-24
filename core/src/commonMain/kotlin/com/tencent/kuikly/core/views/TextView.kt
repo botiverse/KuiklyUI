@@ -553,6 +553,7 @@ object TextConst {
     const val STROKE_WIDTH = "strokeWidth"
     const val TEXT_POST_PROCESSOR = "textPostProcessor"
     const val TEXT_USE_DP_FONT_SIZE_DIM = "useDpFontSizeDim"
+    const val SLOCK_INLINE_CODE = "slockInlineCode"
 
     const val SHADOW_METHOD_IS_LINE_BREAK_MARGIN = "isLineBreakMargin"
     const val PLACEHOLDER = "placeholder"

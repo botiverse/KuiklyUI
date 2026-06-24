@@ -53,6 +53,7 @@ import com.tencent.kuikly.core.views.TextAttr
 import com.tencent.kuikly.core.views.TextConst
 import com.tencent.kuikly.core.views.TextSpan
 
+private const val SLOCK_INLINE_CODE_ANNOTATION_TAG = "ai.slock.markdown.inlineCode"
 
 // Returns platform-specific default font size
 private fun TextAttr.defaultFontSize(): Float {
@@ -335,6 +336,15 @@ internal fun RichTextAttr.applyAnnotatedString(
         positions.add(range.end)
     }
 
+    // Slock fork-only inline-code marker. The Android RichText renderer uses this
+    // metadata span to draw old inline-code chrome from the final text layout.
+    val slockInlineCodeAnnotations =
+        annoText.getStringAnnotations(SLOCK_INLINE_CODE_ANNOTATION_TAG, 0, annoText.length)
+    slockInlineCodeAnnotations.forEach { range ->
+        positions.add(range.start)
+        positions.add(range.end)
+    }
+
     // Collect placeholder info and positions
     val (placeholders, _) = if (annoText.hasInlineContent()) {
         annoText.resolveInlineContent(inlineContent)
@@ -380,6 +390,10 @@ internal fun RichTextAttr.applyAnnotatedString(
                 annoText.spanStyles
                     .filter { range -> !(end <= range.start || start >= range.end) }
                     .forEach { range -> applySpanStyle(range.item, density) }
+
+                if (slockInlineCodeAnnotations.any { range -> !(end <= range.start || start >= range.end) }) {
+                    slockInlineCode()
+                }
 
                 // Apply ParagraphStyle
                 annoText.paragraphStyles

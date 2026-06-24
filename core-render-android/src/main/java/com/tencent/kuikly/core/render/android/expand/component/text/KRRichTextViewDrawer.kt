@@ -16,6 +16,7 @@
 package com.tencent.kuikly.core.render.android.expand.component.text
 
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
 import android.os.Build
@@ -28,8 +29,15 @@ import com.tencent.kuikly.core.render.android.expand.component.SelectionType
 import java.lang.ref.WeakReference
 import java.text.BreakIterator
 import java.util.Locale
+import kotlin.math.max
+import kotlin.math.min
 
 private const val INVALID_OFFSET = -1
+private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD84D
+private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
+private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 7f / 15f
+private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
+private const val SLOCK_INLINE_CODE_CORNER_RADIUS_RATIO = 2f / 15f
 
 /**
  * 富文本绘制器，封装 [Layout]，用于富文本视图的测量与绘制。
@@ -44,6 +52,16 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     private var selectionStart = -1
     private var selectionEnd = -1
     internal val hasSelection: Boolean get() = 0 <= selectionStart && selectionStart < selectionEnd
+    private val slockInlineCodeFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = SLOCK_INLINE_CODE_FILL_COLOR
+    }
+    private val slockInlineCodeBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1f
+        color = SLOCK_INLINE_CODE_BORDER_COLOR
+    }
+    private val slockInlineCodeRect = RectF()
 
     private val wordIterator by lazy(LazyThreadSafetyMode.NONE) {
         WordIterator(textLayout.text, 0, textLayout.text.length, Locale.getDefault())
@@ -67,7 +85,68 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
      * 将文本内容绘制到 [canvas]，对接到 [Layout.draw]。
      */
     fun draw(canvas: Canvas) {
+        drawSlockInlineCodeBackgrounds(canvas)
         textLayout.draw(canvas)
+    }
+
+    private fun drawSlockInlineCodeBackgrounds(canvas: Canvas) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRSlockInlineCodeSpan::class.java)
+        if (spans.isEmpty()) return
+
+        val paint = textLayout.paint
+        val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
+        val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
+        val radius = paint.textSize * SLOCK_INLINE_CODE_CORNER_RADIUS_RATIO
+        val fontMetrics = paint.fontMetrics
+
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+
+            val startLine = textLayout.getLineForOffset(start)
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val lineStart = textLayout.getLineStart(line)
+                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
+                val segmentStart = max(start, lineStart)
+                val segmentEnd = min(end, lineVisibleEnd)
+                if (segmentEnd <= segmentStart) continue
+
+                val startX = textLayout.getPrimaryHorizontal(segmentStart)
+                val endX = textLayout.getPrimaryHorizontal(segmentEnd)
+                val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+                val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+                val left = max(lineLeft, min(startX, endX) - horizontalPadding)
+                val right = min(lineRight, max(startX, endX) + horizontalPadding)
+                if (right <= left) continue
+
+                val baseline = textLayout.getLineBaseline(line).toFloat()
+                val top = max(
+                    textLayout.getLineTop(line).toFloat(),
+                    baseline + fontMetrics.ascent - verticalPadding
+                )
+                val bottom = min(
+                    textLayout.getLineBottom(line).toFloat(),
+                    baseline + fontMetrics.descent + verticalPadding
+                )
+                if (bottom <= top) continue
+
+                slockInlineCodeRect.set(left, top, right, bottom)
+                canvas.drawRoundRect(slockInlineCodeRect, radius, radius, slockInlineCodeFillPaint)
+                canvas.drawRoundRect(slockInlineCodeRect, radius, radius, slockInlineCodeBorderPaint)
+            }
+        }
+    }
+
+    private fun Layout.slockInlineCodeVisibleEnd(line: Int): Int {
+        val lineStart = getLineStart(line)
+        val ellipsisCount = getEllipsisCount(line)
+        if (ellipsisCount > 0) {
+            return (lineStart + getEllipsisStart(line)).coerceAtLeast(lineStart)
+        }
+        return getLineVisibleEnd(line)
     }
 
     internal fun setSelectionByCoordinate(
