@@ -53,6 +53,7 @@ import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
 import com.tencent.kuikly.core.views.TextConst
 import org.json.JSONObject
+import kotlin.math.ceil
 import kotlin.math.max
 
 /**
@@ -92,21 +93,24 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                         Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
                     )
                 }
-                spannedBuilder.append(buildSpannedString {
-                    // 记录 Span 对应的文字范围
-                    val spanStart = spannedBuilder.length
-                    val spanEnd = spannedBuilder.length + spanProps.text.length
-                    spanTextRanges.add(
-                        SpanTextRange(
-                            index,
-                            spanStart,
-                            spanEnd
-                        )
+                val spanStart = spannedBuilder.length
+                val spanText = spanProps.text
+                val spanEnd = spanStart + spanText.length
+                spanTextRanges.add(
+                    SpanTextRange(
+                        index,
+                        spanStart,
+                        spanEnd
                     )
+                )
+                spannedBuilder.append(buildSpannedString {
                     inSpans(spans) {
-                        append(spanProps.text)
+                        append(spanText)
                     }
                 })
+                if (spanProps is TextSpanProps && spanProps.slockInlineCode) {
+                    spannedBuilder.applySlockInlineCodeAtomicTextSpans(spanStart, spanEnd)
+                }
             }
         }
         if (textProps.richTextHeadIndent != 0) {
@@ -339,6 +343,91 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 }
 
 class KRSlockInlineCodeSpan
+
+private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: Int, end: Int) {
+    var index = start
+    while (index < end) {
+        if (this[index].isWhitespace()) {
+            index++
+            continue
+        }
+        val rangeStart = index
+        while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
+            index++
+        }
+        val textStart = index
+        while (index < end &&
+            !this[index].isWhitespace() &&
+            !this[index].isSlockInlineCodeBreakSeparator()
+        ) {
+            index++
+        }
+        var textLength = index - textStart
+        while (textLength in 1..2 &&
+            index < end &&
+            this[index].isSlockInlineCodeBreakSeparator()
+        ) {
+            val separatorStart = index
+            while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
+                index++
+            }
+            val nextTextStart = index
+            while (index < end &&
+                !this[index].isWhitespace() &&
+                !this[index].isSlockInlineCodeBreakSeparator()
+            ) {
+                index++
+            }
+            if (index <= nextTextStart) {
+                index = separatorStart
+                break
+            }
+            textLength = index - textStart
+        }
+        if (index > textStart) {
+            setSpan(
+                KRSlockInlineCodeAtomicTextSpan(),
+                rangeStart,
+                index,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+    }
+}
+
+private fun Char.isSlockInlineCodeBreakSeparator(): Boolean =
+    this == '/' || this == '\\' || this == '.' || this == '-' || this == ':'
+
+private class KRSlockInlineCodeAtomicTextSpan : ReplacementSpan() {
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int = if (text == null || start >= end) {
+        0
+    } else {
+        ceil((paint.measureText(text, start, end) + max(1f, paint.strokeWidth * 2f)).toDouble()).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text != null && start < end) {
+            canvas.drawText(text, start, end, x, y.toFloat(), paint)
+        }
+    }
+}
 
 /**
  * 字重span
