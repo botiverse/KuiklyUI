@@ -35,9 +35,9 @@ import kotlin.math.min
 private const val INVALID_OFFSET = -1
 private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD84D
 private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
-private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 7f / 15f
+private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
-private const val SLOCK_INLINE_CODE_CORNER_RADIUS_RATIO = 2f / 15f
+private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
 
 /**
  * 富文本绘制器，封装 [Layout]，用于富文本视图的测量与绘制。
@@ -97,8 +97,10 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         val paint = textLayout.paint
         val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
         val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
-        val radius = paint.textSize * SLOCK_INLINE_CODE_CORNER_RADIUS_RATIO
+        val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
+        val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
 
         spans.forEach { span ->
             val start = spanned.getSpanStart(span)
@@ -114,28 +116,34 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 val segmentEnd = min(end, lineVisibleEnd)
                 if (segmentEnd <= segmentStart) continue
 
-                val startX = textLayout.getPrimaryHorizontal(segmentStart)
-                val endX = textLayout.getPrimaryHorizontal(segmentEnd)
-                val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
-                val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
-                val left = max(lineLeft, min(startX, endX) - horizontalPadding)
-                val right = min(lineRight, max(startX, endX) + horizontalPadding)
+                val startX =
+                    if (segmentStart <= lineStart) {
+                        layoutLeft
+                    } else {
+                        textLayout.getPrimaryHorizontal(segmentStart)
+                    }
+                val endX =
+                    if (segmentEnd >= lineVisibleEnd) {
+                        textLayout.getLineRight(line)
+                    } else {
+                        textLayout.getPrimaryHorizontal(segmentEnd)
+                    }
+                val left = max(layoutLeft, min(startX, endX) - horizontalPadding)
+                val right = min(layoutRight, max(startX, endX) + horizontalPadding)
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
-                val top = max(
-                    textLayout.getLineTop(line).toFloat(),
-                    baseline + fontMetrics.ascent - verticalPadding
-                )
-                val bottom = min(
-                    textLayout.getLineBottom(line).toFloat(),
-                    baseline + fontMetrics.descent + verticalPadding
-                )
+                val textTop = baseline + fontMetrics.ascent - verticalPadding
+                val textBottom = baseline + fontMetrics.descent + verticalPadding
+                val height = max(textBottom - textTop, minHeight)
+                val centerY = (textTop + textBottom) / 2f
+                val top = centerY - height / 2f
+                val bottom = centerY + height / 2f
                 if (bottom <= top) continue
 
                 slockInlineCodeRect.set(left, top, right, bottom)
-                canvas.drawRoundRect(slockInlineCodeRect, radius, radius, slockInlineCodeFillPaint)
-                canvas.drawRoundRect(slockInlineCodeRect, radius, radius, slockInlineCodeBorderPaint)
+                canvas.drawRect(slockInlineCodeRect, slockInlineCodeFillPaint)
+                canvas.drawRect(slockInlineCodeRect, slockInlineCodeBorderPaint)
             }
         }
     }

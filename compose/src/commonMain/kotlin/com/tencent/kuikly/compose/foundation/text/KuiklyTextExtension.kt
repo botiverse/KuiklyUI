@@ -391,7 +391,7 @@ internal fun RichTextAttr.applyAnnotatedString(
                     .filter { range -> !(end <= range.start || start >= range.end) }
                     .forEach { range -> applySpanStyle(range.item, density) }
 
-                if (slockInlineCodeAnnotations.any { range -> !(end <= range.start || start >= range.end) }) {
+                if (slockInlineCodeAnnotations.any { range -> start >= range.start && end <= range.end }) {
                     slockInlineCode()
                 }
 
