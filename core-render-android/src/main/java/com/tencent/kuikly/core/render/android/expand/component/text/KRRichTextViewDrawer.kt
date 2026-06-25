@@ -40,7 +40,8 @@ private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
 private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 7f / 15f
 private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
-private const val SLOCK_INLINE_CODE_BORDER_WIDTH = 1f
+private const val SLOCK_INLINE_CODE_BORDER_WIDTH_DP = 1f
+private const val SLOCK_INLINE_CODE_BORDER_MIN_WIDTH = 2f
 
 /**
  * 富文本绘制器，封装 [Layout]，用于富文本视图的测量与绘制。
@@ -151,7 +152,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     }
 
     private fun Canvas.drawSlockInlineCodeBorder(left: Float, top: Float, right: Float, bottom: Float) {
-        val borderWidth = SLOCK_INLINE_CODE_BORDER_WIDTH
+        val borderWidth = max(SLOCK_INLINE_CODE_BORDER_MIN_WIDTH, textLayout.paint.density * SLOCK_INLINE_CODE_BORDER_WIDTH_DP)
         val borderLeft = floor(left)
         val borderTop = floor(top)
         val borderRight = ceil(right)
