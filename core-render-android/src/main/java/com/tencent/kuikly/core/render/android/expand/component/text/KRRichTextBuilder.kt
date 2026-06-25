@@ -53,7 +53,11 @@ import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
 import com.tencent.kuikly.core.views.TextConst
 import org.json.JSONObject
+import kotlin.math.ceil
 import kotlin.math.max
+
+private const val SLOCK_INLINE_CODE_EDGE_PADDING_RATIO = 7f / 15f
+private const val SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO = 4f / 15f
 
 /**
  * 富文本构造器
@@ -94,17 +98,40 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 }
                 spannedBuilder.append(buildSpannedString {
                     // 记录 Span 对应的文字范围
+                    val spanStart = spannedBuilder.length
+                    val spanEnd = spannedBuilder.length + spanProps.text.length
                     spanTextRanges.add(
                         SpanTextRange(
                             index,
-                            spannedBuilder.length,
-                            spannedBuilder.length + spanProps.text.length
+                            spanStart,
+                            spanEnd
                         )
                     )
                     inSpans(spans) {
                         append(spanProps.text)
                     }
                 })
+                if (spanProps is TextSpanProps && spanProps.slockInlineCode && spanProps.text.isNotEmpty()) {
+                    val spanEnd = spannedBuilder.length
+                    val spanStart = spanEnd - spanProps.text.length
+                    spannedBuilder.setSpan(
+                        KRSlockInlineCodeEdgePaddingSpan(
+                            padStart = true,
+                            padEnd = spanProps.text.length == 1
+                        ),
+                        spanStart,
+                        spanStart + 1,
+                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                    if (spanProps.text.length > 1) {
+                        spannedBuilder.setSpan(
+                            KRSlockInlineCodeEdgePaddingSpan(padStart = false, padEnd = true),
+                            spanEnd - 1,
+                            spanEnd,
+                            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                        )
+                    }
+                }
 
             }
         }
@@ -338,6 +365,50 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 }
 
 class KRSlockInlineCodeSpan
+
+private class KRSlockInlineCodeEdgePaddingSpan(
+    private val padStart: Boolean,
+    private val padEnd: Boolean
+) : ReplacementSpan() {
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int {
+        if (text == null) return 0
+        return ceil(paint.measureText(text, start, end) + startPadding(paint) + endPadding(paint)).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text == null) return
+        canvas.drawText(text, start, end, x + startPadding(paint), y.toFloat(), paint)
+    }
+
+    private fun startPadding(paint: Paint): Float {
+        return if (padStart) edgePadding(paint) else 0f
+    }
+
+    private fun endPadding(paint: Paint): Float {
+        return if (padEnd) edgePadding(paint) else 0f
+    }
+
+    private fun edgePadding(paint: Paint): Float {
+        return paint.textSize * (SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO)
+    }
+}
 
 /**
  * 字重span
