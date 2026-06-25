@@ -56,6 +56,9 @@ import org.json.JSONObject
 import kotlin.math.ceil
 import kotlin.math.max
 
+private const val SLOCK_INLINE_CODE_EDGE_PADDING_RATIO = 7f / 15f
+private const val SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO = 3f / 15f
+
 /**
  * 富文本构造器
  */
@@ -346,6 +349,7 @@ class KRSlockInlineCodeSpan
 
 private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: Int, end: Int) {
     var index = start
+    var firstAtom = true
     while (index < end) {
         if (this[index].isWhitespace()) {
             index++
@@ -385,12 +389,15 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
             textLength = index - textStart
         }
         if (index > textStart) {
+            val padStart = firstAtom
+            val padEnd = !hasSlockInlineCodeAtomAfter(index, end)
             setSpan(
-                KRSlockInlineCodeAtomicTextSpan(),
+                KRSlockInlineCodeAtomicTextSpan(padStart, padEnd),
                 rangeStart,
                 index,
                 Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
             )
+            firstAtom = false
         }
     }
 }
@@ -398,7 +405,32 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
 private fun Char.isSlockInlineCodeBreakSeparator(): Boolean =
     this == '/' || this == '\\' || this == '.' || this == '-' || this == ':'
 
-private class KRSlockInlineCodeAtomicTextSpan : ReplacementSpan() {
+private fun CharSequence.hasSlockInlineCodeAtomAfter(start: Int, end: Int): Boolean {
+    var index = start
+    while (index < end) {
+        if (this[index].isWhitespace()) {
+            index++
+            continue
+        }
+        while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
+            index++
+        }
+        val textStart = index
+        while (index < end &&
+            !this[index].isWhitespace() &&
+            !this[index].isSlockInlineCodeBreakSeparator()
+        ) {
+            index++
+        }
+        if (index > textStart) return true
+    }
+    return false
+}
+
+private class KRSlockInlineCodeAtomicTextSpan(
+    private val padStart: Boolean,
+    private val padEnd: Boolean
+) : ReplacementSpan() {
 
     override fun getSize(
         paint: Paint,
@@ -409,7 +441,9 @@ private class KRSlockInlineCodeAtomicTextSpan : ReplacementSpan() {
     ): Int = if (text == null || start >= end) {
         0
     } else {
-        ceil((paint.measureText(text, start, end) + max(1f, paint.strokeWidth * 2f)).toDouble()).toInt()
+        val textWidth = paint.measureText(text, start, end)
+        val strokePadding = max(1f, paint.strokeWidth * 2f)
+        ceil((textWidth + strokePadding + startPadding(paint) + endPadding(paint)).toDouble()).toInt()
     }
 
     override fun draw(
@@ -424,8 +458,20 @@ private class KRSlockInlineCodeAtomicTextSpan : ReplacementSpan() {
         paint: Paint
     ) {
         if (text != null && start < end) {
-            canvas.drawText(text, start, end, x, y.toFloat(), paint)
+            canvas.drawText(text, start, end, x + startPadding(paint), y.toFloat(), paint)
         }
+    }
+
+    private fun startPadding(paint: Paint): Float {
+        return if (padStart) edgePadding(paint) else 0f
+    }
+
+    private fun endPadding(paint: Paint): Float {
+        return if (padEnd) edgePadding(paint) else 0f
+    }
+
+    private fun edgePadding(paint: Paint): Float {
+        return paint.textSize * (SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO)
     }
 }
 

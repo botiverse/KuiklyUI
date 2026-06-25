@@ -37,7 +37,8 @@ import kotlin.math.min
 private const val INVALID_OFFSET = -1
 private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD84D
 private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
-private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 6f / 15f
+private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 7f / 15f
+private const val SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO = 3f / 15f
 private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
 private const val SLOCK_INLINE_CODE_BORDER_WIDTH_DP = 1f
@@ -100,11 +101,11 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
         val paint = textLayout.paint
         val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
+        val horizontalMargin = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO
         val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
         val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
         val layoutLeft = 0f
-        val layoutRight = textLayout.width.toFloat()
 
         spans.forEach { span ->
             val start = spanned.getSpanStart(span)
@@ -135,14 +136,14 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 val segmentLeft = min(startX, endX)
                 val segmentRight = max(startX, endX)
                 val left = if (segmentStart == start) {
-                    max(layoutLeft, segmentLeft - horizontalPadding)
+                    segmentLeft + horizontalMargin
                 } else {
-                    segmentLeft
+                    segmentLeft - horizontalPadding
                 }
                 val right = if (segmentEnd == end) {
-                    min(layoutRight, segmentRight + horizontalPadding)
+                    segmentRight - horizontalMargin
                 } else {
-                    segmentRight
+                    segmentRight + horizontalPadding
                 }
                 if (right <= left) continue
 
