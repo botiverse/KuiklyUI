@@ -29,6 +29,8 @@ import com.tencent.kuikly.core.render.android.expand.component.SelectionType
 import java.lang.ref.WeakReference
 import java.text.BreakIterator
 import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
@@ -57,9 +59,10 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         style = Paint.Style.FILL
         color = SLOCK_INLINE_CODE_FILL_COLOR
     }
-    private val slockInlineCodeBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val slockInlineCodeBorderPaint = Paint().apply {
         style = Paint.Style.FILL
         color = SLOCK_INLINE_CODE_BORDER_COLOR
+        isAntiAlias = false
     }
     private val slockInlineCodeRect = RectF()
 
@@ -149,10 +152,14 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     private fun Canvas.drawSlockInlineCodeBorder(left: Float, top: Float, right: Float, bottom: Float) {
         val borderWidth = SLOCK_INLINE_CODE_BORDER_WIDTH
-        drawRect(left, top, right, top + borderWidth, slockInlineCodeBorderPaint)
-        drawRect(left, bottom - borderWidth, right, bottom, slockInlineCodeBorderPaint)
-        drawRect(left, top, left + borderWidth, bottom, slockInlineCodeBorderPaint)
-        drawRect(right - borderWidth, top, right, bottom, slockInlineCodeBorderPaint)
+        val borderLeft = floor(left)
+        val borderTop = floor(top)
+        val borderRight = ceil(right)
+        val borderBottom = ceil(bottom)
+        drawRect(borderLeft, borderTop, borderRight, borderTop + borderWidth, slockInlineCodeBorderPaint)
+        drawRect(borderLeft, borderBottom - borderWidth, borderRight, borderBottom, slockInlineCodeBorderPaint)
+        drawRect(borderLeft, borderTop, borderLeft + borderWidth, borderBottom, slockInlineCodeBorderPaint)
+        drawRect(borderRight - borderWidth, borderTop, borderRight, borderBottom, slockInlineCodeBorderPaint)
     }
 
     private fun Layout.slockInlineCodeVisibleEnd(line: Int): Int {
