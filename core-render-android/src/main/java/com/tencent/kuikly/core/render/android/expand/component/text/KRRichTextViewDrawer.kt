@@ -38,7 +38,6 @@ private const val INVALID_OFFSET = -1
 private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD84D
 private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
 private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 7f / 15f
-private const val SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
 private const val SLOCK_INLINE_CODE_BORDER_WIDTH_DP = 1f
@@ -101,11 +100,11 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
         val paint = textLayout.paint
         val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
-        val horizontalMargin = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO
         val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
         val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
         val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
 
         spans.forEach { span ->
             val start = spanned.getSpanStart(span)
@@ -133,8 +132,18 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                     } else {
                         textLayout.getPrimaryHorizontal(segmentEnd)
                     }
-                val left = min(startX, endX) + if (segmentStart == start) horizontalMargin else -horizontalPadding
-                val right = max(startX, endX) + if (segmentEnd == end) -horizontalMargin else horizontalPadding
+                val segmentLeft = min(startX, endX)
+                val segmentRight = max(startX, endX)
+                val left = if (segmentStart == start) {
+                    max(layoutLeft, segmentLeft - horizontalPadding)
+                } else {
+                    segmentLeft
+                }
+                val right = if (segmentEnd == end) {
+                    min(layoutRight, segmentRight + horizontalPadding)
+                } else {
+                    segmentRight
+                }
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
