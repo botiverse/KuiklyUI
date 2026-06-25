@@ -37,7 +37,7 @@ import kotlin.math.min
 private const val INVALID_OFFSET = -1
 private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD84D
 private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
-private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 7f / 15f
+private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 6f / 15f
 private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
 private const val SLOCK_INLINE_CODE_BORDER_WIDTH_DP = 1f
