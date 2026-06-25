@@ -38,6 +38,7 @@ private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
 private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 7f / 15f
 private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
+private const val SLOCK_INLINE_CODE_BORDER_WIDTH = 1f
 
 /**
  * 富文本绘制器，封装 [Layout]，用于富文本视图的测量与绘制。
@@ -57,8 +58,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         color = SLOCK_INLINE_CODE_FILL_COLOR
     }
     private val slockInlineCodeBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 1f
+        style = Paint.Style.FILL
         color = SLOCK_INLINE_CODE_BORDER_COLOR
     }
     private val slockInlineCodeRect = RectF()
@@ -100,7 +100,6 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
         val layoutLeft = 0f
-        val layoutRight = textLayout.width.toFloat()
 
         spans.forEach { span ->
             val start = spanned.getSpanStart(span)
@@ -128,8 +127,8 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                     } else {
                         textLayout.getPrimaryHorizontal(segmentEnd)
                     }
-                val left = max(layoutLeft, min(startX, endX) - horizontalPadding)
-                val right = min(layoutRight, max(startX, endX) + horizontalPadding)
+                val left = min(startX, endX) - horizontalPadding
+                val right = max(startX, endX) + horizontalPadding
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
@@ -143,9 +142,17 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
                 slockInlineCodeRect.set(left, top, right, bottom)
                 canvas.drawRect(slockInlineCodeRect, slockInlineCodeFillPaint)
-                canvas.drawRect(slockInlineCodeRect, slockInlineCodeBorderPaint)
+                canvas.drawSlockInlineCodeBorder(left, top, right, bottom)
             }
         }
+    }
+
+    private fun Canvas.drawSlockInlineCodeBorder(left: Float, top: Float, right: Float, bottom: Float) {
+        val borderWidth = SLOCK_INLINE_CODE_BORDER_WIDTH
+        drawRect(left, top, right, top + borderWidth, slockInlineCodeBorderPaint)
+        drawRect(left, bottom - borderWidth, right, bottom, slockInlineCodeBorderPaint)
+        drawRect(left, top, left + borderWidth, bottom, slockInlineCodeBorderPaint)
+        drawRect(right - borderWidth, top, right, bottom, slockInlineCodeBorderPaint)
     }
 
     private fun Layout.slockInlineCodeVisibleEnd(line: Int): Int {
