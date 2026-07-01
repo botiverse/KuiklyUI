@@ -53,7 +53,7 @@ import com.tencent.kuikly.core.views.TextAttr
 import com.tencent.kuikly.core.views.TextConst
 import com.tencent.kuikly.core.views.TextSpan
 
-private const val SLOCK_INLINE_CODE_ANNOTATION_TAG = "ai.slock.markdown.inlineCode"
+private const val SLOCK_INLINE_CODE_ANNOTATION_TAG = "raft.build.markdown.inlineCode"
 
 // Returns platform-specific default font size
 private fun TextAttr.defaultFontSize(): Float {
