@@ -18,10 +18,12 @@ package com.tencent.kuikly.compose.gestures
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.tencent.kuikly.compose.coroutines.internal.KuiklyContextScheduler
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
 import com.tencent.kuikly.compose.ui.unit.IntOffset
 import com.tencent.kuikly.core.layout.Frame
+import com.tencent.kuikly.core.manager.BridgeManager
 import com.tencent.kuikly.core.pager.PageData
 import com.tencent.kuikly.core.views.ScrollerAttr
 import com.tencent.kuikly.core.views.ScrollerEvent
@@ -51,7 +53,7 @@ class KuiklyScrollInfo {
         set(value) {
             field = value
             if (hasPullToRefresh && value != null) {
-                value.setHasPullToRefresh(true)
+                updatePullToRefreshOnScrollView(value, true)
             }
         }
 
@@ -131,12 +133,32 @@ class KuiklyScrollInfo {
     var hasPullToRefresh: Boolean = false
         set(value) {
             field = value
-            if (value) {
-                scrollView?.setHasPullToRefresh(true)
-            } else {
-                scrollView?.setHasPullToRefresh(false)
+            scrollView?.let { updatePullToRefreshOnScrollView(it, value) }
+        }
+
+    private fun updatePullToRefreshOnScrollView(
+        targetScrollView: ScrollerView<ScrollerAttr, ScrollerEvent>,
+        enabled: Boolean
+    ) {
+        val pagerId = targetScrollView.pagerId.ifEmpty { BridgeManager.currentPageId }
+        fun applyIfCurrent() {
+            if (scrollView === targetScrollView && hasPullToRefresh == enabled) {
+                targetScrollView.setHasPullToRefresh(enabled)
             }
         }
+        if (KuiklyContextScheduler.isOnKuiklyThread(pagerId)) {
+            applyIfCurrent()
+            return
+        }
+        if (pagerId.isEmpty()) {
+            return
+        }
+        KuiklyContextScheduler.runOnKuiklyThread(pagerId) { cancel ->
+            if (!cancel) {
+                applyIfCurrent()
+            }
+        }
+    }
 
     /**
      * Extra top inset on the pull-to-refresh lazy item in pixels,
