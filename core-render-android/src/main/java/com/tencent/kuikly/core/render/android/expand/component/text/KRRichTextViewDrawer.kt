@@ -90,11 +90,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
      * 将文本内容绘制到 [canvas]，对接到 [Layout.draw]。
      */
     fun draw(canvas: Canvas) {
-        drawSlockInlineCodeBackgrounds(canvas)
+        drawSlockInlineCodeChrome(canvas, drawFill = true, drawBorder = false)
         textLayout.draw(canvas)
+        drawSlockInlineCodeChrome(canvas, drawFill = false, drawBorder = true)
     }
 
-    private fun drawSlockInlineCodeBackgrounds(canvas: Canvas) {
+    private fun drawSlockInlineCodeChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
         val spanned = textLayout.text as? Spanned ?: return
         val spans = spanned.getSpans(0, spanned.length, KRSlockInlineCodeSpan::class.java)
         if (spans.isEmpty()) return
@@ -157,8 +158,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 if (bottom <= top) continue
 
                 slockInlineCodeRect.set(left, top, right, bottom)
-                canvas.drawRect(slockInlineCodeRect, slockInlineCodeFillPaint)
-                canvas.drawSlockInlineCodeBorder(left, top, right, bottom)
+                if (drawFill) {
+                    canvas.drawRect(slockInlineCodeRect, slockInlineCodeFillPaint)
+                }
+                if (drawBorder) {
+                    canvas.drawSlockInlineCodeBorder(left, top, right, bottom)
+                }
             }
         }
     }
