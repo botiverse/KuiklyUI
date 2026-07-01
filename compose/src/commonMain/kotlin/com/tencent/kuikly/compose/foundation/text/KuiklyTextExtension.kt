@@ -452,6 +452,9 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
     applyShadow(spanStyle.shadow)
 
     applyStyleColor(spanStyle)
+    if (spanStyle.background.isSpecified) {
+        setProp(Attr.StyleConst.BACKGROUND_COLOR, spanStyle.background.toKuiklyColor().toString())
+    }
     if (spanStyle.brush is SolidColor) {
         color((spanStyle.brush as SolidColor).value.toKuiklyColor())
     } else if (spanStyle.brush is LinearGradient) {
