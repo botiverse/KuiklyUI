@@ -447,6 +447,7 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
     if (spanStyle.fontSize.isSpecified) {
         fontSize(scaleToDensity(density, spanStyle.fontSize.value))
     }
+    applyFontFamily(spanStyle.fontFamily)
     applyFontWeight(spanStyle.fontWeight)
     applyFontStyle(spanStyle.fontStyle)
     applyShadow(spanStyle.shadow)
