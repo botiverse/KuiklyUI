@@ -61,7 +61,7 @@ kotlin {
             api("com.tencent.kuikly-open.compose.runtime:runtime-saveable:1.7.3-kuikly1")
             api("com.tencent.kuikly-open.compose.annotation-internal:annotation:1.7.3-kuikly1")
             api("com.tencent.kuikly-open.compose.collection-internal:collection:1.7.3-kuikly1")
-            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0-KBA-001")
+            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0-KBA-002")
             api("org.jetbrains.kotlinx:atomicfu:0.23.2-KBA-001")
         }
 

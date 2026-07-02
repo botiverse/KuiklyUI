@@ -58,6 +58,7 @@ constexpr char kPropNameTouchMove[] = "touchMove";
 constexpr char kPropNameTouchUp[] = "touchUp";
 constexpr char kPropNameTouchCancel[] = "touchCancel";
 constexpr char kPropNamePreventTouch[] = "preventTouch";
+constexpr char kPropNameNativeDispatchCapture[] = "nativeDispatchCapture";
 constexpr char kPropNameSuperTouch[] = "superTouch";
 constexpr char kPropNameHitTestModeOhos[] = "hit-test-ohos";
 constexpr char kPropNameStopPropagation[] = "stop-propagation-ohos";
@@ -117,6 +118,9 @@ bool KRView::SetProp(const std::string &prop_key, const KRAnyValue &prop_value,
         if (super_touch_handler_) {
             super_touch_handler_->PreventTouch(prop_value->toBool());
         }
+        didHand = true;
+    } else if (kuikly::util::isEqual(prop_key, kPropNameNativeDispatchCapture)) {
+        native_dispatch_capture_requested_ = prop_value->toBool();
         didHand = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameSuperTouch)) {
         if (prop_value->toBool()) {
@@ -394,7 +398,16 @@ bool KRView::ResetProp(const std::string &prop_key) {
     } else if (kuikly::util::isEqual(prop_key, kPropNamePreventTouch)) {
         // reset handled by kPropNameSuperTouch, do nothing here
         didHande = true;
+    } else if (kuikly::util::isEqual(prop_key, kPropNameNativeDispatchCapture)) {
+        native_dispatch_capture_requested_ = false;
+        native_dispatch_captured_gesture_ = false;
+        if (super_touch_handler_) {
+            super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+        }
+        didHande = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameSuperTouch)) {
+        native_dispatch_capture_requested_ = false;
+        native_dispatch_captured_gesture_ = false;
         super_touch_handler_ = nullptr;
         didHande = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameHitTestModeOhos)) {
@@ -447,6 +460,23 @@ void KRView::ProcessTouchEvent(ArkUI_NodeEvent *event) {
         handled = TryFireOnTouchCancelEvent(input_event);
     }
     if (super_touch_type_ == SELF) {
+        if (action == UI_TOUCH_EVENT_ACTION_DOWN) {
+            native_dispatch_captured_gesture_ = native_dispatch_capture_requested_;
+            native_dispatch_capture_requested_ = false;
+            if (native_dispatch_captured_gesture_ && super_touch_handler_) {
+                super_touch_handler_->SetNativeTouchConsumer(shared_from_this());
+            }
+        }
+        if (native_dispatch_captured_gesture_) {
+            if (action == UI_TOUCH_EVENT_ACTION_UP || action == UI_TOUCH_EVENT_ACTION_CANCEL) {
+                native_dispatch_captured_gesture_ = false;
+                if (super_touch_handler_) {
+                    super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+                }
+            }
+            kuikly::util::StopPropagation(event);
+            return;
+        }
         if (super_touch_handler_->GetStopPropagation(action)) {
             kuikly::util::StopPropagation(event);
             super_touch_handler_->SetStopPropagation(action, false);
@@ -615,6 +645,11 @@ void KRView::UpdateHitTestMode(bool shouldUseTarget) {
 
 void KRView::WillRemoveFromParentView() {
     IKRRenderViewExport::WillRemoveFromParentView();
+    if (super_touch_handler_) {
+        super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+    }
+    native_dispatch_capture_requested_ = false;
+    native_dispatch_captured_gesture_ = false;
     parent_super_touch_handler_.reset();
     super_touch_type_ = UNKNOWN;
 }
