@@ -203,7 +203,7 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
 
         // 修饰相关
         textSpans.add(ForegroundColorSpan(spanProps.color))
-        if (spanProps.backgroundColor != Color.TRANSPARENT) {
+        if (spanProps.backgroundColor != Color.TRANSPARENT && !spanProps.slockInlineCode) {
             textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
         }
         if (spanProps.textDecoration.isNotEmpty()) {
