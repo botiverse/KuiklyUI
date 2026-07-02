@@ -58,7 +58,6 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
      */
     private var requestLayoutLogCount = 0
     private var onLayoutLogCount = 0
-    private var superTouchCaptureLogCount = 0
 
     /**
      * 嵌套滚动相关
@@ -104,7 +103,6 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
 
     private var superTouch: Boolean = false
     private var superTouchCanceled: Boolean = false
-    private var superTouchConsumedByCompose: Boolean = false
 
     private fun syncComposeRootTag() {
         krRootView()?.setTag(COMPOSE_ROOT_TAG_ID, superTouch)
@@ -261,28 +259,7 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
         }
 
         // 以下是SuperTouch模式，意味着该View对应Compose的根节点，用于分发Touch事件给Compose
-        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-            superTouchConsumedByCompose = false
-        }
         tryFireTouchEvent(event)
-        if (superTouchConsumedByCompose) {
-            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
-                logSuperTouchCapture("release", event)
-                superTouchConsumedByCompose = false
-            } else {
-                logSuperTouchCapture("continue", event)
-            }
-            return true
-        }
-        if (event.actionMasked == MotionEvent.ACTION_DOWN && touchDownConsumeOnce) {
-            // Compose hit-testing already selected a pointer target. Capture the full gesture at
-            // the root so native children underneath a Compose overlay (for example RichText link
-            // spans) do not receive the same DOWN and trigger through the overlay.
-            superTouchConsumedByCompose = true
-            touchDownConsumeOnce = false
-            logSuperTouchCapture("capture_down", event)
-            return true
-        }
         var handle = super.dispatchTouchEvent(event)
         if (handle) {
             // 子节点已经接接收了，后面的MOVE UP事件都能收到，不用兜底
@@ -525,17 +502,6 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
         parentView?.requestedLayout = false
     }
 
-    private fun logSuperTouchCapture(reason: String, event: MotionEvent) {
-        val parentView = parent as? KuiklyRenderView
-        if (parentView != null && parentView.isDebugLogEnable() && superTouchCaptureLogCount < SUPER_TOUCH_CAPTURE_MAX_LOG_COUNT) {
-            KuiklyRenderLog.d(
-                VIEW_NAME,
-                "superTouchCapture $superTouchCaptureLogCount reason=$reason action=${event.actionMasked} x=${event.x} y=${event.y} childCount=$childCount"
-            )
-            superTouchCaptureLogCount++
-        }
-    }
-
     private fun getOrCreateTextSelector(): KRTextSelector {
         return textSelector ?: KRTextSelector(this).also { textSelector = it }
     }
@@ -564,7 +530,6 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
         private const val EVENT_TOUCH_CANCEL = "touchCancel"
         private const val EVENT_SCREEN_FRAME = "screenFrame"
         private const val LAYOUT_MAX_LOG_COUNT = 10
-        private const val SUPER_TOUCH_CAPTURE_MAX_LOG_COUNT = 30
 
         private const val ATTR_SELECTABLE = "selectable"
         private const val ATTR_SELECTION_COLOR = "selectionColor"
