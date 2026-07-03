@@ -129,6 +129,7 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
     }
 
     private fun drawText(canvas: Canvas) {
+        syncTextDrawerFromShadow("draw")
         if (textDrawer == null) {
             richTextLog(
                 "phase=view.draw view=${System.identityHashCode(this)} result=no_drawer " +
@@ -220,6 +221,23 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
             if (hasDebugName()) {
                 initAccessibilityDelegateIfNeeded()
             }
+        }
+    }
+
+    private fun syncTextDrawerFromShadow(source: String) {
+        val shadowDrawer = richTextShadow?.textDrawer ?: return
+        if (shadowDrawer == textDrawer) return
+        richTextLog(
+            "phase=view.sync_drawer source=$source view=${System.identityHashCode(this)} " +
+                "shadow=${System.identityHashCode(richTextShadow)} hadDrawer=${textDrawer != null} " +
+                "textLength=${shadowDrawer.textLayout.text.length}"
+        )
+        textDrawer?.setCallback(null)
+        shadowDrawer.setCallback(this)
+        textDrawer = shadowDrawer
+        putViewData(KRCssConst.PLAIN_TEXT_FOR_A11Y, shadowDrawer.textLayout.text.toString())
+        if (hasDebugName()) {
+            initAccessibilityDelegateIfNeeded()
         }
     }
 
