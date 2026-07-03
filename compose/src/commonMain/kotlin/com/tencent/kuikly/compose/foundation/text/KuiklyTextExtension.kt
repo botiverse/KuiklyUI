@@ -54,6 +54,7 @@ import com.tencent.kuikly.core.views.TextConst
 import com.tencent.kuikly.core.views.TextSpan
 
 private const val SLOCK_INLINE_CODE_ANNOTATION_TAG = "raft.build.markdown.inlineCode"
+private const val SLOCK_MARKDOWN_TAG_CHROME_ANNOTATION_TAG = "raft.build.markdown.tagChrome"
 
 // Returns platform-specific default font size
 private fun TextAttr.defaultFontSize(): Float {
@@ -344,6 +345,12 @@ internal fun RichTextAttr.applyAnnotatedString(
         positions.add(range.start)
         positions.add(range.end)
     }
+    val slockMarkdownTagChromeAnnotations =
+        annoText.getStringAnnotations(SLOCK_MARKDOWN_TAG_CHROME_ANNOTATION_TAG, 0, annoText.length)
+    slockMarkdownTagChromeAnnotations.forEach { range ->
+        positions.add(range.start)
+        positions.add(range.end)
+    }
 
     // Collect placeholder info and positions
     val (placeholders, _) = if (annoText.hasInlineContent()) {
@@ -394,6 +401,11 @@ internal fun RichTextAttr.applyAnnotatedString(
                 if (slockInlineCodeAnnotations.any { range -> start >= range.start && end <= range.end }) {
                     slockInlineCode()
                 }
+                slockMarkdownTagChromeAnnotations
+                    .firstOrNull { range -> start >= range.start && end <= range.end }
+                    ?.item
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { kind -> slockMarkdownTagChrome(kind) }
 
                 // Apply ParagraphStyle
                 annoText.paragraphStyles
