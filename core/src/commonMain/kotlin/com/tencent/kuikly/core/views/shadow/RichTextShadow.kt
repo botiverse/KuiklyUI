@@ -21,6 +21,10 @@ class RichTextShadow(pagerId: String, viewRef: Int, viewName: String) : TextShad
 ) {
     var lastValues : String? = null
     fun setValuesProp(values: String) {
+        println(
+            "SlockRichTextTrace phase=common.shadow.set_values shadow=${hashCode()} " +
+                "length=${values.length} hash=${values.hashCode().toString(16)} previousHash=${lastValues?.hashCode()?.toString(16)}"
+        )
         setProp("values", values)
         lastValues = values
     }

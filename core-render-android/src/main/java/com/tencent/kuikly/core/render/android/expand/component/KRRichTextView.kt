@@ -35,6 +35,7 @@ import android.text.TextDirectionHeuristics
 import android.text.TextPaint
 import android.text.TextUtils
 import android.text.style.LeadingMarginSpan
+import android.util.Log
 import android.util.SizeF
 import android.view.ViewGroup
 import com.tencent.kuikly.core.render.android.IKuiklyRenderContext
@@ -79,16 +80,28 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
         richTextShadow = (shadow as KRRichTextShadow).also {
             isRichTextMode = it.isRichTextMode
         }
+        richTextLog(
+            "phase=view.set_shadow view=${System.identityHashCode(this)} " +
+                "shadow=${System.identityHashCode(shadow)} rich=$isRichTextMode drawerBefore=${textDrawer != null}"
+        )
         initTextLayout(richTextShadow)
         invalidate()
     }
 
     override fun setLayoutParams(params: ViewGroup.LayoutParams?) {
         super.setLayoutParams(params)
+        richTextLog(
+            "phase=view.set_layout_params view=${System.identityHashCode(this)} " +
+                "width=${params?.width} height=${params?.height} shadow=${richTextShadow != null}"
+        )
         initTextLayout(richTextShadow)
     }
 
     override fun resetShadow() {
+        richTextLog(
+            "phase=view.reset_shadow view=${System.identityHashCode(this)} " +
+                "hadShadow=${richTextShadow != null} hadDrawer=${textDrawer != null} rich=$isRichTextMode"
+        )
         super.resetShadow()
         richTextShadow = null
         textDrawer = null
@@ -116,7 +129,17 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
     }
 
     private fun drawText(canvas: Canvas) {
+        if (textDrawer == null) {
+            richTextLog(
+                "phase=view.draw view=${System.identityHashCode(this)} result=no_drawer " +
+                    "shadow=${richTextShadow != null} width=$width height=$height"
+            )
+        }
         textDrawer?.also {
+            richTextLog(
+                "phase=view.draw view=${System.identityHashCode(this)} result=draw " +
+                    "textLength=${it.textLayout.text.length} layoutWidth=${it.textLayout.width} layoutHeight=${it.textLayout.height}"
+            )
             canvas.save()
             canvas.translate(paddingLeft.toFloat(), paddingTop.toFloat())
             it.draw(canvas)
@@ -172,7 +195,17 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
 
     private fun initTextLayout(richTextShadow: KRRichTextShadow?) {
         val textShadow = richTextShadow ?: return
+        richTextLog(
+            "phase=view.init_layout_start view=${System.identityHashCode(this)} " +
+                "shadow=${System.identityHashCode(textShadow)} drawerBefore=${textDrawer != null} " +
+                "lpWidth=${layoutParams?.width} lpHeight=${layoutParams?.height}"
+        )
         val newTextDrawer = tryReMeasureTextLayout(textShadow, layoutParams)
+        richTextLog(
+            "phase=view.init_layout_end view=${System.identityHashCode(this)} " +
+                "shadow=${System.identityHashCode(textShadow)} drawerAfter=${newTextDrawer != null} " +
+                "sameDrawer=${newTextDrawer == textDrawer} textLength=${newTextDrawer?.textLayout?.text?.length ?: -1}"
+        )
         if (newTextDrawer != textDrawer) {
             textDrawer?.setCallback(null)
             if (hasSelection()) {
@@ -191,10 +224,25 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
     }
 
     private fun tryReMeasureTextLayout(textShadow: KRRichTextShadow, layoutParams: ViewGroup.LayoutParams?): KRRichTextViewDrawer? {
-        val lp = layoutParams ?: return textShadow.textDrawer
+        val lp = layoutParams ?: run {
+            richTextLog(
+                "phase=view.try_remeasure view=${System.identityHashCode(this)} result=no_layout_params " +
+                    "shadowDrawer=${textShadow.textDrawer != null}"
+            )
+            return textShadow.textDrawer
+        }
 
         if (needReMeasureTextLayout(lp, textShadow)) {
+            richTextLog(
+                "phase=view.try_remeasure view=${System.identityHashCode(this)} result=measure_exactly " +
+                    "lpWidth=${lp.width} lpHeight=${lp.height}"
+            )
             textShadow.measureLayoutExactly(SizeF(lp.width.toFloat(), lp.height.toFloat()))
+        } else {
+            richTextLog(
+                "phase=view.try_remeasure view=${System.identityHashCode(this)} result=keep " +
+                    "lpWidth=${lp.width} lpHeight=${lp.height} shadowDrawer=${textShadow.textDrawer != null}"
+            )
         }
         return textShadow.textDrawer
     }
@@ -548,6 +596,13 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
      * @return 是否处理
      */
     override fun setProp(propKey: String, propValue: Any) {
+        if (propKey == KRTextProps.PROP_KEY_VALUES || propKey == KRTextProps.PROP_KEY_TEXT) {
+            val value = propValue as? String
+            richTextLog(
+                "phase=native.shadow.set_prop prop=$propKey length=${value?.length ?: -1} " +
+                    "hash=${value?.hashCode()?.toString(16)} shadow=${System.identityHashCode(this)}"
+            )
+        }
         textProps.setProp(propKey, propValue)
     }
 
@@ -621,13 +676,22 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
     }
 
     override fun calculateRenderViewSize(constraintSize: SizeF): SizeF {
+        richTextLog(
+            "phase=native.shadow.measure_at_most_start shadow=${System.identityHashCode(this)} " +
+                "constraintW=${constraintSize.width} constraintH=${constraintSize.height}"
+        )
         val layout = buildLayout(constraintSize, TextMeasureMode.AT_MOST)
         textDrawer = layout?.let { KRRichTextViewDrawer(it) }
-        return if (layout == null) {
+        val size = if (layout == null) {
             SizeF(0f, 0f)
         } else {
             SizeF(layout.width.toFloat(), layout.height.toFloat())
         }
+        richTextLog(
+            "phase=native.shadow.measure_at_most_end shadow=${System.identityHashCode(this)} " +
+                "layout=${layout != null} textLength=${layout?.text?.length ?: -1} width=${size.width} height=${size.height}"
+        )
+        return size
     }
 
     /**
@@ -635,7 +699,17 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
      * @param constraintSize 指定的文本大小
      */
     fun measureLayoutExactly(constraintSize: SizeF) {
-        textDrawer = buildLayout(constraintSize, TextMeasureMode.EXACTLY)?.let { KRRichTextViewDrawer(it) }
+        richTextLog(
+            "phase=native.shadow.measure_exactly_start shadow=${System.identityHashCode(this)} " +
+                "constraintW=${constraintSize.width} constraintH=${constraintSize.height}"
+        )
+        val layout = buildLayout(constraintSize, TextMeasureMode.EXACTLY)
+        textDrawer = layout?.let { KRRichTextViewDrawer(it) }
+        richTextLog(
+            "phase=native.shadow.measure_exactly_end shadow=${System.identityHashCode(this)} " +
+                "layout=${layout != null} textLength=${layout?.text?.length ?: -1} " +
+                "layoutWidth=${layout?.width ?: -1} layoutHeight=${layout?.height ?: -1}"
+        )
     }
 
     private fun buildLayout(constraintSize: SizeF, measureMode: TextMeasureMode): Layout? {
@@ -652,6 +726,11 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
                 null
             }
         }
+        richTextLog(
+            "phase=native.shadow.build_layout shadow=${System.identityHashCode(this)} " +
+                "mode=$measureMode rich=${textProps.isRichText()} simple=${textProps.text.isNotEmpty()} " +
+                "textLength=${text?.length ?: -1} constraintW=${constraintSize.width} constraintH=${constraintSize.height}"
+        )
         text?.also {
             return createLayout(it, constraintSize, measureMode)
         }
@@ -734,6 +813,10 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
             }
         }
         spanTextRanges = newSpanTextRanges
+        richTextLog(
+            "phase=native.shadow.build_rich_text shadow=${System.identityHashCode(this)} " +
+                "resultLength=${result?.length ?: -1} spanRanges=${spanTextRanges.size}"
+        )
         return result
     }
 
@@ -776,7 +859,13 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
                     .setEllipsize(TextUtils.TruncateAt.END)
             }
             return if (textProps.lineBreakMargin == 0f || textProps.numberOfLines == 0) {
-                builder.build()
+                builder.build().also { layout ->
+                    richTextLog(
+                        "phase=native.shadow.create_layout shadow=${System.identityHashCode(this)} " +
+                            "textLength=${textSource.length} desiredWidth=$desiredWidth lines=${layout.lineCount} " +
+                            "height=${layout.height} mode=$measureMode"
+                    )
+                }
             } else {
                 val staticLayout = builder.build()
                 if (staticLayout.lineCount > textProps.numberOfLines) {
@@ -785,9 +874,21 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
                         .setEllipsize(TextUtils.TruncateAt.END)
                         .setIndents(null, createLineBreakMarginArray(textProps))
                     textProps.isLineBreakMargin = true
-                    newBuilder.build()
+                    newBuilder.build().also { layout ->
+                        richTextLog(
+                            "phase=native.shadow.create_layout shadow=${System.identityHashCode(this)} " +
+                                "textLength=${textSource.length} desiredWidth=$desiredWidth lines=${layout.lineCount} " +
+                                "height=${layout.height} mode=$measureMode lineBreakMargin=true"
+                        )
+                    }
                 } else {
-                    staticLayout
+                    staticLayout.also { layout ->
+                        richTextLog(
+                            "phase=native.shadow.create_layout shadow=${System.identityHashCode(this)} " +
+                                "textLength=${textSource.length} desiredWidth=$desiredWidth lines=${layout.lineCount} " +
+                                "height=${layout.height} mode=$measureMode"
+                        )
+                    }
                 }
             }
         } else {
@@ -803,6 +904,11 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
                 val newText = TextUtils.ellipsize(textSource.subSequence(0, endLine), textPaint, (desiredWidth * textProps.numberOfLines - extraMargin), TextUtils.TruncateAt.END)
                 staticLayout = StaticLayout(newText, 0, newText.length, textPaint, desiredWidth, getTextAlign(), 1.0f, textProps.lineSpacing, false)
             }
+            richTextLog(
+                "phase=native.shadow.create_layout shadow=${System.identityHashCode(this)} " +
+                    "textLength=${textSource.length} desiredWidth=$desiredWidth lines=${staticLayout.lineCount} " +
+                    "height=${staticLayout.height} mode=$measureMode legacy=true"
+            )
             return staticLayout
         }
     }
@@ -881,6 +987,12 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
         private const val METHOD_GET_PLACEHOLDER_SPAN_RECT = "spanRect"
         private const val METHOD_IS_LINE_BREAK_MARGIN = "isLineBreakMargin"
     }
+}
+
+private const val SlockRichTextTraceTag = "SlockRichTextTrace"
+
+private fun richTextLog(message: String) {
+    Log.i(SlockRichTextTraceTag, message)
 }
 
 enum class SelectionType {
