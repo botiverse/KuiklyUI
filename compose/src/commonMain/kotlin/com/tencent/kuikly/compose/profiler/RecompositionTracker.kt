@@ -19,6 +19,8 @@ import androidx.compose.runtime.InternalComposeTracingApi
 import androidx.compose.runtime.CompositionTracer
 import androidx.compose.runtime.snapshots.Snapshot
 import com.tencent.kuikly.compose.profiler.filter.FilterChain
+import com.tencent.kuikly.compose.ui.createSynchronizedObject
+import com.tencent.kuikly.compose.ui.synchronized
 import com.tencent.kuikly.core.datetime.DateTime
 import kotlin.concurrent.Volatile
 import kotlin.random.Random
@@ -118,6 +120,7 @@ internal class RecompositionTracker {
 
     /** CompositionTracer 追踪栈，记录嵌套的 Composable 调用 */
     private val traceStack = mutableListOf<TraceEntry>()
+    private val traceStackLock = createSynchronizedObject()
 
     /**
      * Overlay 子树过滤深度计数器。
@@ -287,8 +290,10 @@ internal class RecompositionTracker {
      */
     fun stop() {
         unregisterSnapshotObserver()
-        traceStack.clear()
-        overlayFilterDepth = 0
+        synchronized(traceStackLock) {
+            traceStack.clear()
+            overlayFilterDepth = 0
+        }
         hasPreciseScopeMapping = false
         filterChain = null  // 清理过滤链资源
     }
@@ -437,18 +442,20 @@ internal class RecompositionTracker {
         if (!currentFrameSampled) {
             return
         }
-        // If already inside an Overlay subtree, just increment depth and skip
-        if (overlayFilterDepth > 0) {
-            overlayFilterDepth++
-            return
+        synchronized(traceStackLock) {
+            // If already inside an Overlay subtree, just increment depth and skip
+            if (overlayFilterDepth > 0) {
+                overlayFilterDepth++
+                return
+            }
+            // Check if this composable is an Overlay internal (e.g. ProfilerOverlaySlot)
+            if (isOverlayComposable(info)) {
+                overlayFilterDepth = 1
+                return
+            }
+            traceStack.add(TraceEntry(key, info, DateTime.currentTimestamp(), dirty1, dirty2,
+                scopeKeySnapshot = compositionObserver.getCurrentScopeKey()))
         }
-        // Check if this composable is an Overlay internal (e.g. ProfilerOverlaySlot)
-        if (isOverlayComposable(info)) {
-            overlayFilterDepth = 1
-            return
-        }
-        traceStack.add(TraceEntry(key, info, DateTime.currentTimestamp(), dirty1, dirty2,
-            scopeKeySnapshot = compositionObserver.getCurrentScopeKey()))
     }
 
     /**
@@ -457,14 +464,20 @@ internal class RecompositionTracker {
      */
     private fun onComposableTraceEnd() {
         if (!currentFrameSampled) return
-        // If inside an Overlay subtree, just decrement depth and skip
-        if (overlayFilterDepth > 0) {
-            overlayFilterDepth--
-            return
-        }
-        if (traceStack.isEmpty()) return
+        val (entry, parentInfo) = synchronized(traceStackLock) {
+            // If inside an Overlay subtree, just decrement depth and skip
+            if (overlayFilterDepth > 0) {
+                overlayFilterDepth--
+                return
+            }
+            if (traceStack.isEmpty()) return
 
-        val entry = traceStack.removeAt(traceStack.lastIndex)
+            val poppedEntry = traceStack.removeAt(traceStack.lastIndex)
+            val poppedParentInfo = traceStack.lastOrNull { entry ->
+                extractComposableName(entry.info) != "<anonymous>"
+            }?.info
+            poppedEntry to poppedParentInfo
+        }
 
         // 根据过滤链判断是否过滤此 Composable
         if (shouldFilterComposable(entry.info)) {
@@ -474,10 +487,6 @@ internal class RecompositionTracker {
         val now = DateTime.currentTimestamp()
         val durationMs = now - entry.startTimeMs
         // 跳过 <anonymous> 层级，找到最近的有名父 Composable
-        val parentInfo = traceStack.lastOrNull { entry ->
-            extractComposableName(entry.info) != "<anonymous>"
-        }?.info
-
         val composableName = extractComposableName(entry.info)
 
         // <anonymous> 是 lambda content slot，无具体名称，不记录也不计数

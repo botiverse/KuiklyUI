@@ -19,6 +19,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -27,6 +28,7 @@ import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.TextPaint
 import android.text.style.AbsoluteSizeSpan
+import android.text.style.BackgroundColorSpan
 import android.text.style.CharacterStyle
 import android.text.style.ForegroundColorSpan
 import android.text.style.LeadingMarginSpan
@@ -50,10 +52,13 @@ import com.tencent.kuikly.core.render.android.css.ktx.toColor
 import com.tencent.kuikly.core.render.android.css.ktx.toPxF
 import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
+import com.tencent.kuikly.core.views.TextConst
 import org.json.JSONObject
 import kotlin.math.ceil
-import kotlin.math.floor
 import kotlin.math.max
+
+private const val SLOCK_INLINE_CODE_EDGE_PADDING_RATIO = 4f / 15f
+private const val SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO = 2f / 15f
 
 /**
  * 富文本构造器
@@ -92,20 +97,24 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                         Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
                     )
                 }
-                spannedBuilder.append(buildSpannedString {
-                    // 记录 Span 对应的文字范围
-                    spanTextRanges.add(
-                        SpanTextRange(
-                            index,
-                            spannedBuilder.length,
-                            spannedBuilder.length + spanProps.text.length
-                        )
+                val spanStart = spannedBuilder.length
+                val spanText = spanProps.text
+                val spanEnd = spanStart + spanText.length
+                spanTextRanges.add(
+                    SpanTextRange(
+                        index,
+                        spanStart,
+                        spanEnd
                     )
+                )
+                spannedBuilder.append(buildSpannedString {
                     inSpans(spans) {
-                        append(spanProps.text)
+                        append(spanText)
                     }
                 })
-
+                if (spanProps is TextSpanProps && spanProps.slockInlineCode) {
+                    spannedBuilder.applySlockInlineCodeAtomicTextSpans(spanStart, spanEnd)
+                }
             }
         }
         if (textProps.richTextHeadIndent != 0) {
@@ -182,8 +191,6 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 kuiklyContext.spToPxI(spanProps.fontSize)
             }))
         }
-        val fontWeightSpan = FontWeightSpan(spanProps.fontWeight, index)
-        textSpans.add(fontWeightSpan)
         textSpans.add(StyleSpan(spanProps.fontStyle))
         if (spanProps.fontVariant.isNotEmpty()) {
             textSpans.add(FontVariantSpan(spanProps.fontVariant))
@@ -191,9 +198,14 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         if (spanProps.fontFamily.isNotEmpty()) {
             textSpans.add(FontFamilySpan(spanProps.fontFamily, kuiklyContext?.getTypeFaceLoader()))
         }
+        val fontWeightSpan = FontWeightSpan(spanProps.fontWeight, index)
+        textSpans.add(fontWeightSpan)
 
         // 修饰相关
         textSpans.add(ForegroundColorSpan(spanProps.color))
+        if (spanProps.backgroundColor != Color.TRANSPARENT && !spanProps.slockInlineCode) {
+            textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
+        }
         if (spanProps.textDecoration.isNotEmpty()) {
             if (spanProps.textDecoration == KRTextProps.TEXT_DECORATION_LINE_THROUGH) {
                 textSpans.add(StrikethroughSpan())
@@ -203,6 +215,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         }
         if (spanProps.backgroundImage.isNotEmpty()) {
             textSpans.add(LinearGradientForegroundSpan(spanProps.backgroundImage, layoutSizeGetter))
+        }
+        if (spanProps.slockInlineCode) {
+            textSpans.add(KRSlockInlineCodeSpan())
         }
 
         spanProps.textShadow?.let {
@@ -252,6 +267,8 @@ class TextSpanProps(
     val textDecoration: String
     val lineHeight: Float
     val backgroundImage: String
+    val backgroundColor: Int
+    val slockInlineCode: Boolean
     var textShadow: BoxShadow? = null
     var useDpFontSizeDim = false
 
@@ -298,6 +315,13 @@ class TextSpanProps(
             defaultProps.lineHeight
         }
         backgroundImage = spanValue.optString(KRTextProps.PROP_KEY_BACKGROUND_IMAGE, defaultProps.backgroundImage)
+        backgroundColor =
+            spanValue.optString(KRCssConst.BACKGROUND_COLOR)
+                .takeIf { it.isNotEmpty() }
+                ?.toColor()
+                ?: Color.TRANSPARENT
+        slockInlineCode = spanValue.optInt(TextConst.SLOCK_INLINE_CODE, 0) == 1 ||
+            spanValue.optBoolean(TextConst.SLOCK_INLINE_CODE, false)
         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
         textShadow = BoxShadow(textShadowStr, kuiklyContext)
         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
@@ -331,6 +355,136 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
     }
 }
 
+class KRSlockInlineCodeSpan
+
+private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: Int, end: Int) {
+    var index = start
+    var firstAtom = true
+    while (index < end) {
+        if (this[index].isWhitespace()) {
+            index++
+            continue
+        }
+        val rangeStart = index
+        while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
+            index++
+        }
+        val textStart = index
+        while (index < end &&
+            !this[index].isWhitespace() &&
+            !this[index].isSlockInlineCodeBreakSeparator()
+        ) {
+            index++
+        }
+        var textLength = index - textStart
+        while (textLength in 1..2 &&
+            index < end &&
+            this[index].isSlockInlineCodeBreakSeparator()
+        ) {
+            val separatorStart = index
+            while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
+                index++
+            }
+            val nextTextStart = index
+            while (index < end &&
+                !this[index].isWhitespace() &&
+                !this[index].isSlockInlineCodeBreakSeparator()
+            ) {
+                index++
+            }
+            if (index <= nextTextStart) {
+                index = separatorStart
+                break
+            }
+            textLength = index - textStart
+        }
+        if (index > textStart) {
+            val padStart = firstAtom
+            val padEnd = !hasSlockInlineCodeAtomAfter(index, end)
+            setSpan(
+                KRSlockInlineCodeAtomicTextSpan(padStart, padEnd),
+                rangeStart,
+                index,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            firstAtom = false
+        }
+    }
+}
+
+private fun Char.isSlockInlineCodeBreakSeparator(): Boolean =
+    this == '/' || this == '\\' || this == '.' || this == '-' || this == ':'
+
+private fun CharSequence.hasSlockInlineCodeAtomAfter(start: Int, end: Int): Boolean {
+    var index = start
+    while (index < end) {
+        if (this[index].isWhitespace()) {
+            index++
+            continue
+        }
+        while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
+            index++
+        }
+        val textStart = index
+        while (index < end &&
+            !this[index].isWhitespace() &&
+            !this[index].isSlockInlineCodeBreakSeparator()
+        ) {
+            index++
+        }
+        if (index > textStart) return true
+    }
+    return false
+}
+
+private class KRSlockInlineCodeAtomicTextSpan(
+    private val padStart: Boolean,
+    private val padEnd: Boolean
+) : ReplacementSpan() {
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int = if (text == null || start >= end) {
+        0
+    } else {
+        val textWidth = paint.measureText(text, start, end)
+        val strokePadding = max(1f, paint.strokeWidth * 2f)
+        ceil((textWidth + strokePadding + startPadding(paint) + endPadding(paint)).toDouble()).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text != null && start < end) {
+            canvas.drawText(text, start, end, x + startPadding(paint), y.toFloat(), paint)
+        }
+    }
+
+    private fun startPadding(paint: Paint): Float {
+        return if (padStart) edgePadding(paint) else 0f
+    }
+
+    private fun endPadding(paint: Paint): Float {
+        return if (padEnd) edgePadding(paint) else 0f
+    }
+
+    private fun edgePadding(paint: Paint): Float {
+        return paint.textSize * (SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO)
+    }
+}
+
 /**
  * 字重span
  * @param fontWeight 字重
@@ -339,8 +493,12 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 class FontWeightSpan(fontWeight: String, val index: Int = -1) : CharacterStyle() {
 
     private val strokeWidth = getFontWeight(fontWeight)
+    private val fakeBold = isBoldWeight(fontWeight)
 
     override fun updateDrawState(tp: TextPaint) {
+        if (fakeBold) {
+            tp.isFakeBoldText = true
+        }
         if (strokeWidth != 0f) {
             tp.style = Paint.Style.FILL_AND_STROKE
             tp.strokeWidth = strokeWidth * tp.textSize
@@ -374,6 +532,11 @@ class FontWeightSpan(fontWeight: String, val index: Int = -1) : CharacterStyle()
                 else -> FONT_WEIGHT_NORMAL_VALUE
             }
         }
+
+        private fun isBoldWeight(fontWeight: String): Boolean =
+            fontWeight == FONT_WEIGHT_BOLD ||
+                fontWeight == FONT_WEIGHT_EXTRA_BOLD ||
+                fontWeight == FONT_WEIGHT_BLACK
     }
 }
 
@@ -440,7 +603,16 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
     }
 }
 
-class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
+class HRLineHeightSpan(internal val height: Int) : LineHeightSpan, LineHeightSpan.WithDensity {
+
+    internal companion object {
+        fun applyCenteredLineHeight(height: Int, fm: Paint.FontMetricsInt, center: Int) {
+            fm.ascent = center - height / 2
+            fm.descent = fm.ascent + height
+            fm.top = fm.ascent
+            fm.bottom = fm.descent
+        }
+    }
 
     override fun chooseHeight(
         text: CharSequence?,
@@ -450,11 +622,43 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
         lineHeight: Int,
         fm: Paint.FontMetricsInt
     ) {
-        val additional: Int = height - (-fm.top + fm.bottom)
-        fm.top -= ceil((additional / 2.0f).toDouble()).toInt()
-        fm.bottom += floor((additional / 2.0f).toDouble()).toInt()
-        fm.ascent = fm.top
-        fm.descent = fm.bottom
+        applyCenteredLineHeight(fm, (fm.ascent + fm.descent) / 2)
+    }
+
+    override fun chooseHeight(
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        spanstartv: Int,
+        lineHeight: Int,
+        fm: Paint.FontMetricsInt,
+        paint: TextPaint
+    ) {
+        val visualCenter = glyphVisualCenter(text, start, end, paint)
+            ?: ((fm.ascent + fm.descent) / 2)
+        applyCenteredLineHeight(fm, visualCenter)
+    }
+
+    private fun applyCenteredLineHeight(fm: Paint.FontMetricsInt, center: Int) {
+        applyCenteredLineHeight(height, fm, center)
+    }
+
+    private fun glyphVisualCenter(
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        paint: TextPaint
+    ): Int? {
+        if (text == null || start >= end) {
+            return null
+        }
+        val bounds = Rect()
+        paint.getTextBounds(text, start, end, bounds)
+        return if (bounds.isEmpty) {
+            null
+        } else {
+            (bounds.top + bounds.bottom) / 2
+        }
     }
 }
 

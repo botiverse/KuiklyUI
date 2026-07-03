@@ -76,6 +76,8 @@ internal fun Pager(
     userScrollEnabled: Boolean,
     /** Number of pages to compose and layout before and after the visible pages */
     beyondViewportPageCount: Int = PagerDefaults.BeyondViewportPageCount,
+    /** Whether all pages should remain composed and laid out even when offscreen. */
+    keepItemAlive: Boolean = false,
     /** Space between pages */
     pageSpacing: Dp = 0.dp,
     /** Allows to change how to calculate the Page size */
@@ -98,6 +100,13 @@ internal fun Pager(
             "you selected $beyondViewportPageCount"
     }
 
+    val effectiveBeyondViewportPageCount =
+        if (keepItemAlive) {
+            maxOf(beyondViewportPageCount, state.pageCount - 1)
+        } else {
+            beyondViewportPageCount
+        }
+
     state.contentPadding = contentPadding
     val pagerItemProvider = rememberPagerItemProviderLambda(
         state = state,
@@ -113,7 +122,7 @@ internal fun Pager(
         contentPadding = contentPadding,
         reverseLayout = reverseLayout,
         orientation = orientation,
-        beyondViewportPageCount = beyondViewportPageCount,
+        beyondViewportPageCount = effectiveBeyondViewportPageCount,
         pageSpacing = pageSpacing,
         pageSize = pageSize,
         horizontalAlignment = horizontalAlignment,
@@ -161,7 +170,7 @@ internal fun Pager(
             .lazyLayoutBeyondBoundsModifier(
                 state = rememberPagerBeyondBoundsState(
                     state = state,
-                    beyondViewportPageCount = beyondViewportPageCount
+                    beyondViewportPageCount = effectiveBeyondViewportPageCount
                 ),
                 beyondBoundsInfo = state.beyondBoundsInfo,
                 reverseLayout = reverseLayout,

@@ -113,6 +113,8 @@ class KRView : public IKRRenderViewExport {
     std::weak_ptr<SuperTouchHandler> parent_super_touch_handler_;
     SuperTouchType super_touch_type_ = UNKNOWN;
     bool stop_propagation_ = false;
+    bool native_dispatch_capture_requested_ = false;
+    bool native_dispatch_captured_gesture_ = false;
 
     SelectableOption selectable_option_ = SelectableOption::ENABLE;
 
