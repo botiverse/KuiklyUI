@@ -417,6 +417,13 @@ open class TextSpan : TextAttr(), ISpan {
         return this
     }
 
+    fun slockMarkdownTagChrome(kind: String): TextSpan {
+        if (kind.isNotBlank()) {
+            setProp(TextConst.SLOCK_MARKDOWN_TAG_CHROME, kind)
+        }
+        return this
+    }
+
     /**
      * 单击事件的定义
      * @param handler 事件处理函数
