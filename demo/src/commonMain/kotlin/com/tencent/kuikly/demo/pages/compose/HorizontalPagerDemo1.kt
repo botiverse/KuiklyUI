@@ -204,7 +204,31 @@ class HorizontalPagerDemo1 : ComposeContainer() {
 
             Spacer(Modifier.height(20.dp))
 
-            // 7. 测试 userScrollEnabled
+            // 7. 测试 keepItemAlive
+            Text("7. keepItemAlive = true:")
+            HorizontalPager(
+                state = rememberPagerState { 3 },
+                modifier =
+                    Modifier
+                        .height(100.dp)
+                        .background(Color.LightGray),
+                keepItemAlive = true,
+            ) { page ->
+                Box(
+                    modifier =
+                        Modifier
+                            .fillMaxSize()
+                            .background(Color.Yellow)
+                            .padding(4.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Alive Page $page")
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // 8. 测试 userScrollEnabled
             var scrollEnabled by remember { mutableStateOf(true) }
             Box(
                 modifier =
@@ -212,7 +236,7 @@ class HorizontalPagerDemo1 : ComposeContainer() {
                         scrollEnabled = !scrollEnabled
                     },
             ) {
-                Text("7. 点击切换滚动状态 (userScrollEnabled = $scrollEnabled):")
+                Text("8. 点击切换滚动状态 (userScrollEnabled = $scrollEnabled):")
             }
             HorizontalPager(
                 state = rememberPagerState { 5 },
