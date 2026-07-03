@@ -185,6 +185,9 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
                     spanIndex = it[0].index
                 }
             }
+            if (spanIndex < 0) {
+                spanIndex = richTextShadow?.spanIndexAtOffset(off) ?: -1
+            }
         }
 
         // 3.添加spanIndex参数
@@ -692,6 +695,15 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
         }
         return rect
     }
+
+    internal fun spanIndexAtOffset(offset: Int): Int =
+        spanTextRanges
+            .firstOrNull { range -> offset >= range.start && offset < range.end }
+            ?.index
+            ?: spanTextRanges
+                .firstOrNull { range -> offset == range.end && range.start < range.end }
+                ?.index
+            ?: -1
 
     override fun calculateRenderViewSize(constraintSize: SizeF): SizeF {
         richTextLog(
