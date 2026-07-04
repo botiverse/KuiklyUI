@@ -112,6 +112,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                         append(spanText)
                     }
                 })
+                if (spanProps is TextSpanProps && spanProps.slockInlineCode) {
+                    spannedBuilder.applySlockInlineCodeEdgePadding(spanStart, spanEnd)
+                }
                 if (spanProps is TextSpanProps && spanProps.slockMarkdownTagChrome != null) {
                     spannedBuilder.applySlockMarkdownTagAtomicTextSpan(spanStart, spanEnd)
                 }
@@ -367,6 +370,72 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 
 class KRSlockInlineCodeSpan
 class KRSlockMarkdownTagSpan(val kind: String)
+
+private fun SpannableStringBuilder.applySlockInlineCodeEdgePadding(start: Int, end: Int) {
+    if (start >= end) return
+    if (end - start == 1) {
+        setSpan(
+            KRSlockInlineCodeEdgePaddingSpan(addLeading = true, addTrailing = true),
+            start,
+            end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        return
+    }
+    setSpan(
+        KRSlockInlineCodeEdgePaddingSpan(addLeading = true, addTrailing = false),
+        start,
+        start + 1,
+        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+    )
+    setSpan(
+        KRSlockInlineCodeEdgePaddingSpan(addLeading = false, addTrailing = true),
+        end - 1,
+        end,
+        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+    )
+}
+
+private class KRSlockInlineCodeEdgePaddingSpan(
+    private val addLeading: Boolean,
+    private val addTrailing: Boolean
+) : ReplacementSpan() {
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int = if (text == null || start >= end) {
+        0
+    } else {
+        val textWidth = paint.measureText(text, start, end)
+        ceil((textWidth + leadingPadding(paint) + trailingPadding(paint)).toDouble()).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text != null && start < end) {
+            canvas.drawText(text, start, end, x + leadingPadding(paint), y.toFloat(), paint)
+        }
+    }
+
+    private fun leadingPadding(paint: Paint): Float =
+        if (addLeading) paint.textSize * SLOCK_INLINE_CODE_EDGE_PADDING_RATIO else 0f
+
+    private fun trailingPadding(paint: Paint): Float =
+        if (addTrailing) paint.textSize * SLOCK_INLINE_CODE_EDGE_PADDING_RATIO else 0f
+}
 
 private fun SpannableStringBuilder.applySlockMarkdownTagAtomicTextSpan(start: Int, end: Int) {
     if (start < end) {

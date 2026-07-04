@@ -198,7 +198,6 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
         val paint = textLayout.paint
         val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
-        val horizontalMargin = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO
         val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
         val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
@@ -234,12 +233,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 val segmentLeft = min(startX, endX)
                 val segmentRight = max(startX, endX)
                 val left = if (segmentStart == start) {
-                    segmentLeft + horizontalMargin
+                    segmentLeft
                 } else {
                     segmentLeft - horizontalPadding
                 }.coerceAtLeast(layoutLeft)
                 val right = if (segmentEnd == end) {
-                    segmentRight - horizontalMargin
+                    segmentRight
                 } else {
                     segmentRight + horizontalPadding
                 }.coerceAtMost(layoutRight)
