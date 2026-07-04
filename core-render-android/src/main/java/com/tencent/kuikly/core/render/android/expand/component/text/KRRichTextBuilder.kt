@@ -112,9 +112,6 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                         append(spanText)
                     }
                 })
-                if (spanProps is TextSpanProps && spanProps.slockInlineCode) {
-                    spannedBuilder.applySlockInlineCodeAtomicTextSpans(spanStart, spanEnd)
-                }
                 if (spanProps is TextSpanProps && spanProps.slockMarkdownTagChrome != null) {
                     spannedBuilder.applySlockMarkdownTagAtomicTextSpan(spanStart, spanEnd)
                 }
@@ -382,86 +379,6 @@ private fun SpannableStringBuilder.applySlockMarkdownTagAtomicTextSpan(start: In
     }
 }
 
-private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: Int, end: Int) {
-    var index = start
-    var firstAtom = true
-    while (index < end) {
-        if (this[index].isWhitespace()) {
-            index++
-            continue
-        }
-        val rangeStart = index
-        while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
-            index++
-        }
-        val textStart = index
-        while (index < end &&
-            !this[index].isWhitespace() &&
-            !this[index].isSlockInlineCodeBreakSeparator()
-        ) {
-            index++
-        }
-        var textLength = index - textStart
-        while (textLength in 1..2 &&
-            index < end &&
-            this[index].isSlockInlineCodeBreakSeparator()
-        ) {
-            val separatorStart = index
-            while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
-                index++
-            }
-            val nextTextStart = index
-            while (index < end &&
-                !this[index].isWhitespace() &&
-                !this[index].isSlockInlineCodeBreakSeparator()
-            ) {
-                index++
-            }
-            if (index <= nextTextStart) {
-                index = separatorStart
-                break
-            }
-            textLength = index - textStart
-        }
-        if (index > textStart) {
-            val padStart = firstAtom
-            val padEnd = !hasSlockInlineCodeAtomAfter(index, end)
-            setSpan(
-                KRSlockInlineCodeAtomicTextSpan(padStart, padEnd),
-                rangeStart,
-                index,
-                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
-            firstAtom = false
-        }
-    }
-}
-
-private fun Char.isSlockInlineCodeBreakSeparator(): Boolean =
-    this == '/' || this == '\\' || this == '.' || this == '-' || this == ':'
-
-private fun CharSequence.hasSlockInlineCodeAtomAfter(start: Int, end: Int): Boolean {
-    var index = start
-    while (index < end) {
-        if (this[index].isWhitespace()) {
-            index++
-            continue
-        }
-        while (index < end && this[index].isSlockInlineCodeBreakSeparator()) {
-            index++
-        }
-        val textStart = index
-        while (index < end &&
-            !this[index].isWhitespace() &&
-            !this[index].isSlockInlineCodeBreakSeparator()
-        ) {
-            index++
-        }
-        if (index > textStart) return true
-    }
-    return false
-}
-
 private class KRSlockMarkdownTagAtomicTextSpan : ReplacementSpan() {
 
     override fun getSize(
@@ -492,54 +409,6 @@ private class KRSlockMarkdownTagAtomicTextSpan : ReplacementSpan() {
         if (text != null && start < end) {
             canvas.drawText(text, start, end, x + edgePadding(paint), y.toFloat(), paint)
         }
-    }
-
-    private fun edgePadding(paint: Paint): Float {
-        return paint.textSize * (SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO)
-    }
-}
-
-private class KRSlockInlineCodeAtomicTextSpan(
-    private val padStart: Boolean,
-    private val padEnd: Boolean
-) : ReplacementSpan() {
-
-    override fun getSize(
-        paint: Paint,
-        text: CharSequence?,
-        start: Int,
-        end: Int,
-        fm: Paint.FontMetricsInt?
-    ): Int = if (text == null || start >= end) {
-        0
-    } else {
-        val textWidth = paint.measureText(text, start, end)
-        val strokePadding = max(1f, paint.strokeWidth * 2f)
-        ceil((textWidth + strokePadding + startPadding(paint) + endPadding(paint)).toDouble()).toInt()
-    }
-
-    override fun draw(
-        canvas: Canvas,
-        text: CharSequence?,
-        start: Int,
-        end: Int,
-        x: Float,
-        top: Int,
-        y: Int,
-        bottom: Int,
-        paint: Paint
-    ) {
-        if (text != null && start < end) {
-            canvas.drawText(text, start, end, x + startPadding(paint), y.toFloat(), paint)
-        }
-    }
-
-    private fun startPadding(paint: Paint): Float {
-        return if (padStart) edgePadding(paint) else 0f
-    }
-
-    private fun endPadding(paint: Paint): Float {
-        return if (padEnd) edgePadding(paint) else 0f
     }
 
     private fun edgePadding(paint: Paint): Float {

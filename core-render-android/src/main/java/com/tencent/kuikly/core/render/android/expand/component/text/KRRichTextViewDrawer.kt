@@ -126,6 +126,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
         val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
 
         spans.forEach { span ->
             val start = spanned.getSpanStart(span)
@@ -162,12 +163,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                     segmentLeft + horizontalMargin
                 } else {
                     segmentLeft - horizontalPadding
-                }
+                }.coerceAtLeast(layoutLeft)
                 val right = if (segmentEnd == end) {
                     segmentRight - horizontalMargin
                 } else {
                     segmentRight + horizontalPadding
-                }
+                }.coerceAtMost(layoutRight)
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
@@ -202,6 +203,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
         val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
 
         spans.forEach { span ->
             val start = spanned.getSpanStart(span)
@@ -235,12 +237,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                     segmentLeft + horizontalMargin
                 } else {
                     segmentLeft - horizontalPadding
-                }
+                }.coerceAtLeast(layoutLeft)
                 val right = if (segmentEnd == end) {
                     segmentRight - horizontalMargin
                 } else {
                     segmentRight + horizontalPadding
-                }
+                }.coerceAtMost(layoutRight)
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
