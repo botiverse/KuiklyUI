@@ -61,7 +61,7 @@ internal class BackgroundColorTypeEvaluator(private val targetView: View) : Type
  */
 internal class TransformTypeEvaluator(private val targetView: View) : TypeEvaluator<KRCSSTransform> {
 
-    private val reuseTransform = KRCSSTransform(null, targetView)
+    private val reuseTransform = KRCSSTransform(null, targetView).apply { fromAnimation = true }
 
     override fun evaluate(
         fraction: Float,
