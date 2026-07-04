@@ -269,6 +269,9 @@ void KRParagraph::AddSpanToStyledString(const KRRenderValue::Map &spanMap, ArkUI
     auto lineSpacing = GetKTValue("lineSpacing", spanMap, props_)->toFloat() / (fontSize / dpi); // 行间距比例
     auto textAlign = kuikly::util::ConvertToTextAlign(GetKTValue("textAlign", spanMap, props_)->toString());
     auto textDecoration = kuikly::util::ConvertToTextDecoration(GetKTValue("textDecoration", spanMap, props_)->toString());
+    auto textDecorationColorStr = GetKTValue("textDecorationColor", spanMap, props_)->toString();
+    auto textDecorationColor = textDecorationColorStr.length() ? kuikly::util::ConvertToHexColor(textDecorationColorStr) : color;
+    auto textDecorationThickness = GetKTValue("textDecorationThickness", spanMap, props_)->toFloat();
     auto fontStyle = kuikly::util::ConvertToFontStyle(GetKTValue("fontStyle", spanMap, props_)->toString());
     auto letterSpacing = GetKTValue("letterSpacing", spanMap, props_)->toDouble();
     auto textShadowStr = GetKTValue("textShadow", spanMap, props_)->toString();
@@ -320,6 +323,14 @@ void KRParagraph::AddSpanToStyledString(const KRRenderValue::Map &spanMap, ArkUI
     OH_Drawing_SetTextStyleFontWeight(txtStyle, fontWeight);
     OH_Drawing_SetTextStyleBaseLine(txtStyle, TEXT_BASELINE_ALPHABETIC);
     OH_Drawing_SetTextStyleDecoration(txtStyle, textDecoration);
+    if (textDecoration != TEXT_DECORATION_NONE) {
+        if (textDecorationColorStr.length()) {
+            OH_Drawing_SetTextStyleDecorationColor(txtStyle, textDecorationColor);
+        }
+        if (textDecorationThickness > 0 && fontSize > 0) {
+            OH_Drawing_SetTextStyleDecorationThicknessScale(txtStyle, textDecorationThickness * dpi / fontSize);
+        }
+    }
     OH_Drawing_SetTextStyleFontStyle(txtStyle, fontStyle);
     if (letterSpacing > 0) {
         OH_Drawing_SetTextStyleLetterSpacing(txtStyle, letterSpacing * dpi);

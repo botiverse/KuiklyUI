@@ -417,6 +417,21 @@ open class TextSpan : TextAttr(), ISpan {
         return this
     }
 
+    override fun textDecorationColor(color: Color): TextSpan {
+        TextConst.TEXT_DECORATION_COLOR with color.toString()
+        return this
+    }
+
+    override fun textDecorationThickness(thickness: Float): TextSpan {
+        TextConst.TEXT_DECORATION_THICKNESS with thickness
+        return this
+    }
+
+    override fun textDecorationOffset(offset: Float): TextSpan {
+        TextConst.TEXT_DECORATION_OFFSET with offset
+        return this
+    }
+
     /**
      * 单击事件的定义
      * @param handler 事件处理函数

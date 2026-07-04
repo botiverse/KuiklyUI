@@ -459,6 +459,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         auto lineSpacing = GetKRValue("lineSpacing", spanMap, props_)->toFloat() / (fontSize / dpi);  // 行间距比例
         auto textAlign = kuikly::util::ConvertToTextAlign(GetKRValue("textAlign", spanMap, props_)->toString());
         auto textDecoration = kuikly::util::ConvertToTextDecoration(GetKRValue("textDecoration", spanMap, props_)->toString());
+        auto textDecorationColorStr = GetKRValue("textDecorationColor", spanMap, props_)->toString();
+        auto textDecorationColor = textDecorationColorStr.length() ? kuikly::util::ConvertToHexColor(textDecorationColorStr) : color;
+        auto textDecorationThickness = GetKRValue("textDecorationThickness", spanMap, props_)->toFloat();
         auto fontStyle = kuikly::util::ConvertToFontStyle(GetKRValue("fontStyle", spanMap, props_)->toString());
         auto letterSpacing = GetKRValue("letterSpacing", spanMap, props_)->toDouble();
         auto textShadowStr = GetKRValue("textShadow", spanMap, props_)->toString();
@@ -543,6 +546,14 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         OH_Drawing_SetTextStyleFontWeight(txtStyle, fontWeight);
         OH_Drawing_SetTextStyleBaseLine(txtStyle, TEXT_BASELINE_ALPHABETIC);
         OH_Drawing_SetTextStyleDecoration(txtStyle, textDecoration);
+        if (textDecoration != TEXT_DECORATION_NONE) {
+            if (textDecorationColorStr.length()) {
+                OH_Drawing_SetTextStyleDecorationColor(txtStyle, textDecorationColor);
+            }
+            if (textDecorationThickness > 0 && fontSize > 0) {
+                OH_Drawing_SetTextStyleDecorationThicknessScale(txtStyle, textDecorationThickness * dpi / fontSize);
+            }
+        }
         OH_Drawing_SetTextStyleFontStyle(txtStyle, fontStyle);
         if (letterSpacing > 0) {
             OH_Drawing_SetTextStyleLetterSpacing(txtStyle, letterSpacing * dpi);

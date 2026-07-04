@@ -253,6 +253,9 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
 
         CGFloat letterSpacing = [KRConvertUtil CGFloat:propStyle[@"letterSpacing"]];
         KRTextDecorationLineType textDecoration = [KRConvertUtil KRTextDecorationLineType:propStyle[@"textDecoration"]];
+        UIColor *textDecorationColor = [UIView css_color:propStyle[@"textDecorationColor"]];
+        NSNumber *textDecorationThickness = propStyle[@"textDecorationThickness"] ? @([KRConvertUtil CGFloat:propStyle[@"textDecorationThickness"]]) : nil;
+        NSNumber *textDecorationOffset = propStyle[@"textDecorationOffset"] ? @([KRConvertUtil CGFloat:propStyle[@"textDecorationOffset"]]) : nil;
         NSTextAlignment textAlign = [KRConvertUtil NSTextAlignment:propStyle[@"textAlign"]];
         NSNumber *lineHeight = nil;
         NSNumber *lineSpacing = nil;
@@ -302,6 +305,9 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
         spanAttrs.cssGradient = cssGricent;
         spanAttrs.letterSpacing = letterSpacing;
         spanAttrs.textDecoration = textDecoration;
+        spanAttrs.textDecorationColor = textDecorationColor;
+        spanAttrs.textDecorationThickness = textDecorationThickness;
+        spanAttrs.textDecorationOffset = textDecorationOffset;
         spanAttrs.textAlign = textAlign;
         spanAttrs.lineSpacing = lineSpacing;
         spanAttrs.lineHeight = lineHeight;
@@ -378,7 +384,11 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
     }
 
     if (attrs.textDecoration == KRTextDecorationLineTypeUnderline) {
-        [attributedString addAttribute:NSUnderlineStyleAttributeName value:@(NSUnderlineStyleSingle) range:range];
+        NSUnderlineStyle underlineStyle = attrs.textDecorationThickness ? NSUnderlineStyleThick : NSUnderlineStyleSingle;
+        [attributedString addAttribute:NSUnderlineStyleAttributeName value:@(underlineStyle) range:range];
+        if (attrs.textDecorationColor) {
+            [attributedString addAttribute:NSUnderlineColorAttributeName value:attrs.textDecorationColor range:range];
+        }
     }
     if (attrs.textDecoration == KRTextDecorationLineTypeStrikethrough) {
         [attributedString addAttribute:NSStrikethroughStyleAttributeName value:@(NSUnderlineStyleSingle) range:range];

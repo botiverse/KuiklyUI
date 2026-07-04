@@ -75,6 +75,9 @@ private val DefaultColor = Color.Black
  * @param background The background color for the text.
  * @param textDecoration The decorations to paint on the text (e.g., an underline).
  * @param shadow The shadow effect applied on the text.
+ * @param textDecorationColor The color used for text decorations such as underlines.
+ * @param textDecorationThickness The thickness used for text decorations such as underlines.
+ * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
  * @param platformStyle Platform specific [SpanStyle] parameters.
  * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke around
  * the edges.
@@ -100,6 +103,9 @@ class SpanStyle internal constructor(
     val background: Color = Color.Unspecified,  // kuikly暂时不支持
     val textDecoration: TextDecoration? = null,
     val shadow: Shadow? = null,
+    val textDecorationColor: Color = Color.Unspecified,
+    val textDecorationThickness: TextUnit = TextUnit.Unspecified,
+    val textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //    val platformStyle: PlatformSpanStyle? = null,
 //    val drawStyle: DrawStyle? = null
 ) {
@@ -131,6 +137,9 @@ class SpanStyle internal constructor(
      * @param background The background color for the text.
      * @param textDecoration The decorations to paint on the text (e.g., an underline).
      * @param shadow The shadow effect applied on the text.
+     * @param textDecorationColor The color used for text decorations such as underlines.
+     * @param textDecorationThickness The thickness used for text decorations such as underlines.
+     * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
      * @param platformStyle Platform specific [SpanStyle] parameters.
      * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke
      * around the edges.
@@ -154,6 +163,9 @@ class SpanStyle internal constructor(
         background: Color = Color.Unspecified,
         textDecoration: TextDecoration? = null,
         shadow: Shadow? = null,
+        textDecorationColor: Color = Color.Unspecified,
+        textDecorationThickness: TextUnit = TextUnit.Unspecified,
+        textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //        platformStyle: PlatformSpanStyle? = null,
 //        drawStyle: DrawStyle? = null
     ) : this(
@@ -171,6 +183,9 @@ class SpanStyle internal constructor(
         background = background,
         textDecoration = textDecoration,
         shadow = shadow,
+        textDecorationColor = textDecorationColor,
+        textDecorationThickness = textDecorationThickness,
+        textDecorationOffset = textDecorationOffset,
 //        platformStyle = platformStyle,
 //        drawStyle = drawStyle
     )
@@ -206,6 +221,9 @@ class SpanStyle internal constructor(
      * @param background The background color for the text.
      * @param textDecoration The decorations to paint on the text (e.g., an underline).
      * @param shadow The shadow effect applied on the text.
+     * @param textDecorationColor The color used for text decorations such as underlines.
+     * @param textDecorationThickness The thickness used for text decorations such as underlines.
+     * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
      * @param platformStyle Platform specific [SpanStyle] parameters.
      * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke
      * around the edges.
@@ -230,6 +248,9 @@ class SpanStyle internal constructor(
         background: Color = Color.Unspecified,
         textDecoration: TextDecoration? = null,
         shadow: Shadow? = null,
+        textDecorationColor: Color = Color.Unspecified,
+        textDecorationThickness: TextUnit = TextUnit.Unspecified,
+        textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //        platformStyle: PlatformSpanStyle? = null,
 //        drawStyle: DrawStyle? = null
     ) : this(
@@ -247,6 +268,9 @@ class SpanStyle internal constructor(
         background = background,
         textDecoration = textDecoration,
         shadow = shadow,
+        textDecorationColor = textDecorationColor,
+        textDecorationThickness = textDecorationThickness,
+        textDecorationOffset = textDecorationOffset,
 //        platformStyle = platformStyle,
 //        drawStyle = drawStyle
     )
@@ -296,6 +320,9 @@ class SpanStyle internal constructor(
             background = other.background,
             textDecoration = other.textDecoration,
             shadow = other.shadow,
+            textDecorationColor = other.textDecorationColor,
+            textDecorationThickness = other.textDecorationThickness,
+            textDecorationOffset = other.textDecorationOffset,
 //            platformStyle = other.platformStyle,
 //            drawStyle = other.drawStyle
         )
@@ -322,6 +349,9 @@ class SpanStyle internal constructor(
         background: Color = this.background,
         textDecoration: TextDecoration? = this.textDecoration,
         shadow: Shadow? = this.shadow,
+        textDecorationColor: Color = this.textDecorationColor,
+        textDecorationThickness: TextUnit = this.textDecorationThickness,
+        textDecorationOffset: TextUnit = this.textDecorationOffset,
 //        platformStyle: PlatformSpanStyle? = this.platformStyle,
 //        drawStyle: DrawStyle? = this.drawStyle
     ): SpanStyle {
@@ -344,6 +374,9 @@ class SpanStyle internal constructor(
             background = background,
             textDecoration = textDecoration,
             shadow = shadow,
+            textDecorationColor = textDecorationColor,
+            textDecorationThickness = textDecorationThickness,
+            textDecorationOffset = textDecorationOffset,
 //            platformStyle = platformStyle,
 //            drawStyle = drawStyle
         )
@@ -365,6 +398,9 @@ class SpanStyle internal constructor(
         background: Color = this.background,
         textDecoration: TextDecoration? = this.textDecoration,
         shadow: Shadow? = this.shadow,
+        textDecorationColor: Color = this.textDecorationColor,
+        textDecorationThickness: TextUnit = this.textDecorationThickness,
+        textDecorationOffset: TextUnit = this.textDecorationOffset,
 //        platformStyle: PlatformSpanStyle? = this.platformStyle,
 //        drawStyle: DrawStyle? = this.drawStyle
     ): SpanStyle {
@@ -383,6 +419,9 @@ class SpanStyle internal constructor(
             background = background,
             textDecoration = textDecoration,
             shadow = shadow,
+            textDecorationColor = textDecorationColor,
+            textDecorationThickness = textDecorationThickness,
+            textDecorationOffset = textDecorationOffset,
 //            platformStyle = platformStyle,
 //            drawStyle = drawStyle
         )
@@ -415,6 +454,9 @@ class SpanStyle internal constructor(
     internal fun hasSameNonLayoutAttributes(other: SpanStyle): Boolean {
         if (textForegroundStyle != other.textForegroundStyle) return false
         if (textDecoration != other.textDecoration) return false
+        if (textDecorationColor != other.textDecorationColor) return false
+        if (textDecorationThickness != other.textDecorationThickness) return false
+        if (textDecorationOffset != other.textDecorationOffset) return false
         if (shadow != other.shadow) return false
 //        if (drawStyle != other.drawStyle) return false
         return true
@@ -436,6 +478,9 @@ class SpanStyle internal constructor(
 //        result = 31 * result + (localeList?.hashCode() ?: 0)
         result = 31 * result + background.hashCode()
         result = 31 * result + (textDecoration?.hashCode() ?: 0)
+        result = 31 * result + textDecorationColor.hashCode()
+        result = 31 * result + textDecorationThickness.hashCode()
+        result = 31 * result + textDecorationOffset.hashCode()
         result = 31 * result + (shadow?.hashCode() ?: 0)
 //        result = 31 * result + (platformStyle?.hashCode() ?: 0)
 //        result = 31 * result + (drawStyle?.hashCode() ?: 0)
@@ -478,6 +523,9 @@ class SpanStyle internal constructor(
 //            append("localeList=$localeList, ")
             append("background=$background, ")
             append("textDecoration=$textDecoration, ")
+            append("textDecorationColor=$textDecorationColor, ")
+            append("textDecorationThickness=$textDecorationThickness, ")
+            append("textDecorationOffset=$textDecorationOffset, ")
             append("shadow=$shadow, ")
 //            append("platformStyle=$platformStyle, ")
 //            append("drawStyle=$drawStyle")
@@ -569,6 +617,21 @@ fun lerp(start: SpanStyle, stop: SpanStyle, fraction: Float): SpanStyle {
             stop.textDecoration,
             fraction
         ),
+        textDecorationColor = lerp(
+            start.textDecorationColor,
+            stop.textDecorationColor,
+            fraction
+        ),
+        textDecorationThickness = lerpTextUnitInheritable(
+            start.textDecorationThickness,
+            stop.textDecorationThickness,
+            fraction
+        ),
+        textDecorationOffset = lerpTextUnitInheritable(
+            start.textDecorationOffset,
+            stop.textDecorationOffset,
+            fraction
+        ),
         shadow = lerp(
             start.shadow ?: Shadow(),
             stop.shadow ?: Shadow(),
@@ -614,6 +677,9 @@ internal fun resolveSpanStyleDefaults(style: SpanStyle) = SpanStyle(
 //    localeList = style.localeList ?: LocaleList.current,
     background = style.background.takeOrElse { DefaultBackgroundColor },
     textDecoration = style.textDecoration ?: TextDecoration.None,
+    textDecorationColor = style.textDecorationColor,
+    textDecorationThickness = style.textDecorationThickness,
+    textDecorationOffset = style.textDecorationOffset,
     shadow = style.shadow ?: Shadow.None,
 //    platformStyle = style.platformStyle,
 //    drawStyle = style.drawStyle ?: Fill
@@ -636,6 +702,9 @@ internal fun SpanStyle.fastMerge(
     background: Color,
     textDecoration: TextDecoration?,
     shadow: Shadow?,
+    textDecorationColor: Color = Color.Unspecified,
+    textDecorationThickness: TextUnit = TextUnit.Unspecified,
+    textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //    platformStyle: PlatformSpanStyle?,
 //    drawStyle: DrawStyle?
 ): SpanStyle {
@@ -661,6 +730,9 @@ internal fun SpanStyle.fastMerge(
         fontFamily != null && fontFamily !== this.fontFamily ||
         letterSpacing.isSpecified && letterSpacing != this.letterSpacing ||
         textDecoration != null && textDecoration != this.textDecoration ||
+        textDecorationColor.isSpecified && textDecorationColor != this.textDecorationColor ||
+        textDecorationThickness.isSpecified && textDecorationThickness != this.textDecorationThickness ||
+        textDecorationOffset.isSpecified && textDecorationOffset != this.textDecorationOffset ||
         // then compare the remaining params, for potential non-Text merges
         brush != textForegroundStyle.brush ||
         brush != null && alpha != this.textForegroundStyle.alpha ||
@@ -704,6 +776,17 @@ internal fun SpanStyle.fastMerge(
 //        localeList = localeList ?: this.localeList,
         background = background.takeOrElse { this.background },
         textDecoration = textDecoration ?: this.textDecoration,
+        textDecorationColor = textDecorationColor.takeOrElse { this.textDecorationColor },
+        textDecorationThickness = if (!textDecorationThickness.isUnspecified) {
+            textDecorationThickness
+        } else {
+            this.textDecorationThickness
+        },
+        textDecorationOffset = if (!textDecorationOffset.isUnspecified) {
+            textDecorationOffset
+        } else {
+            this.textDecorationOffset
+        },
         shadow = shadow ?: this.shadow,
 //        platformStyle = mergePlatformStyle(platformStyle),
 //        drawStyle = drawStyle ?: this.drawStyle

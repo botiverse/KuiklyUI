@@ -209,6 +209,18 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         if (spanProps.textDecoration.isNotEmpty()) {
             if (spanProps.textDecoration == KRTextProps.TEXT_DECORATION_LINE_THROUGH) {
                 textSpans.add(StrikethroughSpan())
+            } else if (
+                spanProps.textDecorationColor != null ||
+                spanProps.textDecorationThickness != null ||
+                spanProps.textDecorationOffset != null
+            ) {
+                textSpans.add(
+                    KRCustomUnderlineSpan(
+                        color = spanProps.textDecorationColor,
+                        thickness = spanProps.textDecorationThickness,
+                        offset = spanProps.textDecorationOffset
+                    )
+                )
             } else {
                 textSpans.add(UnderlineSpan())
             }
@@ -265,6 +277,9 @@ class TextSpanProps(
     val fontStyle: Int
     val letterSpacing: Float
     val textDecoration: String
+    val textDecorationColor: Int?
+    val textDecorationThickness: Float?
+    val textDecorationOffset: Float?
     val lineHeight: Float
     val backgroundImage: String
     val backgroundColor: Int
@@ -309,6 +324,20 @@ class TextSpanProps(
             defaultProps.letterSpacing
         }
         textDecoration = spanValue.optString(KRTextProps.PROP_KEY_TEXT_DECORATION, defaultProps.textDecoration)
+        textDecorationColor =
+            spanValue.optString(TextConst.TEXT_DECORATION_COLOR)
+                .takeIf { it.isNotEmpty() }
+                ?.toColor()
+        textDecorationThickness =
+            spanValue.optDouble(TextConst.TEXT_DECORATION_THICKNESS, 0.0)
+                .toFloat()
+                .takeIf { it > 0f }
+                ?.let { kuiklyContext.toPxF(it) }
+        textDecorationOffset =
+            spanValue.optDouble(TextConst.TEXT_DECORATION_OFFSET, 0.0)
+                .toFloat()
+                .takeIf { it != 0f }
+                ?.let { kuiklyContext.toPxF(it) }
         lineHeight = if (spanValue.has(KRTextProps.PROP_KEY_LINE_HEIGHT)) {
             kuiklyContext.toPxF(spanValue.optDouble(KRTextProps.PROP_KEY_LINE_HEIGHT).toFloat())
         } else {
@@ -356,6 +385,57 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 }
 
 class KRSlockInlineCodeSpan
+
+private class KRCustomUnderlineSpan(
+    private val color: Int?,
+    private val thickness: Float?,
+    private val offset: Float?
+) : ReplacementSpan() {
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int =
+        if (text == null || start >= end) {
+            0
+        } else {
+            ceil(paint.measureText(text, start, end).toDouble()).toInt()
+        }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text == null || start >= end) return
+        canvas.drawText(text, start, end, x, y.toFloat(), paint)
+
+        val lineWidth = paint.measureText(text, start, end)
+        val previousColor = paint.color
+        val previousStrokeWidth = paint.strokeWidth
+        val previousStyle = paint.style
+        val previousAntiAlias = paint.isAntiAlias
+        paint.color = color ?: previousColor
+        paint.strokeWidth = thickness ?: max(1f, previousStrokeWidth)
+        paint.style = Paint.Style.STROKE
+        paint.isAntiAlias = true
+        val underlineY = y.toFloat() + (offset ?: max(1f, paint.strokeWidth))
+        canvas.drawLine(x, underlineY, x + lineWidth, underlineY, paint)
+        paint.color = previousColor
+        paint.strokeWidth = previousStrokeWidth
+        paint.style = previousStyle
+        paint.isAntiAlias = previousAntiAlias
+    }
+}
 
 private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: Int, end: Int) {
     var index = start

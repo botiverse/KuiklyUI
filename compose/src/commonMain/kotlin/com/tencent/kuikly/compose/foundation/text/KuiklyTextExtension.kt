@@ -472,6 +472,15 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
 
     // Apply text decoration
     spanStyle.textDecoration?.let { applyTextDecoration(it) }
+    if (spanStyle.textDecorationColor.isSpecified) {
+        setProp(TextConst.TEXT_DECORATION_COLOR, spanStyle.textDecorationColor.toKuiklyColor().toString())
+    }
+    if (spanStyle.textDecorationThickness.isSpecified) {
+        setProp(TextConst.TEXT_DECORATION_THICKNESS, scaleToDensity(density, spanStyle.textDecorationThickness.value))
+    }
+    if (spanStyle.textDecorationOffset.isSpecified) {
+        setProp(TextConst.TEXT_DECORATION_OFFSET, scaleToDensity(density, spanStyle.textDecorationOffset.value))
+    }
 
     // Apply letter spacing
     if (spanStyle.letterSpacing.isSpecified) {
