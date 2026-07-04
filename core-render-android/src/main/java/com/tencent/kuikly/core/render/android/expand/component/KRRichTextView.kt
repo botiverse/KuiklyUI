@@ -51,6 +51,7 @@ import com.tencent.kuikly.core.render.android.expand.component.text.*
 import com.tencent.kuikly.core.render.android.export.IKuiklyRenderShadowExport
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderCallback
 import org.json.JSONArray
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -889,11 +890,17 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
                     .setEllipsize(TextUtils.TruncateAt.END)
             }
             return if (textProps.lineBreakMargin == 0f || textProps.numberOfLines == 0) {
-                builder.build().also { layout ->
+                val layout = builder.build()
+                val resolvedLayout = if (textProps.lineBreakMargin == 0f && textProps.numberOfLines == 0) {
+                    layout.withSlockInlineCodeFragmentIndents(textSource, desiredWidth)
+                } else {
+                    layout
+                }
+                resolvedLayout.also { finalLayout ->
                     richTextLog(
                         "phase=native.shadow.create_layout shadow=${System.identityHashCode(this)} " +
-                            "textLength=${textSource.length} desiredWidth=$desiredWidth lines=${layout.lineCount} " +
-                            "height=${layout.height} mode=$measureMode"
+                            "textLength=${textSource.length} desiredWidth=$desiredWidth lines=${finalLayout.lineCount} " +
+                            "height=${finalLayout.height} mode=$measureMode"
                     )
                 }
             } else {
@@ -956,6 +963,77 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
             .setIncludePad(false)
     }
 
+    private fun StaticLayout.withSlockInlineCodeFragmentIndents(
+        textSource: CharSequence,
+        desiredWidth: Int
+    ): StaticLayout {
+        if (textSource !is Spanned) return this
+        if (textSource.getSpans(0, textSource.length, KRSlockInlineCodeSpan::class.java).isEmpty()) {
+            return this
+        }
+
+        var layout = this
+        repeat(SLOCK_INLINE_CODE_INDENT_LAYOUT_PASSES) {
+            val indents = layout.slockInlineCodeFragmentIndents(textSource) ?: return layout
+            layout = createStaticLayoutBuilder(textSource, desiredWidth)
+                .setIndents(indents.left, indents.right)
+                .build()
+        }
+        return layout
+    }
+
+    private fun Layout.slockInlineCodeFragmentIndents(spanned: Spanned): SlockInlineCodeFragmentIndents? {
+        val spans = spanned.getSpans(0, spanned.length, KRSlockInlineCodeSpan::class.java)
+        if (spans.isEmpty()) return null
+
+        val edgePadding = ceil((textPaint.textSize * SLOCK_INLINE_CODE_FRAGMENT_PADDING_RATIO).toDouble()).toInt()
+        if (edgePadding <= 0) return null
+
+        val leftIndents = IntArray(lineCount)
+        val rightIndents = IntArray(lineCount)
+        var hasIndent = false
+
+        for (line in 0 until lineCount) {
+            val lineStart = getLineStart(line)
+            val lineVisibleEnd = getSlockVisibleLineEnd(line)
+            if (lineVisibleEnd <= lineStart) continue
+
+            spans.forEach { span ->
+                val spanStart = spanned.getSpanStart(span)
+                val spanEnd = spanned.getSpanEnd(span)
+                if (spanStart < 0 || spanEnd <= spanStart) return@forEach
+
+                val segmentStart = max(spanStart, lineStart)
+                val segmentEnd = minOf(spanEnd, lineVisibleEnd)
+                if (segmentEnd <= segmentStart) return@forEach
+
+                if (segmentStart > spanStart && segmentStart <= lineStart) {
+                    leftIndents[line] = max(leftIndents[line], edgePadding)
+                    hasIndent = true
+                }
+                if (segmentEnd < spanEnd && segmentEnd >= lineVisibleEnd) {
+                    rightIndents[line] = max(rightIndents[line], edgePadding)
+                    hasIndent = true
+                }
+            }
+        }
+
+        return if (hasIndent) {
+            SlockInlineCodeFragmentIndents(leftIndents, rightIndents)
+        } else {
+            null
+        }
+    }
+
+    private fun Layout.getSlockVisibleLineEnd(line: Int): Int {
+        val lineStart = getLineStart(line)
+        val ellipsisCount = getEllipsisCount(line)
+        if (ellipsisCount > 0) {
+            return (lineStart + getEllipsisStart(line)).coerceAtLeast(lineStart)
+        }
+        return getLineVisibleEnd(line)
+    }
+
     private fun createLineBreakMarginArray(textProps: KRTextProps): IntArray {
         val maxLines = textProps.numberOfLines
         val array = IntArray(maxLines)
@@ -1016,8 +1094,15 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
     companion object {
         private const val METHOD_GET_PLACEHOLDER_SPAN_RECT = "spanRect"
         private const val METHOD_IS_LINE_BREAK_MARGIN = "isLineBreakMargin"
+        private const val SLOCK_INLINE_CODE_FRAGMENT_PADDING_RATIO = 4f / 15f
+        private const val SLOCK_INLINE_CODE_INDENT_LAYOUT_PASSES = 3
     }
 }
+
+private data class SlockInlineCodeFragmentIndents(
+    val left: IntArray,
+    val right: IntArray
+)
 
 private const val SlockRichTextTraceTag = "SlockRichTextTrace"
 
