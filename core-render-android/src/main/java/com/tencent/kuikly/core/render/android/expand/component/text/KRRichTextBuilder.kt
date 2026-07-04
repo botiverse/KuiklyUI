@@ -115,6 +115,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 if (spanProps is TextSpanProps && spanProps.slockInlineCode) {
                     spannedBuilder.applySlockInlineCodeAtomicTextSpans(spanStart, spanEnd)
                 }
+                if (spanProps is TextSpanProps && spanProps.slockMarkdownTagChrome != null) {
+                    spannedBuilder.applySlockMarkdownTagAtomicTextSpan(spanStart, spanEnd)
+                }
             }
         }
         if (textProps.richTextHeadIndent != 0) {
@@ -203,7 +206,10 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
 
         // 修饰相关
         textSpans.add(ForegroundColorSpan(spanProps.color))
-        if (spanProps.backgroundColor != Color.TRANSPARENT && !spanProps.slockInlineCode) {
+        if (spanProps.backgroundColor != Color.TRANSPARENT &&
+            !spanProps.slockInlineCode &&
+            spanProps.slockMarkdownTagChrome == null
+        ) {
             textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
         }
         if (spanProps.textDecoration.isNotEmpty()) {
@@ -230,6 +236,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         }
         if (spanProps.slockInlineCode) {
             textSpans.add(KRSlockInlineCodeSpan())
+        }
+        spanProps.slockMarkdownTagChrome?.let { kind ->
+            textSpans.add(KRSlockMarkdownTagSpan(kind))
         }
 
         spanProps.textShadow?.let {
@@ -284,6 +293,7 @@ class TextSpanProps(
     val backgroundImage: String
     val backgroundColor: Int
     val slockInlineCode: Boolean
+    val slockMarkdownTagChrome: String?
     var textShadow: BoxShadow? = null
     var useDpFontSizeDim = false
 
@@ -351,6 +361,9 @@ class TextSpanProps(
                 ?: Color.TRANSPARENT
         slockInlineCode = spanValue.optInt(TextConst.SLOCK_INLINE_CODE, 0) == 1 ||
             spanValue.optBoolean(TextConst.SLOCK_INLINE_CODE, false)
+        slockMarkdownTagChrome =
+            spanValue.optString(TextConst.SLOCK_MARKDOWN_TAG_CHROME, "")
+                .takeIf { it.isNotEmpty() }
         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
         textShadow = BoxShadow(textShadowStr, kuiklyContext)
         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
@@ -385,6 +398,7 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 }
 
 class KRSlockInlineCodeSpan
+class KRSlockMarkdownTagSpan(val kind: String)
 
 private class KRCustomUnderlineSpan(
     private val color: Int?,
@@ -434,6 +448,54 @@ private class KRCustomUnderlineSpan(
         paint.strokeWidth = previousStrokeWidth
         paint.style = previousStyle
         paint.isAntiAlias = previousAntiAlias
+    }
+}
+
+private fun SpannableStringBuilder.applySlockMarkdownTagAtomicTextSpan(start: Int, end: Int) {
+    if (start < end) {
+        setSpan(
+            KRSlockMarkdownTagAtomicTextSpan(),
+            start,
+            end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
+}
+
+private class KRSlockMarkdownTagAtomicTextSpan : ReplacementSpan() {
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int = if (text == null || start >= end) {
+        0
+    } else {
+        val textWidth = paint.measureText(text, start, end)
+        val strokePadding = max(1f, paint.strokeWidth * 2f)
+        ceil((textWidth + strokePadding + edgePadding(paint) * 2f).toDouble()).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text != null && start < end) {
+            canvas.drawText(text, start, end, x + edgePadding(paint), y.toFloat(), paint)
+        }
+    }
+
+    private fun edgePadding(paint: Paint): Float {
+        return paint.textSize * (SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO)
     }
 }
 

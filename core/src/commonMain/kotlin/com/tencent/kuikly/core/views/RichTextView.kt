@@ -417,6 +417,13 @@ open class TextSpan : TextAttr(), ISpan {
         return this
     }
 
+    fun slockMarkdownTagChrome(kind: String): TextSpan {
+        if (kind.isNotBlank()) {
+            setProp(TextConst.SLOCK_MARKDOWN_TAG_CHROME, kind)
+        }
+        return this
+    }
+
     override fun textDecorationColor(color: Color): TextSpan {
         TextConst.TEXT_DECORATION_COLOR with color.toString()
         return this
