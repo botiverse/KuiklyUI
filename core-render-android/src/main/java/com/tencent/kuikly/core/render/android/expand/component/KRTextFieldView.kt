@@ -1010,8 +1010,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             }
             text.removeSpan(it)
         }
-        // Stable font-metrics centering: typing must never shift the line (task #355).
-        lineHeightSpan = HRLineHeightSpan(pxLineHeight, centerOnGlyphBounds = false)
+        lineHeightSpan = HRLineHeightSpan(pxLineHeight)
         ensureLineHeightSpan(text)
         observeTextWatcher()
         return true

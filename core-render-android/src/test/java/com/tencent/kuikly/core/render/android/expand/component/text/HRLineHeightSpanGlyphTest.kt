@@ -21,69 +21,40 @@ import org.junit.Test
 
 class HRLineHeightSpanGlyphTest {
 
+    // Line placement must be content-independent (Slock task #355): the same
+    // font metrics must resolve to the same line box no matter which string
+    // is measured, so typing an ascender glyph ("as" -> "asf") can never
+    // re-center the line. Ink-bounds centering (b992014) is reverted.
     @Test
-    fun lineHeightCanCenterAroundActualGlyphBounds() {
-        val metrics = Paint.FontMetricsInt().apply {
-            top = -12
-            ascent = -12
-            descent = 4
-            bottom = 4
-        }
-
-        HRLineHeightSpan.applyCenteredLineHeight(
-            height = 20,
-            fm = metrics,
-            center = -5
-        )
-
-        assertEquals(-15, metrics.top)
-        assertEquals(-15, metrics.ascent)
-        assertEquals(5, metrics.bottom)
-        assertEquals(5, metrics.descent)
-        assertEquals(20, metrics.bottom - metrics.top)
-    }
-
-    @Test
-    fun centeredLineHeightKeepsExactOddHeight() {
-        val metrics = Paint.FontMetricsInt().apply {
-            top = -10
-            ascent = -10
-            descent = 3
-            bottom = 3
-        }
-
-        HRLineHeightSpan.applyCenteredLineHeight(
-            height = 17,
-            fm = metrics,
-            center = -4
-        )
-
-        assertEquals(-12, metrics.top)
-        assertEquals(-12, metrics.ascent)
-        assertEquals(5, metrics.bottom)
-        assertEquals(5, metrics.descent)
-        assertEquals(17, metrics.bottom - metrics.top)
-    }
-
-    @Test
-    fun stableCenteringIgnoresGlyphBoundsSoTypingNeverShiftsTheLine() {
-        // Editable fields center on font metrics only (task #355): the chosen
-        // center must be identical no matter what text is measured, so
-        // appending an ascender glyph ("as" -> "asf") cannot re-center the
-        // line. paint=null exercises the same guard the stable flag uses.
-        val span = HRLineHeightSpan(20, centerOnGlyphBounds = false)
-        val metrics = Paint.FontMetricsInt().apply {
+    fun sameMetricsResolveToSameLineBoxRegardlessOfText() {
+        val span = HRLineHeightSpan(20)
+        fun metrics() = Paint.FontMetricsInt().apply {
             top = -12; ascent = -12; descent = 4; bottom = 4
         }
 
-        val centerShort = span.resolveLineCenter("as", 0, 2, null, metrics)
-        val centerTall = span.resolveLineCenter("asf", 0, 3, null, metrics)
+        val short = metrics()
+        val tall = metrics()
+        span.chooseHeight("as", 0, 2, 0, 20, short)
+        span.chooseHeight("asf", 0, 3, 0, 20, tall)
 
-        assertEquals((-12 + 4) / 2, centerShort)
-        assertEquals(centerShort, centerTall)
-
-        HRLineHeightSpan.applyCenteredLineHeight(20, metrics, centerTall)
-        assertEquals(20, metrics.bottom - metrics.top)
+        assertEquals(short.top, tall.top)
+        assertEquals(short.ascent, tall.ascent)
+        assertEquals(short.descent, tall.descent)
+        assertEquals(short.bottom, tall.bottom)
+        assertEquals(20, short.bottom - short.top)
     }
 
+    @Test
+    fun exactLineHeightIsKeptForOddHeights() {
+        val span = HRLineHeightSpan(17)
+        val metrics = Paint.FontMetricsInt().apply {
+            top = -10; ascent = -10; descent = 3; bottom = 3
+        }
+
+        span.chooseHeight("x", 0, 1, 0, 17, metrics)
+
+        assertEquals(17, metrics.bottom - metrics.top)
+        assertEquals(metrics.top, metrics.ascent)
+        assertEquals(metrics.bottom, metrics.descent)
+    }
 }

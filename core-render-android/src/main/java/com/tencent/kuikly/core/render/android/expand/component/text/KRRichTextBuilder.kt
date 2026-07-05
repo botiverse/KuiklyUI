@@ -19,7 +19,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
-import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -745,27 +744,16 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
     }
 }
 
-class HRLineHeightSpan(
-    internal val height: Int,
-    /**
-     * When false, skip [glyphVisualCenter] and always center on the font
-     * metrics midpoint. Editable fields MUST use false: ink-bounds centering
-     * makes the line's vertical position depend on which glyphs are typed
-     * ("as" sits x-height-centered, appending an ascender like "f" re-centers
-     * the whole line and the text visibly jumps — Slock task #355).
-     */
-    internal val centerOnGlyphBounds: Boolean = true
-) : LineHeightSpan, LineHeightSpan.WithDensity {
+class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
 
-    internal companion object {
-        fun applyCenteredLineHeight(height: Int, fm: Paint.FontMetricsInt, center: Int) {
-            fm.ascent = center - height / 2
-            fm.descent = fm.ascent + height
-            fm.top = fm.ascent
-            fm.bottom = fm.descent
-        }
-    }
-
+    // History (Slock task #355 audit): 7b9503d re-based the distribution on
+    // ascent/descent and b992014 centered on the measured text's ink bounds
+    // (LineHeightSpan.WithDensity + getTextBounds). Ink-bounds centering made
+    // the line's vertical position depend on WHICH glyphs are present — the
+    // composer jumped while typing and static rows with different strings sat
+    // on different baselines (React's CSS line-height never does this). Both
+    // are reverted to the content-independent additive centering below
+    // (0989f41 semantics: even top/bottom split of the extra leading).
     override fun chooseHeight(
         text: CharSequence?,
         start: Int,
@@ -774,55 +762,12 @@ class HRLineHeightSpan(
         lineHeight: Int,
         fm: Paint.FontMetricsInt
     ) {
-        applyCenteredLineHeight(fm, (fm.ascent + fm.descent) / 2)
-    }
-
-    override fun chooseHeight(
-        text: CharSequence,
-        start: Int,
-        end: Int,
-        spanstartv: Int,
-        lineHeight: Int,
-        fm: Paint.FontMetricsInt,
-        paint: TextPaint
-    ) {
-        applyCenteredLineHeight(fm, resolveLineCenter(text, start, end, paint, fm))
-    }
-
-    private fun applyCenteredLineHeight(fm: Paint.FontMetricsInt, center: Int) {
-        applyCenteredLineHeight(height, fm, center)
-    }
-
-    internal fun resolveLineCenter(
-        text: CharSequence?,
-        start: Int,
-        end: Int,
-        paint: TextPaint?,
-        fm: Paint.FontMetricsInt
-    ): Int {
-        val metricsCenter = (fm.ascent + fm.descent) / 2
-        if (!centerOnGlyphBounds || paint == null) {
-            return metricsCenter
-        }
-        return glyphVisualCenter(text, start, end, paint) ?: metricsCenter
-    }
-
-    private fun glyphVisualCenter(
-        text: CharSequence?,
-        start: Int,
-        end: Int,
-        paint: TextPaint
-    ): Int? {
-        if (text == null || start >= end) {
-            return null
-        }
-        val bounds = Rect()
-        paint.getTextBounds(text, start, end, bounds)
-        return if (bounds.isEmpty) {
-            null
-        } else {
-            (bounds.top + bounds.bottom) / 2
-        }
+        val additional: Int = height - (-fm.top + fm.bottom)
+        val topExtra = additional / 2
+        fm.top -= topExtra
+        fm.bottom += additional - topExtra
+        fm.ascent = fm.top
+        fm.descent = fm.bottom
     }
 }
 

@@ -40,7 +40,10 @@ public class HRLineHeightSpanTest {
     }
 
     @Test
-    public void lineHeightCentersAroundGlyphMetricsWhenFontPaddingDiffers() {
+    public void lineHeightDistributesFromLineExtentsWhenFontPaddingDiffers() {
+        // Reverted to top/bottom-based distribution (Slock task #355 audit):
+        // ascent/descent re-basing (7b9503d) and ink-bounds centering
+        // (b992014) both made line placement inconsistent across strings.
         Paint.FontMetricsInt metrics = new Paint.FontMetricsInt();
         metrics.top = -18;
         metrics.ascent = -13;
@@ -49,10 +52,10 @@ public class HRLineHeightSpanTest {
 
         new HRLineHeightSpan(22).chooseHeight("", 0, 0, 0, 0, metrics);
 
-        assertEquals(-15, metrics.top);
-        assertEquals(-15, metrics.ascent);
-        assertEquals(7, metrics.bottom);
-        assertEquals(7, metrics.descent);
+        assertEquals(-17, metrics.top);
+        assertEquals(-17, metrics.ascent);
+        assertEquals(5, metrics.bottom);
+        assertEquals(5, metrics.descent);
         assertEquals(22, metrics.bottom - metrics.top);
     }
 }
