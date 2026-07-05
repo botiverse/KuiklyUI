@@ -91,9 +91,9 @@ open class ComposeContainer :
 
         const val KEY_EVENT_KEY_CODE = "keyCode"
         const val KEY_EVENT_TYPE = "type"
-        const val KEY_EVENT_TYPE_UNKNOWN = 0
-        const val KEY_EVENT_TYPE_UP = 1
-        const val KEY_EVENT_TYPE_DOWN = 2
+        const val KEY_EVENT_TYPE_UNKNOWN = KeyEventType.UnknownValue
+        const val KEY_EVENT_TYPE_UP = KeyEventType.KeyUpValue
+        const val KEY_EVENT_TYPE_DOWN = KeyEventType.KeyDownValue
         const val KEY_EVENT_UTF16_CODE_POINT = "utf16CodePoint"
         const val KEY_EVENT_ALT_PRESSED = "altPressed"
         const val KEY_EVENT_CTRL_PRESSED = "ctrlPressed"

@@ -39,7 +39,7 @@ fun nativePlatformKeyEvent(
         isCtrlPressed = isCtrlPressed,
         isMetaPressed = isMetaPressed,
         isShiftPressed = isShiftPressed,
-        nativeKeyEvent = nativeKeyEvent,
+        nativeKeyEvent = nativeKeyEvent ?: Unit,
     )
 /**
  * Build a Kuikly Compose key event from a [SkikoKey] value used by Kuikly native targets.

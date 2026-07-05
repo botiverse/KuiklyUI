@@ -269,13 +269,12 @@ internal class FocusOwnerImpl(
             ?: activeFocusTarget?.nearestAncestorIncludingSelf(Nodes.KeyInput)?.node
             ?: rootFocusNode.nearestAncestor(Nodes.KeyInput)?.node
 
-        focusedKeyInputNode?.traverseAncestorsIncludingSelf(
+        return focusedKeyInputNode?.traverseAncestorsIncludingSelf(
             type = Nodes.KeyInput,
-            onPreVisit = { if (it.onPreKeyEvent(keyEvent)) return true },
-            onVisit = { if (onFocusedItem.invoke()) return true },
-            onPostVisit = { if (it.onKeyEvent(keyEvent)) return true }
-        )
-        return false
+            onPreVisit = { it.onPreKeyEvent(keyEvent) },
+            onVisit = onFocusedItem,
+            onPostVisit = { it.onKeyEvent(keyEvent) }
+        ) ?: false
     }
 //
 //    @OptIn(ExperimentalComposeUiApi::class)
@@ -348,16 +347,17 @@ internal class FocusOwnerImpl(
 
     private inline fun <reified T : DelegatableNode> DelegatableNode.traverseAncestorsIncludingSelf(
         type: NodeKind<T>,
-        onPreVisit: (T) -> Unit,
-        onVisit: () -> Unit,
-        onPostVisit: (T) -> Unit
-    ) {
+        onPreVisit: (T) -> Boolean,
+        onVisit: () -> Boolean,
+        onPostVisit: (T) -> Boolean
+    ): Boolean {
         val ancestors = ancestors(type)
-        ancestors?.fastForEachReversed(onPreVisit)
-        node.dispatchForKind(type, onPreVisit)
-        onVisit.invoke()
-        node.dispatchForKind(type, onPostVisit)
-        ancestors?.fastForEach(onPostVisit)
+        ancestors?.fastForEachReversed { if (onPreVisit(it)) return true }
+        node.dispatchForKind(type) { if (onPreVisit(it)) return true }
+        if (onVisit.invoke()) return true
+        node.dispatchForKind(type) { if (onPostVisit(it)) return true }
+        ancestors?.fastForEach { if (onPostVisit(it)) return true }
+        return false
     }
 
     private inline fun <reified T : Any> DelegatableNode.nearestAncestorIncludingSelf(

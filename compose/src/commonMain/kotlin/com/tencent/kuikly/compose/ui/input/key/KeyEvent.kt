@@ -17,6 +17,11 @@
 package com.tencent.kuikly.compose.ui.input.key
 
 /**
+ * The native platform-specific keyboard key event.
+ */
+typealias NativeKeyEvent = Any
+
+/**
  * When a user presses a key on a hardware keyboard, a [KeyEvent] is sent to the item that is
  * currently focused. Any parent composable can intercept this [key event][KeyEvent] on its way to
  * the focused item by using [Modifier.onPreviewKeyEvent()]][onPreviewKeyEvent]. If the item is
@@ -26,15 +31,20 @@ package com.tencent.kuikly.compose.ui.input.key
  * @sample androidx.compose.ui.samples.KeyEventSample
  */
 data class KeyEvent(
-    val key: Key,
+    val key: Key = Key.Unknown,
     val type: KeyEventType = KeyEventType.Unknown,
     val utf16CodePoint: Int = 0,
     val isAltPressed: Boolean = false,
     val isCtrlPressed: Boolean = false,
     val isMetaPressed: Boolean = false,
     val isShiftPressed: Boolean = false,
-    val nativeKeyEvent: Any? = null
+    val nativeKeyEvent: NativeKeyEvent = Unit
 ) {
+    constructor(nativeKeyEvent: NativeKeyEvent) : this(
+        key = Key.Unknown,
+        nativeKeyEvent = nativeKeyEvent
+    )
+
     companion object
 }
 
@@ -57,24 +67,39 @@ value class KeyEventType internal constructor(@Suppress("unused") private val va
 
     companion object {
         /**
+         * Stable integer protocol value for an unknown key event.
+         */
+        const val UnknownValue: Int = 0
+
+        /**
+         * Stable integer protocol value for a key-up event.
+         */
+        const val KeyUpValue: Int = 1
+
+        /**
+         * Stable integer protocol value for a key-down event.
+         */
+        const val KeyDownValue: Int = 2
+
+        /**
          * Unknown key event.
          *
          * @sample androidx.compose.ui.samples.KeyEventTypeSample
          */
-        val Unknown: KeyEventType = KeyEventType(0)
+        val Unknown: KeyEventType = KeyEventType(UnknownValue)
 
         /**
          * Type of KeyEvent sent when the user lifts their finger off a key on the keyboard.
          *
          * @sample androidx.compose.ui.samples.KeyEventTypeSample
          */
-        val KeyUp: KeyEventType = KeyEventType(1)
+        val KeyUp: KeyEventType = KeyEventType(KeyUpValue)
 
         /**
          * Type of KeyEvent sent when the user presses down their finger on a key on the keyboard.
          *
          * @sample androidx.compose.ui.samples.KeyEventTypeSample
          */
-        val KeyDown: KeyEventType = KeyEventType(2)
+        val KeyDown: KeyEventType = KeyEventType(KeyDownValue)
     }
 }
