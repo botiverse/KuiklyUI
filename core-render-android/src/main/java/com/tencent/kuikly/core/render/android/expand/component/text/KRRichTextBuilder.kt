@@ -502,7 +502,7 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
     var index = start
     var firstAtom = true
     while (index < end) {
-        if (this[index].isWhitespace()) {
+        if (this[index].isSlockInlineCodeAtomBoundaryWhitespace()) {
             index++
             continue
         }
@@ -512,7 +512,7 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
         }
         val textStart = index
         while (index < end &&
-            !this[index].isWhitespace() &&
+            !this[index].isSlockInlineCodeAtomBoundaryWhitespace() &&
             !this[index].isSlockInlineCodeBreakSeparator()
         ) {
             index++
@@ -528,7 +528,7 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
             }
             val nextTextStart = index
             while (index < end &&
-                !this[index].isWhitespace() &&
+                !this[index].isSlockInlineCodeAtomBoundaryWhitespace() &&
                 !this[index].isSlockInlineCodeBreakSeparator()
             ) {
                 index++
@@ -556,10 +556,13 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
 private fun Char.isSlockInlineCodeBreakSeparator(): Boolean =
     this == '/' || this == '\\' || this == '.' || this == '-' || this == ':'
 
+private fun Char.isSlockInlineCodeAtomBoundaryWhitespace(): Boolean =
+    isWhitespace() || this == '\u00A0'
+
 private fun CharSequence.hasSlockInlineCodeAtomAfter(start: Int, end: Int): Boolean {
     var index = start
     while (index < end) {
-        if (this[index].isWhitespace()) {
+        if (this[index].isSlockInlineCodeAtomBoundaryWhitespace()) {
             index++
             continue
         }
@@ -568,7 +571,7 @@ private fun CharSequence.hasSlockInlineCodeAtomAfter(start: Int, end: Int): Bool
         }
         val textStart = index
         while (index < end &&
-            !this[index].isWhitespace() &&
+            !this[index].isSlockInlineCodeAtomBoundaryWhitespace() &&
             !this[index].isSlockInlineCodeBreakSeparator()
         ) {
             index++
