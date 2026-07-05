@@ -17,6 +17,7 @@
 #define CORE_RENDER_OHOS_KRSCROLLERVIEW_H
 
 #include <unordered_set>
+#include <cstdint>
 #include "KRScrollerContentInset.h"
 #include "libohos_render/export/IKRRenderViewExport.h"
 #include "libohos_render/foundation/KRPoint.h"
@@ -109,7 +110,7 @@ class KRScrollerView : public IKRRenderViewExport {
     bool RegisterOnDragEndEvent(const KRRenderCallback event_callback);
     bool RegisterOnScrollEndEvent(const KRRenderCallback event_callback);
     bool RegisterWillDragEndEvent(const KRRenderCallback event_callback);
-    void FireOnScrollEvent(ArkUI_NodeEvent *event);
+    void FireOnScrollEvent(ArkUI_NodeEvent *event, bool force = false);
     void FireBeginDragEvent(ArkUI_NodeEvent *event);
     void FireEndDragEvent(ArkUI_NodeEvent *event);
     void FireEndScrollEvent(ArkUI_NodeEvent *event);
@@ -168,11 +169,23 @@ class KRScrollerView : public IKRRenderViewExport {
     float last_scroll_y_ = 0;
     float velocity_x_ = 0;
     float velocity_y_ = 0;
+    int64_t last_move_time_ = 0;  // 上次产生有效位移的时间，用于判断速度是否过期
     std::weak_ptr<SuperTouchHandler> weak_super_touch_handler_;
     bool is_fling_enabled_ = true;
     float last_fired_scroll_x_ = 0;
     float last_fired_scroll_y_ = 0;
     bool direction_row_ = false;
+
+    // Scroll trace (debug): counts per gesture, dumped on scroll stop
+    uint32_t trace_ark_on_scroll_ = 0;
+    uint32_t trace_fire_skipped_ = 0;
+    uint32_t trace_fire_to_bridge_ = 0;
+    void DumpScrollTrace(const char *phase);
+    bool ShouldHandOffNestedScrollAtBoundary(float scroll_amount, float current_offset, float max_offset) const;
+
+    bool has_nested_scroll_ = false;
+    ArkUI_ScrollNestedMode nested_scroll_forward_ = ARKUI_SCROLL_NESTED_MODE_SELF_FIRST;
+    ArkUI_ScrollNestedMode nested_scroll_backward_ = ARKUI_SCROLL_NESTED_MODE_SELF_FIRST;
 };
 
 #endif  // CORE_RENDER_OHOS_KRSCROLLERVIEW_H
