@@ -64,4 +64,26 @@ class HRLineHeightSpanGlyphTest {
         assertEquals(5, metrics.descent)
         assertEquals(17, metrics.bottom - metrics.top)
     }
+
+    @Test
+    fun stableCenteringIgnoresGlyphBoundsSoTypingNeverShiftsTheLine() {
+        // Editable fields center on font metrics only (task #355): the chosen
+        // center must be identical no matter what text is measured, so
+        // appending an ascender glyph ("as" -> "asf") cannot re-center the
+        // line. paint=null exercises the same guard the stable flag uses.
+        val span = HRLineHeightSpan(20, centerOnGlyphBounds = false)
+        val metrics = Paint.FontMetricsInt().apply {
+            top = -12; ascent = -12; descent = 4; bottom = 4
+        }
+
+        val centerShort = span.resolveLineCenter("as", 0, 2, null, metrics)
+        val centerTall = span.resolveLineCenter("asf", 0, 3, null, metrics)
+
+        assertEquals((-12 + 4) / 2, centerShort)
+        assertEquals(centerShort, centerTall)
+
+        HRLineHeightSpan.applyCenteredLineHeight(20, metrics, centerTall)
+        assertEquals(20, metrics.bottom - metrics.top)
+    }
+
 }

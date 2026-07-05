@@ -745,7 +745,17 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
     }
 }
 
-class HRLineHeightSpan(internal val height: Int) : LineHeightSpan, LineHeightSpan.WithDensity {
+class HRLineHeightSpan(
+    internal val height: Int,
+    /**
+     * When false, skip [glyphVisualCenter] and always center on the font
+     * metrics midpoint. Editable fields MUST use false: ink-bounds centering
+     * makes the line's vertical position depend on which glyphs are typed
+     * ("as" sits x-height-centered, appending an ascender like "f" re-centers
+     * the whole line and the text visibly jumps — Slock task #355).
+     */
+    internal val centerOnGlyphBounds: Boolean = true
+) : LineHeightSpan, LineHeightSpan.WithDensity {
 
     internal companion object {
         fun applyCenteredLineHeight(height: Int, fm: Paint.FontMetricsInt, center: Int) {
@@ -776,13 +786,25 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan, LineHeightSpa
         fm: Paint.FontMetricsInt,
         paint: TextPaint
     ) {
-        val visualCenter = glyphVisualCenter(text, start, end, paint)
-            ?: ((fm.ascent + fm.descent) / 2)
-        applyCenteredLineHeight(fm, visualCenter)
+        applyCenteredLineHeight(fm, resolveLineCenter(text, start, end, paint, fm))
     }
 
     private fun applyCenteredLineHeight(fm: Paint.FontMetricsInt, center: Int) {
         applyCenteredLineHeight(height, fm, center)
+    }
+
+    internal fun resolveLineCenter(
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        paint: TextPaint?,
+        fm: Paint.FontMetricsInt
+    ): Int {
+        val metricsCenter = (fm.ascent + fm.descent) / 2
+        if (!centerOnGlyphBounds || paint == null) {
+            return metricsCenter
+        }
+        return glyphVisualCenter(text, start, end, paint) ?: metricsCenter
     }
 
     private fun glyphVisualCenter(
