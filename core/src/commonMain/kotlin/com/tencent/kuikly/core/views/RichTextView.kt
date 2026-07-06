@@ -442,6 +442,11 @@ open class TextSpan : TextAttr(), ISpan {
         return this
     }
 
+    fun slockInlineCodeTrailingMargin(enabled: Boolean = true): TextSpan {
+        setProp(TextConst.SLOCK_INLINE_CODE_TRAILING_MARGIN, if (enabled) 1 else 0)
+        return this
+    }
+
     fun slockMarkdownTagChrome(kind: String): TextSpan {
         if (kind.isNotBlank()) {
             setProp(TextConst.SLOCK_MARKDOWN_TAG_CHROME, kind)

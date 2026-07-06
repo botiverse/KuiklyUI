@@ -58,6 +58,8 @@ import kotlin.math.max
 
 private const val SLOCK_INLINE_CODE_EDGE_PADDING_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO = 2f / 15f
+private const val SLOCK_INLINE_CODE_TRAILING_MARGIN_RATIO =
+    SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO
 
 /**
  * 富文本构造器
@@ -236,6 +238,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         if (spanProps.slockInlineCode) {
             textSpans.add(KRSlockInlineCodeSpan())
         }
+        if (spanProps.slockInlineCodeTrailingMargin) {
+            textSpans.add(KRSlockInlineCodeTrailingMarginSpan())
+        }
         spanProps.slockMarkdownTagChrome?.let { kind ->
             textSpans.add(KRSlockMarkdownTagSpan(kind))
         }
@@ -292,6 +297,7 @@ class TextSpanProps(
     val backgroundImage: String
     val backgroundColor: Int
     val slockInlineCode: Boolean
+    val slockInlineCodeTrailingMargin: Boolean
     val slockMarkdownTagChrome: String?
     var textShadow: BoxShadow? = null
     var useDpFontSizeDim = false
@@ -360,6 +366,8 @@ class TextSpanProps(
                 ?: Color.TRANSPARENT
         slockInlineCode = spanValue.optInt(TextConst.SLOCK_INLINE_CODE, 0) == 1 ||
             spanValue.optBoolean(TextConst.SLOCK_INLINE_CODE, false)
+        slockInlineCodeTrailingMargin = spanValue.optInt(TextConst.SLOCK_INLINE_CODE_TRAILING_MARGIN, 0) == 1 ||
+            spanValue.optBoolean(TextConst.SLOCK_INLINE_CODE_TRAILING_MARGIN, false)
         slockMarkdownTagChrome =
             spanValue.optString(TextConst.SLOCK_MARKDOWN_TAG_CHROME, "")
                 .takeIf { it.isNotEmpty() }
@@ -398,6 +406,29 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 
 class KRSlockInlineCodeSpan
 class KRSlockMarkdownTagSpan(val kind: String)
+
+private class KRSlockInlineCodeTrailingMarginSpan : ReplacementSpan() {
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int = ceil((paint.textSize * SLOCK_INLINE_CODE_TRAILING_MARGIN_RATIO).toDouble()).toInt()
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) = Unit
+}
 
 private class KRCustomUnderlineSpan(
     private val color: Int?,

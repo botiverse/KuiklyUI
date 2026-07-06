@@ -54,6 +54,8 @@ import com.tencent.kuikly.core.views.TextConst
 import com.tencent.kuikly.core.views.TextSpan
 
 private const val SLOCK_INLINE_CODE_ANNOTATION_TAG = "raft.build.markdown.inlineCode"
+private const val SLOCK_INLINE_CODE_TRAILING_MARGIN_ANNOTATION_TAG =
+    "raft.build.markdown.inlineCodeTrailingMargin"
 private const val SLOCK_MARKDOWN_TAG_CHROME_ANNOTATION_TAG = "raft.build.markdown.tagChrome"
 
 // Returns platform-specific default font size
@@ -345,6 +347,12 @@ internal fun RichTextAttr.applyAnnotatedString(
         positions.add(range.start)
         positions.add(range.end)
     }
+    val slockInlineCodeTrailingMarginAnnotations =
+        annoText.getStringAnnotations(SLOCK_INLINE_CODE_TRAILING_MARGIN_ANNOTATION_TAG, 0, annoText.length)
+    slockInlineCodeTrailingMarginAnnotations.forEach { range ->
+        positions.add(range.start)
+        positions.add(range.end)
+    }
     val slockMarkdownTagChromeAnnotations =
         annoText.getStringAnnotations(SLOCK_MARKDOWN_TAG_CHROME_ANNOTATION_TAG, 0, annoText.length)
     slockMarkdownTagChromeAnnotations.forEach { range ->
@@ -400,6 +408,9 @@ internal fun RichTextAttr.applyAnnotatedString(
 
                 if (slockInlineCodeAnnotations.any { range -> start >= range.start && end <= range.end }) {
                     slockInlineCode()
+                }
+                if (slockInlineCodeTrailingMarginAnnotations.any { range -> start >= range.start && end <= range.end }) {
+                    slockInlineCodeTrailingMargin()
                 }
                 slockMarkdownTagChromeAnnotations
                     .firstOrNull { range -> start >= range.start && end <= range.end }
