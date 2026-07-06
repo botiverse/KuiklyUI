@@ -238,7 +238,21 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 } else {
                     segmentLeft - horizontalPadding
                 }
-                val right = segmentRight + horizontalPadding
+                val right = if (segmentEnd == end) {
+                    // Mirror the leading edge. The first atom reserves startPadding
+                    // (= edgePadding = padding + margin) BEFORE its glyphs and the
+                    // border is drawn at `segmentLeft + horizontalMargin`, i.e.
+                    // horizontalPadding inside the last-but-margin — leaving margin
+                    // outside, padding inside. The final atom reserves the same
+                    // edgePadding AFTER its glyphs, so the trailing border must be
+                    // pulled IN by horizontalMargin (not pushed OUT by
+                    // horizontalPadding) to land symmetrically at
+                    // `glyphRight + horizontalPadding`. Anything the atom reserved
+                    // beyond that stays as outside margin before the following text.
+                    segmentRight - horizontalMargin
+                } else {
+                    segmentRight + horizontalPadding
+                }
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
