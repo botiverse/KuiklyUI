@@ -58,7 +58,7 @@ import kotlin.math.max
 
 private const val SLOCK_INLINE_CODE_EDGE_PADDING_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO = 2f / 15f
-private const val SLOCK_INLINE_CODE_TRAILING_MARGIN_RATIO = SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO
+private const val SLOCK_INLINE_CODE_TRAILING_MARGIN_RATIO = 1f / 15f
 
 /**
  * 富文本构造器
