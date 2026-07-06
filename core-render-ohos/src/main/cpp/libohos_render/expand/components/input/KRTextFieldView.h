@@ -92,6 +92,17 @@ class KRTextFieldView : public IKRRenderViewExport {
     virtual void UpdateInputNodeContentText(const std::string &text);
     virtual std::string GetInputNodeContentText();
 
+    /**
+     * 获取text从u8Start到u16Count的UTF-8字节数
+     * @param text 输入文本
+     * @param u8Start UTF-8起始字节索引
+     * @param u16Count UTF-16字符数量
+     * @return 对应的UTF-8字节数
+     */
+    int GetUTF8ByteCount(const std::string &text, size_t u8Start, size_t u16Count);
+
+    int GetUTF16Length(const std::string &text);
+
  private:
     float font_size_ = 15;  // default 15
     ArkUI_FontWeight font_weight_ = ARKUI_FONT_WEIGHT_NORMAL;
@@ -281,16 +292,6 @@ class KRTextFieldView : public IKRRenderViewExport {
      */
     int GetVisualWidthOfCodePoint(char32_t codePoint);
     
-    /**
-     * 获取text从u8Start到u16Count的UTF-8字节数
-     * @param text 输入文本
-     * @param u8Start UTF-8起始字节索引
-     * @param u16Count UTF-16字符数量
-     * @return 对应的UTF-8字节数
-     */
-    int GetUTF8ByteCount(const std::string &text, size_t u8Start, size_t u16Count);
-    
-    int GetUTF16Length(const std::string &text);
 };
 
 #endif  // CORE_RENDER_OHOS_KRTEXTFIELDVIEW_H
