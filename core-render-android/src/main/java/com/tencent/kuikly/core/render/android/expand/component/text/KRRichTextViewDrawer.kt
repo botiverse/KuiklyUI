@@ -238,11 +238,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 } else {
                     segmentLeft - horizontalPadding
                 }
-                val right = if (segmentEnd == end) {
-                    segmentRight - horizontalMargin
-                } else {
-                    segmentRight + horizontalPadding
-                }
+                val right = segmentRight + horizontalPadding
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
