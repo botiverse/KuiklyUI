@@ -58,8 +58,6 @@ import kotlin.math.max
 
 private const val SLOCK_INLINE_CODE_EDGE_PADDING_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO = 2f / 15f
-private const val SLOCK_INLINE_CODE_EXTERNAL_MARGIN_ADVANCE_RATIO =
-    SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO
 
 /**
  * 富文本构造器
@@ -623,15 +621,11 @@ private class KRSlockInlineCodeAtomicTextSpan(
     }
 
     private fun endPadding(paint: Paint): Float {
-        return if (padEnd) edgePadding(paint) + externalMarginAdvance(paint) else 0f
+        return if (padEnd) edgePadding(paint) else 0f
     }
 
     private fun edgePadding(paint: Paint): Float {
         return paint.textSize * (SLOCK_INLINE_CODE_EDGE_PADDING_RATIO + SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO)
-    }
-
-    private fun externalMarginAdvance(paint: Paint): Float {
-        return paint.textSize * SLOCK_INLINE_CODE_EXTERNAL_MARGIN_ADVANCE_RATIO
     }
 }
 
