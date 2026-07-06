@@ -18,10 +18,12 @@
 
 #include "libohos_render/expand/components/input/KRTextFieldView.h"
 #include "libohos_render/foundation/KRConfig.h"
+#include <arkui/native_type.h>
 
 class KRTextAreaView : public KRTextFieldView {
  public:
     void DidInit() override ;
+    void OnDestroy() override;
     
     ArkUI_NodeHandle CreateNode() override {
         return kuikly::util::GetNodeApi()->createNode(ARKUI_NODE_TEXT_AREA);
@@ -63,6 +65,14 @@ class KRTextAreaView : public KRTextFieldView {
     void UpdateInputNodePlaceholderFont(uint32_t font_size, ArkUI_FontWeight font_weight) override;
     void UpdateInputNodeContentText(const std::string &text) override;
 
+    void SetupSystemNewlineEditMenu();
+    void TeardownSystemNewlineEditMenu();
+    void InsertNewlineAtSelection(int32_t start, int32_t end);
+    static void OnCreateSystemNewlineMenu(ArkUI_TextMenuItemArray *items, void *userData);
+    static bool OnSystemNewlineMenuItemClick(const ArkUI_TextMenuItem *item, int32_t start, int32_t end,
+                                             void *userData);
+
+    ArkUI_TextEditMenuOptions *system_newline_edit_menu_options_ = nullptr;
 };
 
 #endif  // CORE_RENDER_OHOS_KRTEXTAREAVIEW_H
