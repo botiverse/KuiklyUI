@@ -180,6 +180,12 @@ class KuiklyScrollInfo {
     var pendingBottomExpand: Boolean = false
 
     /**
+     * When true, [tryExpandStartSize] is skipped. Used by [ScrollableTabRow] whose content
+     * size is already exact via [ScrollState.maxValue] + viewport.
+     */
+    var skipExpandStartSize: Boolean = false
+
+    /**
      * Sticky Header Position Cache Manager
      */
     val stickyHeaderCacheManager = StickyHeaderCacheManager()
