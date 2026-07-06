@@ -210,17 +210,13 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
             val end = spanned.getSpanEnd(span)
             if (start < 0 || end <= start) return@forEach
 
-            val chromeStart = spanned.slockInlineCodeChromeStart(start, end)
-            val chromeEnd = spanned.slockInlineCodeChromeEnd(chromeStart, end)
-            if (chromeEnd <= chromeStart) return@forEach
-
-            val startLine = textLayout.getLineForOffset(chromeStart)
-            val endLine = textLayout.getLineForOffset((chromeEnd - 1).coerceAtLeast(chromeStart))
+            val startLine = textLayout.getLineForOffset(start)
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
             for (line in startLine..endLine) {
                 val lineStart = textLayout.getLineStart(line)
                 val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
-                val segmentStart = max(chromeStart, lineStart)
-                val segmentEnd = min(chromeEnd, lineVisibleEnd)
+                val segmentStart = max(start, lineStart)
+                val segmentEnd = min(end, lineVisibleEnd)
                 if (segmentEnd <= segmentStart) continue
 
                 val startX =
@@ -237,16 +233,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                     }
                 val segmentLeft = min(startX, endX)
                 val segmentRight = max(startX, endX)
-                val left = if (segmentStart == chromeStart) {
+                val left = if (segmentStart == start) {
                     segmentLeft + horizontalMargin
                 } else {
                     segmentLeft - horizontalPadding
                 }
-                val right = if (segmentEnd == chromeEnd) {
-                    segmentRight - horizontalMargin
-                } else {
-                    segmentRight + horizontalPadding
-                }
+                val right = segmentRight + horizontalPadding
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
@@ -311,25 +303,6 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         }
         return getLineVisibleEnd(line)
     }
-
-    private fun CharSequence.slockInlineCodeChromeStart(start: Int, end: Int): Int {
-        var index = start
-        while (index < end && this[index].isSlockInlineCodeChromeBoundaryWhitespace()) {
-            index++
-        }
-        return index
-    }
-
-    private fun CharSequence.slockInlineCodeChromeEnd(start: Int, end: Int): Int {
-        var index = end
-        while (index > start && this[index - 1].isSlockInlineCodeChromeBoundaryWhitespace()) {
-            index--
-        }
-        return index
-    }
-
-    private fun Char.isSlockInlineCodeChromeBoundaryWhitespace(): Boolean =
-        isWhitespace() || this == '\u00A0'
 
     internal fun setSelectionByCoordinate(
         x: Float,
