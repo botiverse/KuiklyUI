@@ -570,7 +570,13 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
             }
             textLength = index - textStart
         }
-        if (index > textStart) {
+        if (textLength == 0 &&
+            rangeStart < index &&
+            !hasSlockInlineCodeAtomAfter(index, end)
+        ) {
+            textLength = index - rangeStart
+        }
+        if (textLength > 0) {
             val padStart = firstAtom
             val padEnd = !hasSlockInlineCodeAtomAfter(index, end)
             setSpan(
