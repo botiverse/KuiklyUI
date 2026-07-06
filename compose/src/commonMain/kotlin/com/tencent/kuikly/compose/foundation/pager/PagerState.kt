@@ -51,6 +51,7 @@ import com.tencent.kuikly.compose.foundation.gestures.snapping.SnapPosition
 import com.tencent.kuikly.compose.foundation.layout.PaddingValues
 import com.tencent.kuikly.compose.ui.PlatformOptimizedCancellationException
 import com.tencent.kuikly.compose.ui.geometry.Offset
+import com.tencent.kuikly.compose.ui.unit.IntOffset
 import com.tencent.kuikly.compose.ui.layout.AlignmentLine
 import com.tencent.kuikly.compose.ui.layout.MeasureResult
 import com.tencent.kuikly.compose.ui.layout.Remeasurement
@@ -1245,7 +1246,43 @@ abstract class PagerState internal constructor(
 
     internal fun snapToItem(page: Int, offsetFraction: Float, forceRemeasure: Boolean) {
         val distance = animatedScrollScope.calculateDistanceTo(page) + offsetFraction * pageSizeWithSpacing
+        // The native target offset must be computed against the CURRENT content
+        // offset, before dispatchRawDelta mutates the compose-side scroll state.
+        val previousOffset = kuiklyInfo.contentOffset
+        var targetOffset = distance + previousOffset
+        if (targetOffset < 0) {
+            targetOffset = minScrollOffset.toFloat()
+        } else if (targetOffset + kuiklyInfo.viewportSize > kuiklyInfo.currentContentSize) {
+            targetOffset = maxScrollOffset.toFloat()
+        }
         dispatchRawDelta(distance)
+        // dispatchRawDelta only updates the compose scroll state — it does not move
+        // the native scroll view, so a programmatic snap (scrollToPage passes
+        // forceRemeasure=true) never changes the visible page. Drive the native
+        // view instantly (animated=false) so the visible page follows the snap,
+        // mirroring animateScrollToPage's setContentOffset path (without the
+        // animation state, which is only meaningful for animated snaps).
+        if (forceRemeasure) {
+            kuiklyInfo.run {
+                val targetOffsetDp = if (isVertical()) {
+                    Offset(scrollView?.curOffsetX ?: 0f, max(0f, targetOffset / getDensity() - 0.01f))
+                } else {
+                    Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView?.curOffsetY ?: 0f)
+                }
+                // Guard against the native scroll callback bouncing a reverse compose
+                // delta: mark the target offset as ignored so the callback that writes
+                // contentOffset doesn't re-apply it. Skip when the offset is unchanged —
+                // then setContentOffset fires no callback to clear the flag (matches
+                // SubcomposeLayoutEx.restoreScrollerViewOnReuse).
+                if (targetOffset.toInt() != previousOffset) {
+                    ignoreScrollOffset = IntOffset(
+                        x = (targetOffsetDp.x * getDensity()).toInt(),
+                        y = (targetOffsetDp.y * getDensity()).toInt(),
+                    )
+                }
+                scrollView?.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, false)
+            }
+        }
     }
 
     internal val measurementScopeInvalidator = ObservableScopeInvalidator()
