@@ -39,6 +39,8 @@ private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD84D
 private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
 private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO = 2f / 15f
+private const val SLOCK_INLINE_CODE_EXTERNAL_MARGIN_ADVANCE_RATIO =
+    SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO + SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO
 private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
 private const val SLOCK_INLINE_CODE_BORDER_WIDTH_DP = 1f
@@ -200,6 +202,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         val paint = textLayout.paint
         val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
         val horizontalMargin = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO
+        val externalMarginAdvance = paint.textSize * SLOCK_INLINE_CODE_EXTERNAL_MARGIN_ADVANCE_RATIO
         val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
         val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
         val fontMetrics = paint.fontMetrics
@@ -238,7 +241,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 } else {
                     segmentLeft - horizontalPadding
                 }
-                val right = segmentRight + horizontalPadding
+                val right = if (segmentEnd == end) {
+                    // The final atom reserves this extra advance for outside margin only.
+                    segmentRight + horizontalPadding - externalMarginAdvance
+                } else {
+                    segmentRight + horizontalPadding
+                }
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
