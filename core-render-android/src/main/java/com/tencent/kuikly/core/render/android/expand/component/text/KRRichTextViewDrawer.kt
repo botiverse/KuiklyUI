@@ -238,7 +238,17 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 } else {
                     segmentLeft - horizontalPadding
                 }
-                val right = segmentRight + horizontalPadding
+                val right = if (segmentEnd == end) {
+                    // Mirror the leading edge. The final atom reserves edgePadding
+                    // (padding + margin) after its glyphs, so pull the border IN by
+                    // horizontalMargin to land it exactly horizontalPadding past the
+                    // last glyph — same inner padding as the start side — instead of
+                    // pushing OUT by horizontalPadding (which put the border ~10/15
+                    // past the glyphs, the "right side too big" regression, #394/#54).
+                    segmentRight - horizontalMargin
+                } else {
+                    segmentRight + horizontalPadding
+                }
                 if (right <= left) continue
 
                 val baseline = textLayout.getLineBaseline(line).toFloat()
