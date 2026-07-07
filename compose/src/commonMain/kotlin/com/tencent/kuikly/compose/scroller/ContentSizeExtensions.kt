@@ -319,6 +319,10 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
         return
     }
 
+    if (isScrolling && kuiklyInfo.scrollView?.isDragging != true) {
+        return
+    }
+
     KuiklyScrollTrace.ifEnabled { KuiklyScrollTrace.tryExpandStartSize++ }
 
     val density = kuiklyInfo.getDensity()
