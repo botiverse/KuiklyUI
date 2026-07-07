@@ -275,8 +275,19 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         }
     }
 
+    // Paint.density is a bitmap-scaling field that defaults to 1 (it is NOT the
+    // display density), so `paint.density * 1dp` collapsed to 1 and the
+    // MIN_WIDTH clamp left every chip border at 2 physical px — thinner than
+    // react's 1 css px (= 3 px @3x). Use the real display density instead
+    // (task #407 follow-up, artin's border-width report).
+    private val slockChipBorderWidthPx: Float =
+        max(
+            SLOCK_INLINE_CODE_BORDER_MIN_WIDTH,
+            android.content.res.Resources.getSystem().displayMetrics.density * SLOCK_INLINE_CODE_BORDER_WIDTH_DP
+        )
+
     private fun Canvas.drawSlockInlineCodeBorder(left: Float, top: Float, right: Float, bottom: Float) {
-        val borderWidth = max(SLOCK_INLINE_CODE_BORDER_MIN_WIDTH, textLayout.paint.density * SLOCK_INLINE_CODE_BORDER_WIDTH_DP)
+        val borderWidth = slockChipBorderWidthPx
         val borderLeft = floor(left)
         val borderTop = floor(top)
         val borderRight = ceil(right)
@@ -288,7 +299,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     }
 
     private fun Canvas.drawSlockMarkdownTagBorder(left: Float, top: Float, right: Float, bottom: Float) {
-        val borderWidth = max(SLOCK_INLINE_CODE_BORDER_MIN_WIDTH, textLayout.paint.density * SLOCK_INLINE_CODE_BORDER_WIDTH_DP)
+        val borderWidth = slockChipBorderWidthPx
         val borderLeft = floor(left)
         val borderTop = floor(top)
         val borderRight = ceil(right)
