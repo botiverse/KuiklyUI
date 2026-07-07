@@ -60,6 +60,17 @@ private const val SLOCK_INLINE_CODE_EDGE_PADDING_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_EDGE_MARGIN_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_TRAILING_MARGIN_RATIO = 1f / 15f
 
+// Each inline-code atom is an atomic ReplacementSpan, so a long run with no
+// whitespace/separator (e.g. `realtimeMessageUpdatedAppliesReactionPayload`)
+// can't line-break and overflows/clips off the right edge (#58). Once a run
+// grows past the threshold, break it into more atoms so the layout can wrap —
+// preferring a camelCase boundary (natural for identifiers), else a hard char
+// cap for runs with none (hashes/urls). Short runs stay a single atom (no
+// change / no extra stroke padding). Continuation atoms render seamlessly, so a
+// broken run looks identical on one line and only wraps when it must.
+private const val SLOCK_INLINE_CODE_ATOM_BREAK_THRESHOLD = 12
+private const val SLOCK_INLINE_CODE_ATOM_MAX_TEXT_LEN = 20
+
 /**
  * 富文本构造器
  */
@@ -545,6 +556,16 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
             !this[index].isSlockInlineCodeAtomBoundaryWhitespace() &&
             !this[index].isSlockInlineCodeBreakSeparator()
         ) {
+            // #58: once a run passes the threshold, end the atom at a camelCase
+            // boundary (or the hard cap) so an over-long token can wrap instead
+            // of overflowing. Short runs never trip this and stay one atom.
+            if (index > textStart && index - textStart >= SLOCK_INLINE_CODE_ATOM_BREAK_THRESHOLD) {
+                val prev = this[index - 1]
+                val camelBoundary = (prev.isLowerCase() || prev.isDigit()) && this[index].isUpperCase()
+                if (camelBoundary || index - textStart >= SLOCK_INLINE_CODE_ATOM_MAX_TEXT_LEN) {
+                    break
+                }
+            }
             index++
         }
         var textLength = index - textStart
