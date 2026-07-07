@@ -62,14 +62,13 @@ private const val SLOCK_INLINE_CODE_TRAILING_MARGIN_RATIO = 1f / 15f
 
 // Each inline-code atom is an atomic ReplacementSpan, so a long run with no
 // whitespace/separator (e.g. `realtimeMessageUpdatedAppliesReactionPayload`)
-// can't line-break and overflows/clips off the right edge (#58). Once a run
-// grows past the threshold, break it into more atoms so the layout can wrap —
-// preferring a camelCase boundary (natural for identifiers), else a hard char
-// cap for runs with none (hashes/urls). Short runs stay a single atom (no
-// change / no extra stroke padding). Continuation atoms render seamlessly, so a
-// broken run looks identical on one line and only wraps when it must.
-private const val SLOCK_INLINE_CODE_ATOM_BREAK_THRESHOLD = 12
-private const val SLOCK_INLINE_CODE_ATOM_MAX_TEXT_LEN = 20
+// can't line-break and overflows/clips off the right edge (#58). A standard
+// layout engine char-wraps a long word; to get that, a run longer than this
+// threshold is emitted as per-character atoms so the layout can break at any
+// character. Those atoms are marked seamless (no per-atom stroke padding) so the
+// run looks identical on one line and only wraps when it must. Short runs stay a
+// single atom, unchanged.
+private const val SLOCK_INLINE_CODE_LONG_RUN_THRESHOLD = 16
 
 /**
  * 富文本构造器
@@ -556,17 +555,26 @@ private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: In
             !this[index].isSlockInlineCodeAtomBoundaryWhitespace() &&
             !this[index].isSlockInlineCodeBreakSeparator()
         ) {
-            // #58: once a run passes the threshold, end the atom at a camelCase
-            // boundary (or the hard cap) so an over-long token can wrap instead
-            // of overflowing. Short runs never trip this and stay one atom.
-            if (index > textStart && index - textStart >= SLOCK_INLINE_CODE_ATOM_BREAK_THRESHOLD) {
-                val prev = this[index - 1]
-                val camelBoundary = (prev.isLowerCase() || prev.isDigit()) && this[index].isUpperCase()
-                if (camelBoundary || index - textStart >= SLOCK_INLINE_CODE_ATOM_MAX_TEXT_LEN) {
-                    break
-                }
-            }
             index++
+        }
+        // #58: a long no-break run would be one atomic ReplacementSpan and would
+        // overflow the line. Emit it as per-character seamless atoms so the
+        // layout char-wraps it, the way a standard engine wraps a long word.
+        if (index - textStart > SLOCK_INLINE_CODE_LONG_RUN_THRESHOLD) {
+            var charIndex = rangeStart
+            while (charIndex < index) {
+                val padStart = firstAtom && charIndex == rangeStart
+                val padEnd = charIndex == index - 1 && !hasSlockInlineCodeAtomAfter(index, end)
+                setSpan(
+                    KRSlockInlineCodeAtomicTextSpan(padStart, padEnd, seamless = true),
+                    charIndex,
+                    charIndex + 1,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                firstAtom = false
+                charIndex++
+            }
+            continue
         }
         var textLength = index - textStart
         while (textLength in 1..2 &&
@@ -640,7 +648,11 @@ private fun CharSequence.hasSlockInlineCodeAtomAfter(start: Int, end: Int): Bool
 
 private class KRSlockInlineCodeAtomicTextSpan(
     private val padStart: Boolean,
-    private val padEnd: Boolean
+    private val padEnd: Boolean,
+    // #58: per-character atoms of a char-wrapped long run. They must not each add
+    // stroke padding, or the run would spread out; the chrome/border is drawn
+    // per line-segment by the drawer, so interior atoms need none.
+    private val seamless: Boolean = false
 ) : ReplacementSpan() {
 
     override fun getSize(
@@ -653,7 +665,7 @@ private class KRSlockInlineCodeAtomicTextSpan(
         0
     } else {
         val textWidth = paint.measureText(text, start, end)
-        val strokePadding = max(1f, paint.strokeWidth * 2f)
+        val strokePadding = if (seamless) 0f else max(1f, paint.strokeWidth * 2f)
         ceil((textWidth + strokePadding + startPadding(paint) + endPadding(paint)).toDouble()).toInt()
     }
 
