@@ -35,7 +35,11 @@ import kotlin.math.max
 import kotlin.math.min
 
 private const val INVALID_OFFSET = -1
-private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD84D
+// react baseline: MarkdownContent inline `code` = bg-soft-signal/40, and
+// soft-signal == brutal-yellow == #FFD440 (web index.css). 0x66 == 40% alpha.
+// Was 0x66FFD84D (D84D) — a drift off the brand yellow that mismatched both
+// react and the app's own tag/self-mention fills (D440, below). Single source: D440.
+private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD440
 private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
 private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 4f / 15f
 private const val SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO = 2f / 15f
