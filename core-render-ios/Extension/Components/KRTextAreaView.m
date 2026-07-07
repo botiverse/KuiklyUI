@@ -95,6 +95,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 @property (nonatomic, strong)  KuiklyRenderCallback KUIKLY_PROP(selectionChange);
 /** attr is textInputState */
 @property (nonatomic, strong)  NSString *KUIKLY_PROP(textInputState);
+/** attr is autoFocusOnTextInputState 程序化同步 textInputState 时，非空文本是否自动聚焦 */
+@property (nonatomic, strong)  NSNumber *KUIKLY_PROP(autoFocusOnTextInputState);
 
 /** placeholderTextView property */
 @property (nullable, nonatomic, strong) UITextView *placeholderTextView;
@@ -136,6 +138,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     if (self = [super init]) {
         self.delegate = self;
         self.css_autoHideKeyboardOnImeAction = [NSNumber numberWithInt: 1];     // 保持原有能力，默认是关闭关闭软键盘
+        self.css_autoFocusOnTextInputState = @0;
 #if TARGET_OS_OSX // [macOS]
         self.textContainerInset = NSZeroSize;
         // macOS: 启用 layer-backed 支持 clipPath
@@ -461,7 +464,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     NSInteger selectionStart = MAX(0, MIN(requestedSelectionStart, (NSInteger)rawText.length));
     NSInteger selectionEnd = MAX(0, MIN(requestedSelectionEnd, (NSInteger)rawText.length));
 
-    if (![self isFirstResponder] && rawText.length > 0) {
+    if (![self isFirstResponder] && rawText.length > 0 && [self.css_autoFocusOnTextInputState boolValue]) {
         [self becomeFirstResponder];
     }
     _ignoreTextDidChanged = YES;
