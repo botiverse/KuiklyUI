@@ -15,7 +15,6 @@
 
 #include "libohos_render/expand/components/scroller/KRScrollerView.h"
 
-#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <arkui/native_node.h>
@@ -222,7 +221,6 @@ bool KRScrollerView::ResetProp(const std::string &prop_key) {
     if (!didHanded) {
         if (prop_key == kPropNameNestedScroll) {
             didHanded = true;
-            has_nested_scroll_ = false;
             kuikly::util::ResetArkUINestedScroll(GetNode());
         } else if (prop_key == kPropNameFlingEnable) {
             didHanded = true;
@@ -255,7 +253,6 @@ void KRScrollerView::CallMethod(const std::string &method, const KRAnyValue &par
 
 void KRScrollerView::OnEvent(ArkUI_NodeEvent *event, const ArkUI_NodeEventType &event_type) {
     if (event_type == NODE_SCROLL_EVENT_ON_SCROLL) {
-        trace_ark_on_scroll_++;
         FireOnScrollEvent(event);
     } else if (event_type == NODE_SCROLL_EVENT_ON_SCROLL_FRAME_BEGIN) {
         OnScrollFrameBegin(event);
@@ -270,18 +267,9 @@ void KRScrollerView::OnEvent(ArkUI_NodeEvent *event, const ArkUI_NodeEventType &
     }
 }
 
-void KRScrollerView::FireOnScrollEvent(ArkUI_NodeEvent *event, bool force) {
+void KRScrollerView::FireOnScrollEvent(ArkUI_NodeEvent *event) {
     auto point = kuikly::util::GetArkUIScrollContentOffset(GetNode());
-    // ArkUI reports sub-pixel offsets every frame; quantize to avoid excessive bridge callbacks.
-    constexpr float kMinScrollOffsetDelta = 0.5f;
-    constexpr float kFlingScrollOffsetDelta = 2.0f;
-    const float minDelta = (current_scroll_state_ == ArkUI_ScrollState::ARKUI_SCROLL_STATE_FLING)
-                               ? kFlingScrollOffsetDelta
-                               : kMinScrollOffsetDelta;
-    if (!force &&
-        fabsf(point.x - last_fired_scroll_x_) < minDelta &&
-        fabsf(point.y - last_fired_scroll_y_) < minDelta) {
-        trace_fire_skipped_++;
+    if (point.x == last_fired_scroll_x_ && point.y == last_fired_scroll_y_) {
         return;
     }
     last_fired_scroll_x_ = point.x;
@@ -291,7 +279,6 @@ void KRScrollerView::FireOnScrollEvent(ArkUI_NodeEvent *event, bool force) {
     if (!on_scroll_callback_) {
         return;
     }
-    trace_fire_to_bridge_++;
     on_scroll_callback_(GetCommonScrollParams());
 }
 
@@ -365,9 +352,6 @@ bool KRScrollerView::SetNestedScroll(const KRAnyValue &value) {
     ArkUI_ScrollNestedMode forward = ParseOption(forwardStr);
     ArkUI_ScrollNestedMode backward = ParseOption(backwardStr);
 
-    has_nested_scroll_ = true;
-    nested_scroll_forward_ = forward;
-    nested_scroll_backward_ = backward;
     kuikly::util::SetArkUINestedScroll(GetNode(), forward, backward);
     return true;
 }
@@ -587,56 +571,6 @@ void KRScrollerView::OnScrollFrameBegin(ArkUI_NodeEvent *event) {
     last_scroll_time_ = current_time;
     last_scroll_x_ = point.x;
     last_scroll_y_ = point.y;
-
-    if (!has_nested_scroll_ || !content_view_) {
-        return;
-    }
-    auto component_event = OH_ArkUI_NodeEvent_GetNodeComponentEvent(event);
-    if (!component_event) {
-        return;
-    }
-    const float scroll_amount = component_event->data[0].f32;
-    const auto frame = GetFrame();
-    const auto content_frame = content_view_->GetFrame();
-    const float viewport = direction_row_ ? frame.width : frame.height;
-    const float content_size = direction_row_ ? content_frame.width : content_frame.height;
-    const float max_offset = std::max(0.f, content_size - viewport);
-    const float current_offset = direction_row_ ? point.x : point.y;
-
-    float offset_remain = scroll_amount;
-    if (ShouldHandOffNestedScrollAtBoundary(scroll_amount, current_offset, max_offset)) {
-        offset_remain = 0.f;
-    } else if (scroll_amount > 0.f) {
-        offset_remain = std::min(scroll_amount, std::max(0.f, max_offset - current_offset));
-    } else if (scroll_amount < 0.f) {
-        offset_remain = std::max(scroll_amount, -current_offset);
-    }
-
-    if (fabsf(offset_remain - scroll_amount) > 0.01f) {
-        ArkUI_NumberValue ret[] = {{.f32 = offset_remain}};
-        OH_ArkUI_NodeEvent_SetReturnNumberValue(event, ret, 1);
-    }
-}
-
-bool KRScrollerView::ShouldHandOffNestedScrollAtBoundary(float scroll_amount, float current_offset,
-                                                         float max_offset) const {
-    if (!has_nested_scroll_) {
-        return false;
-    }
-    constexpr float kBoundaryEpsilon = 0.5f;
-    const bool at_top = current_offset <= kBoundaryEpsilon;
-    const bool at_bottom = current_offset >= max_offset - kBoundaryEpsilon;
-    const auto handoff_mode = [&](bool scrolling_forward) {
-        const auto mode = scrolling_forward ? nested_scroll_forward_ : nested_scroll_backward_;
-        return mode == ARKUI_SCROLL_NESTED_MODE_SELF_FIRST || mode == ARKUI_SCROLL_NESTED_MODE_PARENT_FIRST;
-    };
-    if (at_top && scroll_amount < 0.f && handoff_mode(false)) {
-        return true;
-    }
-    if (at_bottom && scroll_amount > 0.f && handoff_mode(true)) {
-        return true;
-    }
-    return false;
 }
 
 void KRScrollerView::OnScrollStop(ArkUI_NodeEvent *event) {
@@ -644,13 +578,7 @@ void KRScrollerView::OnScrollStop(ArkUI_NodeEvent *event) {
     if (is_dragging_) {
         OnWillDragEnd(event);
     }
-    // Flush the final offset so the Compose bridge can sync any sub-threshold remainder.
-    FireOnScrollEvent(event, true);
     FireEndScrollEvent(event);
-    DumpScrollTrace("scrollStop");
-    trace_ark_on_scroll_ = 0;
-    trace_fire_skipped_ = 0;
-    trace_fire_to_bridge_ = 0;
     if (auto handler = weak_super_touch_handler_.lock()) {
         handler->ClearNativeTouchConsumer(shared_from_this());
     }
@@ -846,18 +774,6 @@ bool KRScrollerView::SetFlingEnable(bool enable) {
     return true;
 }
 
-void KRScrollerView::DumpScrollTrace(const char *phase) {
-#ifndef NDEBUG
-    if (trace_ark_on_scroll_ == 0 && trace_fire_to_bridge_ == 0) {
-        return;
-    }
-    KR_LOG_INFO_WITH_TAG("KuiklyScrollTrace")
-        << phase << " | arkOnScroll=" << trace_ark_on_scroll_
-        << " fireSkipped=" << trace_fire_skipped_
-        << " fireToBridge=" << trace_fire_to_bridge_;
-#endif
-}
-
 bool KRScrollerView::SetFlingSpeedLimit(const KRAnyValue &value) {
     if (!IsFlingSpeedLimitApiAvailable()) {
         return true;
@@ -874,7 +790,7 @@ bool KRScrollerView::SetFlingSpeedLimit(const KRAnyValue &value) {
 }
 
 void KRScrollerView::TryApplyPendingFireOnScroll() {
-    FireOnScrollEvent(nullptr, true);
+    FireOnScrollEvent(nullptr);
 }
 
 // Clear transient native state for Compose DSL reuse (not the native reuse pool).
@@ -897,7 +813,6 @@ void KRScrollerView::PrepareForComposeReuse() {
     last_move_time_ = 0;
     velocity_x_ = 0;
     velocity_y_ = 0;
-    has_nested_scroll_ = false;
 }
 
 void KRScrollerView::AbortContentOffsetAnimate() {

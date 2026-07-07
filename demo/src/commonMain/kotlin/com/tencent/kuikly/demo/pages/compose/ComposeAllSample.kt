@@ -19,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import com.tencent.kuikly.compose.ComposeContainer
+import com.tencent.kuikly.compose.extension.scrollToTop
 import com.tencent.kuikly.compose.foundation.background
 import com.tencent.kuikly.compose.foundation.clickable
 import com.tencent.kuikly.compose.foundation.layout.Arrangement
@@ -64,10 +65,6 @@ internal data class DemoItem(
 @Page("ComposeAllSample")
 internal class ComposeAllSample : ComposeContainer() {
     override fun debugUIInspector(): Boolean = true
-
-    /** 本地滚动压测用；恢复 main 时改回 1 即可 */
-    private val demoListRepeatCount = 500
-
     // 预定义一组美观的Material Design颜色
     private val demoColors =
         listOf(
@@ -174,26 +171,13 @@ internal class ComposeAllSample : ComposeContainer() {
 
     @Composable
     fun DemoListScreen() {
-        val demoList =
-            remember {
-                val base = getDemoItems()
-                List(demoListRepeatCount) { index ->
-                    val source = base[index % base.size]
-                    if (index < base.size) {
-                        source
-                    } else {
-                        source.copy(
-                            title = "${source.title} #${index + 1}",
-                            description = "${source.description} (${index + 1}/$demoListRepeatCount)",
-                            pageName = "${source.pageName}_$index",
-                        )
-                    }
-                }
-            }
 
-        LaunchedEffect(demoList.size) {
-            println("ComposeAllSample demoList size=${demoList.size}")
+        LaunchedEffect(Unit) {
+            println("DemoListScreen ")
         }
+
+        // 使用抽离出的函数获取演示列表
+        val demoList = remember { getDemoItems() }
 
         Column(
             modifier =
@@ -207,15 +191,6 @@ internal class ComposeAllSample : ComposeContainer() {
                 verticalArrangement = Arrangement.spacedBy(8.dp), // 减小间距
                 contentPadding = PaddingValues(all = 8.dp),
             ) {
-                item {
-                    Text(
-                        text = "压测列表：共 ${demoList.size} 条",
-                        modifier = Modifier.fillMaxWidth().padding(8.dp),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFFE91E63),
-                    )
-                }
                 items(demoList) { demo ->
                     DemoItemCard(demo) {
                         navigateToPage(demo)

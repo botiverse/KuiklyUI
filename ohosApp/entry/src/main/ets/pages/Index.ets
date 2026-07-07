@@ -23,20 +23,6 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ContextCodeHandler } from '../kuikly/ContextCodeHandler';
 import { AppKRRenderManager } from '../kuikly/adapters/AppKRRenderManager';
 
-function parsePageData(raw: Object | undefined): KRRecord {
-  if (raw == null) {
-    return {};
-  }
-  if (typeof raw === 'string') {
-    try {
-      return JSON.parse(raw) as KRRecord;
-    } catch (_e) {
-      return {};
-    }
-  }
-  return raw as KRRecord;
-}
-
 @Entry
 @Component
 struct Index {
@@ -63,16 +49,9 @@ struct Index {
 
   aboutToAppear(): void {
     AppKRRenderManager.getInstance().initIfNeed();
-    const routerParams = router.getParams() as Record<string, Object>;
-    const launchParams = AppStorage.get<Record<string, Object>>('kuiklyLaunchParams');
-    const params = (routerParams && Object.keys(routerParams).length > 0)
-      ? routerParams
-      : (launchParams ?? {});
-    if (launchParams) {
-      AppStorage.delete('kuiklyLaunchParams');
-    }
+    const params = router.getParams() as Record<string, Object>;
     this.pageName = params?.pageName as string;
-    this.pageData = parsePageData(params?.pageData);
+    this.pageData = (params?.pageData as KRRecord | null) ?? {};
     if (this.contextCodeHandler.isNeedGetContextCode(params)) {
       this.contextCodeHandler.handleGetContextCode(getContext(), params, (contextCode) => {
         this.contextCode = contextCode;
