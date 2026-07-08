@@ -232,6 +232,14 @@ NSString *const kCustomFirstScreenTag = @"customFirstScreenTag";
     KR_WEAK_SELF
     [_contextHandler registerCallNativeWtihCallback:^id _Nullable(KuiklyRenderNativeMethod method, NSArray *_Nonnull args) {
         KR_STRONG_SELF_RETURN_NIL
+        if (![KuiklyRenderThreadManager isContextQueue] &&
+            method == KuiklyRenderNativeMethodFireFatalException) {
+            __block id result = nil;
+            [KuiklyRenderThreadManager performOnContextQueueWithBlock:^{
+                result = [strongSelf p_performNativeMethodWithMethod:method args:args];
+            } sync:YES];
+            return result;
+        }
         [KuiklyRenderThreadManager assertContextQueue]; // 线程断言，保证仅在Context线程回调
         // 执行KuiklyKotlin侧调用Native侧的事件
         return [strongSelf p_performNativeMethodWithMethod:method args:args];
