@@ -669,33 +669,55 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             CGFloat baseline = lineRect.origin.y + loc.y + origin.y;
             BOOL isRunStart = (segmentGlyphRange.location == runGlyphRange.location);
             BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
-            // Use the first glyph's pen position for the LEFT edge, not gb.minX:
-            // boundingRectForGlyphRange's minX includes leading space/context, which made
-            // the left inner padding too big (~19px) and asymmetric vs the tight right
-            // edge (XiShi round-2). locationForGlyphAtIndex gives the glyph's own origin.
-            CGFloat glyphLeft = lineRect.origin.x + loc.x + origin.x;
-            CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
-            // task #439 ⑥: the chip box outer edge = glyph ± (px-1 + 1px border). The
-            // fill/border draw boxReserve beyond the glyphs on each outer run edge.
-            //   - left (run start): boxReserve into the source space (no leading kern; the
-            //     left external gap is the source space, per XiShi calibration).
-            //   - right (run end): boxReserve past the glyph. KRRichTextView's TRAILING
-            //     kern reserved this region in layout (pushing the next token to the box
-            //     edge), and boundingRect does NOT include that kern (XiShi Case B), so we
-            //     add boxReserve here to reach the box edge.
-            //   - wrap-continuation edges: flush with the break.
-            CGFloat boxReserve = hPadding + kKRSlockBorderWidthPt;
-            CGFloat left = isRunStart ? (glyphLeft - boxReserve) : glyphLeft;
-            CGFloat right = isRunEnd ? (glyphRight + boxReserve) : glyphRight;
+            BOOL isInlineCode = [(NSString *)value isEqualToString:@"inlineCode"];
+            if (isInlineCode && lineCharRange.length > 0) {
+                id firstAtom = [textStorage attribute:NSAttachmentAttributeName
+                                               atIndex:lineCharRange.location
+                                        effectiveRange:NULL];
+                id lastAtom = [textStorage attribute:NSAttachmentAttributeName
+                                              atIndex:NSMaxRange(lineCharRange) - 1
+                                       effectiveRange:NULL];
+                isRunStart = [firstAtom respondsToSelector:@selector(kr_slockInlineCodeLeadingEdge)] &&
+                    [(id<KRSlockInlineCodeAtomProtocol>)firstAtom kr_slockInlineCodeLeadingEdge];
+                isRunEnd = [lastAtom respondsToSelector:@selector(kr_slockInlineCodeTrailingEdge)] &&
+                    [(id<KRSlockInlineCodeAtomProtocol>)lastAtom kr_slockInlineCodeTrailingEdge];
+            }
+            CGFloat left;
+            CGFloat right;
+            if (isInlineCode) {
+                // Atom bounds already include 4/15 inner padding + 2/15 outer
+                // margin at the global span edges. Paint the final line-fragment
+                // chain only after TextKit wrapping, trimming the transparent
+                // outer margin while keeping the inner padding inside chrome.
+                CGFloat outerMargin = textSize * (2.0 / 15.0);
+                left = CGRectGetMinX(gb) + origin.x + (isRunStart ? outerMargin : 0.0);
+                right = CGRectGetMaxX(gb) + origin.x - (isRunEnd ? outerMargin : 0.0);
+            } else {
+                // Legacy non-atomic chrome fallback.
+                CGFloat glyphLeft = lineRect.origin.x + loc.x + origin.x;
+                CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
+                CGFloat boxReserve = hPadding;
+                left = isRunStart ? (glyphLeft - boxReserve) : glyphLeft;
+                right = isRunEnd ? (glyphRight + boxReserve) : glyphRight;
+            }
             if (right <= left) {
                 return;
             }
-            // React leading-[1.5]: a 1.5·fontSize tall box centered on the font's vertical
-            // center (baseline - (ascender+descender)/2) so the glyph is centered with
-            // symmetric top/bottom padding (any residual low-sit is the systemic baseline).
-            CGFloat centerY = baseline - (ascender + descender) / 2.0;
-            CGFloat top = centerY - chipHeight / 2.0;
-            CGFloat bottom = centerY + chipHeight / 2.0;
+            CGFloat top;
+            CGFloat bottom;
+            if (isInlineCode) {
+                // The atom attachment already owns the exact 1.5x box height and
+                // centers its glyph image inside that box. Reuse TextKit's final
+                // attachment bounds for chrome so measurement, glyph baseline,
+                // fill and border all share one vertical coordinate system.
+                top = CGRectGetMinY(gb) + origin.y;
+                bottom = CGRectGetMaxY(gb) + origin.y;
+            } else {
+                // Legacy glyph-flow chrome: center a 1.5x box on font metrics.
+                CGFloat centerY = baseline - (ascender + descender) / 2.0;
+                top = centerY - chipHeight / 2.0;
+                bottom = centerY + chipHeight / 2.0;
+            }
             if (bottom <= top) {
                 return;
             }
@@ -712,8 +734,16 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             CGContextSetFillColorWithColor(ctx, [UIColor blackColor].CGColor);
             CGContextFillRect(ctx, CGRectMake(bl, bt, br - bl, bw));
             CGContextFillRect(ctx, CGRectMake(bl, bb - bw, br - bl, bw));
-            CGContextFillRect(ctx, CGRectMake(bl, bt, bw, bb - bt));
-            CGContextFillRect(ctx, CGRectMake(br - bw, bt, bw, bb - bt));
+            // A wrapping inline-code chain has only two semantic side edges:
+            // the global span start and end. Line-wrap boundaries are internal
+            // atom joins; drawing vertical borders there was the old experiment's
+            // clipping bug (continuation first glyph sat under a pre-drawn edge).
+            if (!isInlineCode || isRunStart) {
+                CGContextFillRect(ctx, CGRectMake(bl, bt, bw, bb - bt));
+            }
+            if (!isInlineCode || isRunEnd) {
+                CGContextFillRect(ctx, CGRectMake(br - bw, bt, bw, bb - bt));
+            }
         }];
     }];
 }
@@ -865,4 +895,3 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
     objc_setAssociatedObject(self, @selector(hr_size), [NSValue valueWithCGSize:hr_size], OBJC_ASSOCIATION_RETAIN);
 }
 @end
-

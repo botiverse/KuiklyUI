@@ -29,6 +29,7 @@ static const CGFloat kKRSlockAtomicChipHorizontalPaddingRatio = 4.0 / 15.0;
 static const CGFloat kKRSlockAtomicChipHorizontalMarginRatio = 2.0 / 15.0;
 static const CGFloat kKRSlockAtomicChipLineHeightRatio = 1.5;
 static const CGFloat kKRSlockAtomicChipBorderWidth = 1.0;
+static const NSUInteger kKRSlockInlineCodeAtomizeThreshold = 16;
 
 static UIColor *KRSlockAtomicChipFillColor(NSString *chrome, UIColor *resolvedStyleFill) {
     if (resolvedStyleFill && CGColorGetAlpha(resolvedStyleFill.CGColor) > 0) {
@@ -144,11 +145,102 @@ static UIColor *KRSlockAtomicChipFillColor(NSString *chrome, UIColor *resolvedSt
 
 @end
 
+// Inline code uses the same atomic inline-box model as reference chips, at a
+// finer granularity: one attachment per composed grapheme. Each atom owns its
+// glyph measurement/drawing and original text, while KRLayoutManager paints one
+// continuous chrome fragment after TextKit has chosen the final line breaks.
+@interface KRSlockInlineCodeAtomAttachment : NSTextAttachment <KRTextAttachmentStringProtocol, KRSlockInlineCodeAtomProtocol>
+
+@property (nonatomic, copy) NSString *originalText;
+@property (nonatomic, assign) BOOL leadingEdge;
+@property (nonatomic, assign) BOOL trailingEdge;
+
+- (instancetype)initWithText:(NSString *)text
+                         font:(UIFont *)font
+                    textColor:(UIColor *)textColor
+                 letterSpacing:(CGFloat)letterSpacing
+                  leadingEdge:(BOOL)leadingEdge
+                 trailingEdge:(BOOL)trailingEdge;
+
+@end
+
+@implementation KRSlockInlineCodeAtomAttachment
+
+- (instancetype)initWithText:(NSString *)text
+                         font:(UIFont *)font
+                    textColor:(UIColor *)textColor
+                letterSpacing:(CGFloat)letterSpacing
+                 leadingEdge:(BOOL)leadingEdge
+                trailingEdge:(BOOL)trailingEdge {
+    if (self = [super init]) {
+        _originalText = [text copy] ?: @"";
+        _leadingEdge = leadingEdge;
+        _trailingEdge = trailingEdge;
+        UIFont *resolvedFont = font ?: [UIFont systemFontOfSize:15.0];
+        UIColor *resolvedTextColor = textColor ?: [UIColor blackColor];
+        NSMutableDictionary<NSAttributedStringKey, id> *attributes = [@{
+            NSFontAttributeName: resolvedFont,
+            NSForegroundColorAttributeName: resolvedTextColor,
+        } mutableCopy];
+        if (letterSpacing != 0) {
+            attributes[NSKernAttributeName] = @(letterSpacing);
+        }
+        NSAttributedString *displayText = [[NSAttributedString alloc] initWithString:_originalText attributes:attributes];
+        CTLineRef line = CTLineCreateWithAttributedString((CFAttributedStringRef)displayText);
+        CGFloat ascent = 0;
+        CGFloat descent = 0;
+        CGFloat leading = 0;
+        CGFloat textWidth = (CGFloat)CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
+        CGFloat textSize = resolvedFont.pointSize;
+        CGFloat innerPadding = textSize * kKRSlockAtomicChipHorizontalPaddingRatio;
+        CGFloat outerMargin = textSize * kKRSlockAtomicChipHorizontalMarginRatio;
+        CGFloat edgeAdvance = innerPadding + outerMargin;
+        CGFloat leadingAdvance = leadingEdge ? edgeAdvance : 0.0;
+        CGFloat trailingAdvance = trailingEdge ? edgeAdvance : 0.0;
+        CGFloat atomHeight = textSize * kKRSlockAtomicChipLineHeightRatio;
+        CGFloat totalWidth = textWidth + leadingAdvance + trailingAdvance;
+
+        UIGraphicsBeginImageContextWithOptions(CGSizeMake(totalWidth, atomHeight), NO, 0.0);
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        if (context) {
+            CGContextSaveGState(context);
+            CGContextTranslateCTM(context, 0, atomHeight);
+            CGContextScaleCTM(context, 1.0, -1.0);
+            CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+            CGFloat baseline = (atomHeight - ascent + descent) / 2.0;
+            CGContextSetTextPosition(context, leadingAdvance, baseline);
+            CTLineDraw(line, context);
+            CGContextRestoreGState(context);
+        }
+        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        CFRelease(line);
+
+        self.image = image;
+        CGFloat baselineOffset = (resolvedFont.ascender + resolvedFont.descender) / 2.0 - atomHeight / 2.0;
+        self.bounds = CGRectMake(0, baselineOffset, totalWidth, atomHeight);
+    }
+    return self;
+}
+
+- (NSString *)kr_originlTextBeforeTextAttachment {
+    return self.originalText ?: @"";
+}
+
+- (BOOL)kr_slockInlineCodeLeadingEdge {
+    return self.leadingEdge;
+}
+
+- (BOOL)kr_slockInlineCodeTrailingEdge {
+    return self.trailingEdge;
+}
+
+@end
+
 static BOOL KRSlockUsesAtomicChipBox(NSString *chrome) {
-    // Reference chips are indivisible inline boxes. Inline code is deliberately
-    // excluded: it is a decorated text flow whose shared U+200B break markers and
-    // TextKit glyph layout preserve the #58 character-wrap contract. Treating the
-    // whole code span as one attachment would make long paths unbreakable.
+    // Reference chips are indivisible inline boxes. Inline code is handled by
+    // KRSlockInlineCodeAtomAttachment instead: one box for short spans and a
+    // grapheme box chain for long spans, preserving #58 character wrapping.
     return chrome.length > 0 &&
         ![chrome isEqualToString:@"ordinaryMention"] &&
         ![chrome isEqualToString:@"inlineCode"];
@@ -584,6 +676,12 @@ static BOOL KRSlockUsesAtomicChipBox(NSString *chrome) {
     }];
     for (NSValue *rv in chipRanges) {
         NSRange r = rv.rangeValue;
+        NSString *chrome = [str attribute:KRSlockChromeAttributeName atIndex:r.location effectiveRange:NULL];
+        if ([chrome isEqualToString:@"inlineCode"]) {
+            // The first/last atom bounds own inner padding + transparent outer
+            // margin. Never add a second kern reserve to the chain.
+            continue;
+        }
         UIFont *font = [str attribute:NSFontAttributeName atIndex:r.location effectiveRange:NULL];
         CGFloat textSize = font ? font.pointSize : 15.0;
         // box reserve = px-1 (4/15·textSize) + 1px border (mirror KRLabel.m).
@@ -607,8 +705,65 @@ static BOOL KRSlockUsesAtomicChipBox(NSString *chrome) {
     [str addAttribute:NSKernAttributeName value:@(base + delta) range:NSMakeRange(idx, 1)];
 }
 
+- (nullable NSMutableAttributedString *)p_createSlockInlineCodeAtomChainWithAttributes:(KRSpanAttributes *)attrs {
+    if (attrs.text.length == 0) {
+        return nil;
+    }
+    NSMutableArray<NSString *> *graphemes = [NSMutableArray new];
+    [attrs.text enumerateSubstringsInRange:NSMakeRange(0, attrs.text.length)
+                                   options:NSStringEnumerationByComposedCharacterSequences
+                                usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
+        if (substring.length > 0 && ![substring isEqualToString:@"\u200B"]) {
+            [graphemes addObject:substring];
+        }
+    }];
+    if (graphemes.count == 0) {
+        return nil;
+    }
+    NSArray<NSString *> *atoms = graphemes.count <= kKRSlockInlineCodeAtomizeThreshold
+        ? @[ [graphemes componentsJoinedByString:@""] ]
+        : graphemes;
+
+    NSMutableAttributedString *chain = [[NSMutableAttributedString alloc] init];
+    [atoms enumerateObjectsUsingBlock:^(NSString *atomText, NSUInteger atomIndex, BOOL *stop) {
+        BOOL leadingEdge = atomIndex == 0;
+        BOOL trailingEdge = atomIndex == atoms.count - 1;
+        KRSlockInlineCodeAtomAttachment *attachment = [[KRSlockInlineCodeAtomAttachment alloc]
+            initWithText:atomText
+                    font:attrs.font
+               textColor:attrs.color
+            letterSpacing:attrs.letterSpacing
+             leadingEdge:leadingEdge
+            trailingEdge:trailingEdge];
+        NSMutableAttributedString *atom = [[NSMutableAttributedString alloc]
+            initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+        NSRange atomRange = NSMakeRange(0, atom.length);
+        [atom addAttribute:NSWritingDirectionAttributeName
+                    value:@[@((NSInteger)NSWritingDirectionLeftToRight | (NSInteger)NSWritingDirectionOverride)]
+                    range:atomRange];
+        [atom addAttribute:NSFontAttributeName value:attrs.font ?: [UIFont systemFontOfSize:15.0] range:atomRange];
+        [atom addAttribute:KRSlockChromeAttributeName value:@"inlineCode" range:atomRange];
+        [atom addAttribute:KuiklyIndexAttributeName value:@(attrs.spanIndex) range:atomRange];
+        [chain appendAttributedString:atom];
+    }];
+    NSRange chainRange = NSMakeRange(0, chain.length);
+    [self p_applyTextAttributeWithAttr:chain
+                            textAliment:attrs.textAlign
+                           lineSpacing:attrs.lineSpacing
+                      paragraphSpacing:attrs.paragraphSpacing
+                            lineHeight:attrs.lineHeight
+                                 range:chainRange
+                              fontSize:attrs.font.pointSize
+                            headIndent:attrs.headIndent
+                                  font:attrs.font ?: [UIFont systemFontOfSize:15.0]];
+    return chain;
+}
+
 
 - (nullable NSMutableAttributedString *)p_createSpanAttributedStringWithAttributes:(KRSpanAttributes *)attrs {
+    if ([attrs.slockChrome isEqualToString:@"inlineCode"] && attrs.text.length > 0) {
+        return [self p_createSlockInlineCodeAtomChainWithAttributes:attrs];
+    }
     if (KRSlockUsesAtomicChipBox(attrs.slockChrome) && attrs.text.length > 0) {
         KRSlockAtomicChipAttachment *attachment = [[KRSlockAtomicChipAttachment alloc]
             initWithText:attrs.text
