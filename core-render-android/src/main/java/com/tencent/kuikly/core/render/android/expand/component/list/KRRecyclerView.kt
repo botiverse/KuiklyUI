@@ -40,6 +40,7 @@ import com.tencent.kuikly.core.render.android.css.ktx.frameWidth
 import com.tencent.kuikly.core.render.android.css.ktx.nativeGestureViewHashCodeSet
 import com.tencent.kuikly.core.render.android.css.ktx.touchConsumeByKuikly
 import com.tencent.kuikly.core.render.android.css.ktx.toDpF
+import com.tencent.kuikly.core.render.android.css.ktx.toPxF
 import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 import com.tencent.kuikly.core.render.android.export.IKuiklyRenderViewExport
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderCallback
@@ -119,6 +120,9 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
      */
     private var bouncesEnable = true
     internal var limitHeaderBounces = false
+
+    private var hasPullToRefresh = false
+    private var pullToRefreshMaxTranslationPx = 0f
 
     /**
      * List上一次的滚动状态
@@ -502,7 +506,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
 
     override fun call(method: String, params: String?, callback: KuiklyRenderCallback?): Any? {
         return when (method) {
-            METHOD_SET_HAS_PULL_TO_REFRESH -> null
+            METHOD_SET_HAS_PULL_TO_REFRESH -> setHasPullToRefresh(params)
+            METHOD_SET_PULL_TO_REFRESH_MAX_DISTANCE -> setPullToRefreshMaxDistance(params)
             METHOD_CONTENT_OFFSET -> setContentOffset(params)
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> contentInsetWhenEndDrag(params)
             METHOD_CONTENT_INSET -> contentInset(params)
@@ -1314,6 +1319,47 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         overScrollHandler?.bounceWithContentInset(KRRecyclerContentViewContentInset(kuiklyRenderContext, ci))
     }
 
+    private fun setHasPullToRefresh(params: String?) {
+        val enabled = params == "1"
+        if (hasPullToRefresh == enabled) return
+        hasPullToRefresh = enabled
+        if (!enabled) {
+            pullToRefreshMaxTranslationPx = 0f
+        }
+        KuiklyRenderLog.d(
+            VIEW_NAME,
+            "$PULL_TO_REFRESH_CLAMP_MARKER enabled=$enabled maxPx=$pullToRefreshMaxTranslationPx"
+        )
+    }
+
+    private fun setPullToRefreshMaxDistance(params: String?) {
+        val logicalDistance = params?.toFloatOrNull()?.coerceAtLeast(0f) ?: return
+        val maxTranslationPx = kuiklyRenderContext.toPxF(logicalDistance)
+        if (pullToRefreshMaxTranslationPx == maxTranslationPx) return
+        pullToRefreshMaxTranslationPx = maxTranslationPx
+        overScrollHandler?.clampPullToRefreshTranslationIfNeeded()
+        KuiklyRenderLog.d(
+            VIEW_NAME,
+            "$PULL_TO_REFRESH_CLAMP_MARKER enabled=$hasPullToRefresh " +
+                "logical=$logicalDistance maxPx=$maxTranslationPx"
+        )
+    }
+
+    internal fun clampPullToRefreshTranslation(value: Float): Float =
+        clampPullToRefreshTranslation(
+            value = value,
+            enabled = hasPullToRefresh,
+            maxTranslation = pullToRefreshMaxTranslationPx
+        )
+
+    internal fun logPullToRefreshClamp(rawValue: Float, clampedValue: Float) {
+        KuiklyRenderLog.d(
+            VIEW_NAME,
+            "$PULL_TO_REFRESH_CLAMP_MARKER rawPx=$rawValue " +
+                "clampedPx=$clampedValue maxPx=$pullToRefreshMaxTranslationPx"
+        )
+    }
+
     /**
      * Clear transient native state for Compose DSL reuse (not the native reuse pool).
      */
@@ -1333,6 +1379,9 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         lastScrollParentX = 0
         lastScrollParentY = 0
         nestedScrollLastMoveTime = 0L
+        // Reset pull-to-refresh bounds before this native list is reused by another Compose node.
+        hasPullToRefresh = false
+        pullToRefreshMaxTranslationPx = 0f
         // Reset position offset compensation
         accumulatedPositionOffsetX = 0
         accumulatedPositionOffsetY = 0
@@ -1498,6 +1547,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         private const val METHOD_ABORT_CONTENT_OFFSET_ANIMATE = "abortContentOffsetAnimate" // 停止滚动动画
         private const val METHOD_PREPARE_FOR_COMPOSE_REUSE = "prepareForComposeReuse" // Compose DSL 复用前重置瞬态
         private const val METHOD_SET_HAS_PULL_TO_REFRESH = "setHasPullToRefresh"
+        private const val METHOD_SET_PULL_TO_REFRESH_MAX_DISTANCE = "setPullToRefreshMaxDistance"
+        private const val PULL_TO_REFRESH_CLAMP_MARKER = "kuikly_ptr_overscroll_clamp_v1"
 
         private const val NESTED_SCROLL = "nestedScroll"
 
@@ -2023,4 +2074,13 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
         return super.canScrollVertically(direction)
     }
+}
+
+internal fun clampPullToRefreshTranslation(
+    value: Float,
+    enabled: Boolean,
+    maxTranslation: Float
+): Float {
+    if (!enabled || maxTranslation <= 0f || value <= 0f) return value
+    return value.coerceAtMost(maxTranslation)
 }

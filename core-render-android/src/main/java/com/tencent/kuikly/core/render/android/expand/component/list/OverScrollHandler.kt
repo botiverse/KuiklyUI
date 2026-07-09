@@ -84,6 +84,7 @@ internal class OverScrollHandler(
      */
     private var accumulatedTranslationX: Float = 0f
     private var accumulatedTranslationY: Float = 0f
+    private var didLogPullToRefreshClamp = false
 
     private val maxFlingVelocity = ViewConfiguration.get(recyclerView.context).scaledMaximumFlingVelocity
     private var velocityTracker =  VelocityTracker.obtain()
@@ -125,6 +126,7 @@ internal class OverScrollHandler(
         overScrollY = 0f
         accumulatedTranslationX = 0f
         accumulatedTranslationY = 0f
+        didLogPullToRefreshClamp = false
         contentInsetWhenEndDrag = null
     }
 
@@ -142,6 +144,7 @@ internal class OverScrollHandler(
 
     private fun processDownEvent(activeIndex: Int, event: MotionEvent): Boolean {
         downing = true
+        didLogPullToRefreshClamp = false
         updatePointerData(activeIndex, event)
         if (forceOverScroll) {
             dragging = true
@@ -415,7 +418,12 @@ internal class OverScrollHandler(
             ) {
                 accumulatedTranslationY = contentView.translationY
             }
-            accumulatedTranslationY += offset
+            val rawTranslation = accumulatedTranslationY + offset
+            accumulatedTranslationY = recyclerView.clampPullToRefreshTranslation(rawTranslation)
+            if (rawTranslation != accumulatedTranslationY && !didLogPullToRefreshClamp) {
+                recyclerView.logPullToRefreshClamp(rawTranslation, accumulatedTranslationY)
+                didLogPullToRefreshClamp = true
+            }
             contentView.translationY = accumulatedTranslationY.roundToInt().toFloat()
         } else {
             if (accumulatedTranslationX != contentView.translationX &&
@@ -426,6 +434,15 @@ internal class OverScrollHandler(
             accumulatedTranslationX += offset
             contentView.translationX = accumulatedTranslationX.roundToInt().toFloat()
         }
+    }
+
+    fun clampPullToRefreshTranslationIfNeeded() {
+        if (!isVertical) return
+        val clamped = recyclerView.clampPullToRefreshTranslation(accumulatedTranslationY)
+        if (clamped == accumulatedTranslationY) return
+        accumulatedTranslationY = clamped
+        contentView.translationY = clamped.roundToInt().toFloat()
+        fireOverScrollCallback(contentView.translationX, contentView.translationY)
     }
 
     private fun updatePointerData(activeIndex: Int, motionEvent: MotionEvent) {
