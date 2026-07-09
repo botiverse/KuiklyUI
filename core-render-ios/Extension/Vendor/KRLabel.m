@@ -149,17 +149,98 @@ static NSAttributedString *KRSlockChipSpacerAttributedString(CGFloat width, id s
     return spacer;
 }
 
-static NSAttributedString *KRAttributedStringByReservingSlockChipBoxAdvance(NSAttributedString *attributedString) {
+static NSUInteger kKRSlockTask448LogCount = 0;
+
+static NSString *KRSlockTask448LogTextSnippet(NSString *text) {
+    NSString *singleLine = [[text ?: @"" stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"]
+                            stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
+    if (singleLine.length > 220) {
+        return [[singleLine substringToIndex:220] stringByAppendingString:@"…"];
+    }
+    return singleLine;
+}
+
+static NSString *KRSlockTask448AttachmentSummary(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return @"[]";
+    }
+    NSMutableArray<NSString *> *items = [NSMutableArray new];
+    [attributedString enumerateAttribute:NSAttachmentAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (!value) {
+            return;
+        }
+        NSString *width = @"?";
+        if ([value isKindOfClass:[KRSlockLabelChipSpacerAttachment class]]) {
+            width = [NSString stringWithFormat:@"%.2f", ((KRSlockLabelChipSpacerAttachment *)value).spacerWidth];
+        }
+        [items addObject:[NSString stringWithFormat:@"{%lu,%lu,%@,w=%@,empty=%@}",
+                          (unsigned long)range.location,
+                          (unsigned long)range.length,
+                          NSStringFromClass([value class]),
+                          width,
+                          KRIsRestoredEmptyAttachment(value) ? @"1" : @"0"]];
+    }];
+    return [NSString stringWithFormat:@"[%@]", [items componentsJoinedByString:@","]];
+}
+
+static BOOL KRSlockTask448ShouldLog(NSAttributedString *attributedString, BOOL sawChrome, BOOL insertedSpacer) {
+    if (kKRSlockTask448LogCount >= 120) {
+        return NO;
+    }
+    NSString *text = attributedString.string ?: @"";
+    return sawChrome ||
+        insertedSpacer ||
+        [text containsString:@"#42"] ||
+        [text containsString:@"#markdown专修"] ||
+        [text containsString:@"CODE_SPAN"] ||
+        [text containsString:@"inlineCode"];
+}
+
+static void KRSlockTask448Log(NSString *caller,
+                              NSAttributedString *before,
+                              NSAttributedString *after,
+                              NSArray<NSString *> *chromeRuns,
+                              NSArray<NSString *> *reservationActions) {
+    BOOL sawChrome = chromeRuns.count > 0;
+    BOOL insertedSpacer = reservationActions.count > 0;
+    if (!KRSlockTask448ShouldLog(before, sawChrome, insertedSpacer)) {
+        return;
+    }
+    kKRSlockTask448LogCount++;
+    NSLog(@"SLOCK_TASK448_LABEL caller=%@ len=%lu sawChrome=%@ actions=%@ chromeRuns=%@ beforeAttachments=%@ afterAttachments=%@ text=\"%@\"",
+          caller ?: @"?",
+          (unsigned long)before.length,
+          sawChrome ? @"1" : @"0",
+          [reservationActions componentsJoinedByString:@"|"],
+          [chromeRuns componentsJoinedByString:@"|"],
+          KRSlockTask448AttachmentSummary(before),
+          KRSlockTask448AttachmentSummary(after ?: before),
+          KRSlockTask448LogTextSnippet(before.string));
+}
+
+static NSAttributedString *KRAttributedStringByReservingSlockChipBoxAdvance(NSAttributedString *attributedString, NSString *caller) {
     if (attributedString.length == 0) {
         return attributedString;
     }
     NSMutableArray<NSDictionary *> *chipRanges = [NSMutableArray new];
+    NSMutableArray<NSString *> *chromeRuns = [NSMutableArray new];
+    NSMutableArray<NSString *> *reservationActions = [NSMutableArray new];
     [attributedString enumerateAttribute:KRSlockChromeAttributeName
                                   inRange:NSMakeRange(0, attributedString.length)
                                   options:0
                                usingBlock:^(id value, NSRange runRange, BOOL *stop) {
-        if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] == 0
-            || [(NSString *)value isEqualToString:@"ordinaryMention"]) {
+        if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] == 0) {
+            return;
+        }
+        [chromeRuns addObject:[NSString stringWithFormat:@"{%lu,%lu,%@,\"%@\"}",
+                               (unsigned long)runRange.location,
+                               (unsigned long)runRange.length,
+                               (NSString *)value,
+                               KRSlockTask448LogTextSnippet([attributedString.string substringWithRange:runRange])]];
+        if ([(NSString *)value isEqualToString:@"ordinaryMention"]) {
             return;
         }
         NSRange paintRange = NSMakeRange(runRange.location, runRange.length);
@@ -176,6 +257,9 @@ static NSAttributedString *KRAttributedStringByReservingSlockChipBoxAdvance(NSAt
         BOOL hasLeadingSpacer = KRHasRestoredEmptyAttachmentAtIndex(attributedString, (NSInteger)paintRange.location - 1);
         BOOL hasTrailingSpacer = KRHasRestoredEmptyAttachmentAtIndex(attributedString, (NSInteger)NSMaxRange(paintRange));
         if (hasLeadingSpacer && hasTrailingSpacer) {
+            [reservationActions addObject:[NSString stringWithFormat:@"already:{%lu,%lu}",
+                                           (unsigned long)paintRange.location,
+                                           (unsigned long)paintRange.length]];
             return;
         }
         id spanIndex = [attributedString attribute:KRSlockKuiklyIndexAttributeName
@@ -189,6 +273,7 @@ static NSAttributedString *KRAttributedStringByReservingSlockChipBoxAdvance(NSAt
         }];
     }];
     if (chipRanges.count == 0) {
+        KRSlockTask448Log(caller, attributedString, attributedString, chromeRuns, reservationActions);
         return attributedString;
     }
     NSMutableAttributedString *result = [attributedString mutableCopy];
@@ -199,14 +284,23 @@ static NSAttributedString *KRAttributedStringByReservingSlockChipBoxAdvance(NSAt
         CGFloat edgePadding = textSize * (kKRSlockHorizontalPaddingRatio + kKRSlockHorizontalMarginRatio);
         id spanIndex = entry[@"spanIndex"];
         if ([entry[@"trailing"] boolValue]) {
+            [reservationActions addObject:[NSString stringWithFormat:@"insertTrailing:{%lu,%lu}:w=%.2f",
+                                           (unsigned long)range.location,
+                                           (unsigned long)range.length,
+                                           edgePadding]];
             [result insertAttributedString:KRSlockChipSpacerAttributedString(edgePadding, spanIndex)
                                    atIndex:NSMaxRange(range)];
         }
         if ([entry[@"leading"] boolValue]) {
+            [reservationActions addObject:[NSString stringWithFormat:@"insertLeading:{%lu,%lu}:w=%.2f",
+                                           (unsigned long)range.location,
+                                           (unsigned long)range.length,
+                                           edgePadding]];
             [result insertAttributedString:KRSlockChipSpacerAttributedString(edgePadding, spanIndex)
                                    atIndex:range.location];
         }
     }
+    KRSlockTask448Log(caller, attributedString, result, chromeRuns, reservationActions);
     return result;
 }
 
@@ -273,7 +367,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
 
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    NSAttributedString *renderAttributedText = KRAttributedStringByReservingSlockChipBoxAdvance(attributedText);
+    NSAttributedString *renderAttributedText = KRAttributedStringByReservingSlockChipBoxAdvance(attributedText, @"setAttributedText");
     if (!renderAttributedText) {
         [super setAttributedText:nil];
         self.textRender = nil;
@@ -341,7 +435,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
 
 + (CGSize)sizeThatFits:(CGSize)size attributedString:(NSAttributedString *)attString numberOfLines:(NSUInteger)lines lineBreakMode:(NSLineBreakMode)mode lineBreakMarin:(CGFloat)marin lineHeight:(CGFloat)lineHeight {
     attString = [attString isKindOfClass:[NSAttributedString class]] ? attString : [[NSAttributedString alloc] initWithString:@""];
-    attString = KRAttributedStringByReservingSlockChipBoxAdvance(attString);
+    attString = KRAttributedStringByReservingSlockChipBoxAdvance(attString, @"sizeThatFits");
     NSTextStorage *textStorage = [[NSTextStorage alloc] initWithAttributedString:[attString copy]];
     textStorage.hr_hasAttachmentViews = attString.hr_hasAttachmentViews;
     KRTextRender *textRender = [[KRTextRender alloc] initWithTextStorage:textStorage lineHeight:lineHeight];
