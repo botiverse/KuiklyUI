@@ -18,11 +18,141 @@
 #import "KRConvertUtil.h"
 #import "KuiklyRenderBridge.h"
 #import "NSObject+KR.h"
+#import <CoreText/CoreText.h>
 
 NSString *const KuiklyIndexAttributeName = @"KuiklyIndexAttributeName";
 NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
 NSString *const kGradientInfoKeyFont = @"font";
 NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+
+static const CGFloat kKRSlockAtomicChipHorizontalPaddingRatio = 4.0 / 15.0;
+static const CGFloat kKRSlockAtomicChipHorizontalMarginRatio = 2.0 / 15.0;
+static const CGFloat kKRSlockAtomicChipLineHeightRatio = 1.5;
+static const CGFloat kKRSlockAtomicChipBorderWidth = 1.0;
+
+static UIColor *KRSlockAtomicChipFillColor(NSString *chrome, UIColor *resolvedStyleFill) {
+    if (resolvedStyleFill && CGColorGetAlpha(resolvedStyleFill.CGColor) > 0) {
+        return resolvedStyleFill;
+    }
+    uint32_t argb = 0;
+    if ([chrome isEqualToString:@"channel"]) {
+        argb = 0x4DFE7DA8;
+    } else if ([chrome isEqualToString:@"thread"]) {
+        argb = 0x4D27CCF3;
+    } else if ([chrome isEqualToString:@"task"]) {
+        argb = 0x66FFD440;
+    } else if ([chrome isEqualToString:@"selfMention"] || [chrome isEqualToString:@"active"]) {
+        argb = 0xFFFFD440;
+    }
+    CGFloat a = ((argb >> 24) & 0xFF) / 255.0;
+    CGFloat r = ((argb >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((argb >> 8) & 0xFF) / 255.0;
+    CGFloat b = (argb & 0xFF) / 255.0;
+    return [UIColor colorWithRed:r green:g blue:b alpha:a];
+}
+
+// TextKit has no native inline-box model for an attributed-string subrange. A
+// Slock reference chip is therefore represented as one attachment whose bounds
+// are the complete inline box (text + padding + transparent outer margin). This
+// keeps measurement, wrapping and drawing on the same atomic layout object,
+// matching Android's ReplacementSpan instead of painting outside glyph advance.
+@interface KRSlockAtomicChipAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
+
+@property (nonatomic, copy) NSString *originalText;
+
+- (instancetype)initWithText:(NSString *)text
+                         font:(UIFont *)font
+                    textColor:(UIColor *)textColor
+                    fillColor:(UIColor *)fillColor
+                 letterSpacing:(CGFloat)letterSpacing;
+
+@end
+
+@implementation KRSlockAtomicChipAttachment
+
+- (instancetype)initWithText:(NSString *)text
+                         font:(UIFont *)font
+                    textColor:(UIColor *)textColor
+                    fillColor:(UIColor *)fillColor
+                letterSpacing:(CGFloat)letterSpacing {
+    if (self = [super init]) {
+        _originalText = [text copy] ?: @"";
+        UIFont *resolvedFont = font ?: [UIFont systemFontOfSize:15.0];
+        UIColor *resolvedTextColor = textColor ?: [UIColor blackColor];
+        UIColor *resolvedFillColor = fillColor ?: [UIColor clearColor];
+        NSMutableDictionary<NSAttributedStringKey, id> *attributes = [@{
+            NSFontAttributeName: resolvedFont,
+            NSForegroundColorAttributeName: resolvedTextColor,
+        } mutableCopy];
+        if (letterSpacing != 0) {
+            attributes[NSKernAttributeName] = @(letterSpacing);
+        }
+        NSAttributedString *displayText = [[NSAttributedString alloc] initWithString:_originalText attributes:attributes];
+        CTLineRef line = CTLineCreateWithAttributedString((CFAttributedStringRef)displayText);
+        CGFloat ascent = 0;
+        CGFloat descent = 0;
+        CGFloat leading = 0;
+        CGFloat textWidth = (CGFloat)CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
+        CGFloat textSize = resolvedFont.pointSize;
+        CGFloat innerPadding = textSize * kKRSlockAtomicChipHorizontalPaddingRatio;
+        CGFloat outerMargin = textSize * kKRSlockAtomicChipHorizontalMarginRatio;
+        CGFloat edgeAdvance = innerPadding + outerMargin;
+        CGFloat chipHeight = textSize * kKRSlockAtomicChipLineHeightRatio;
+        CGFloat totalWidth = textWidth + edgeAdvance * 2.0;
+
+        UIGraphicsBeginImageContextWithOptions(CGSizeMake(totalWidth, chipHeight), NO, 0.0);
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        if (context) {
+            CGRect chromeRect = CGRectMake(outerMargin, 0, totalWidth - outerMargin * 2.0, chipHeight);
+            CGContextSetFillColorWithColor(context, resolvedFillColor.CGColor);
+            CGContextFillRect(context, chromeRect);
+
+            CGFloat borderWidth = kKRSlockAtomicChipBorderWidth;
+            CGFloat left = CGRectGetMinX(chromeRect);
+            CGFloat top = CGRectGetMinY(chromeRect);
+            CGFloat right = CGRectGetMaxX(chromeRect);
+            CGFloat bottom = CGRectGetMaxY(chromeRect);
+            CGContextSetFillColorWithColor(context, [UIColor blackColor].CGColor);
+            CGContextFillRect(context, CGRectMake(left, top, right - left, borderWidth));
+            CGContextFillRect(context, CGRectMake(left, bottom - borderWidth, right - left, borderWidth));
+            CGContextFillRect(context, CGRectMake(left, top, borderWidth, bottom - top));
+            CGContextFillRect(context, CGRectMake(right - borderWidth, top, borderWidth, bottom - top));
+
+            CGContextSaveGState(context);
+            CGContextTranslateCTM(context, 0, chipHeight);
+            CGContextScaleCTM(context, 1.0, -1.0);
+            CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+            CGFloat baseline = (chipHeight - ascent + descent) / 2.0;
+            CGContextSetTextPosition(context, edgeAdvance, baseline);
+            CTLineDraw(line, context);
+            CGContextRestoreGState(context);
+        }
+        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        CFRelease(line);
+
+        self.image = image;
+        CGFloat baselineOffset = (resolvedFont.ascender + resolvedFont.descender) / 2.0 - chipHeight / 2.0;
+        self.bounds = CGRectMake(0, baselineOffset, totalWidth, chipHeight);
+    }
+    return self;
+}
+
+- (NSString *)kr_originlTextBeforeTextAttachment {
+    return self.originalText ?: @"";
+}
+
+@end
+
+static BOOL KRSlockUsesAtomicChipBox(NSString *chrome) {
+    // Reference chips are indivisible inline boxes. Inline code is deliberately
+    // excluded: it is a decorated text flow whose shared U+200B break markers and
+    // TextKit glyph layout preserve the #58 character-wrap contract. Treating the
+    // whole code span as one attachment would make long paths unbreakable.
+    return chrome.length > 0 &&
+        ![chrome isEqualToString:@"ordinaryMention"] &&
+        ![chrome isEqualToString:@"inlineCode"];
+}
 
 @interface KRRichTextView()
 
@@ -479,6 +609,40 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
 
 
 - (nullable NSMutableAttributedString *)p_createSpanAttributedStringWithAttributes:(KRSpanAttributes *)attrs {
+    if (KRSlockUsesAtomicChipBox(attrs.slockChrome) && attrs.text.length > 0) {
+        KRSlockAtomicChipAttachment *attachment = [[KRSlockAtomicChipAttachment alloc]
+            initWithText:attrs.text
+                    font:attrs.font
+               textColor:attrs.color
+               fillColor:KRSlockAtomicChipFillColor(attrs.slockChrome, attrs.backgroundColor)
+           letterSpacing:attrs.letterSpacing];
+        NSMutableAttributedString *atomicBox = [[NSMutableAttributedString alloc]
+            initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+        NSRange atomicRange = NSMakeRange(0, atomicBox.length);
+        [atomicBox addAttribute:NSWritingDirectionAttributeName
+                         value:@[@((NSInteger)NSWritingDirectionLeftToRight | (NSInteger)NSWritingDirectionOverride)]
+                         range:atomicRange];
+        [atomicBox addAttribute:NSFontAttributeName value:attrs.font ?: [UIFont systemFontOfSize:15.0] range:atomicRange];
+        [atomicBox addAttribute:KuiklyIndexAttributeName value:@(attrs.spanIndex) range:atomicRange];
+        NSLog(@"SLOCK_TASK448_ATOMIC kind=%@ text=\"%@\" bounds={%.2f,%.2f,%.2f,%.2f} spanIndex=%ld",
+              attrs.slockChrome,
+              attrs.text,
+              attachment.bounds.origin.x,
+              attachment.bounds.origin.y,
+              attachment.bounds.size.width,
+              attachment.bounds.size.height,
+              (long)attrs.spanIndex);
+        [self p_applyTextAttributeWithAttr:atomicBox
+                                textAliment:attrs.textAlign
+                               lineSpacing:attrs.lineSpacing
+                          paragraphSpacing:attrs.paragraphSpacing
+                                lineHeight:attrs.lineHeight
+                                     range:atomicRange
+                                  fontSize:attrs.font.pointSize
+                                headIndent:attrs.headIndent
+                                      font:attrs.font ?: [UIFont systemFontOfSize:15.0]];
+        return atomicBox;
+    }
     NSMutableAttributedString *attributedString = [[NSMutableAttributedString alloc] initWithString:attrs.text attributes:@{}];
     NSRange range = NSMakeRange(0, attributedString.length);
 

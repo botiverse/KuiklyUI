@@ -19,6 +19,7 @@
 #import "KRAsyncDeallocManager.h"
 #import <objc/runtime.h>
 #import "NSObject+KR.h"
+#import "KuiklyRenderBridge.h"
 
 #define KRAssertMainThread() NSAssert(0 != pthread_main_np(), @"This method must be called on the main thread!")
 NSString *const KRHighlightAttributeKey = @"KRHighlightAttributeKey";
@@ -69,6 +70,33 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
 }
 
+static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return @"";
+    }
+    NSMutableString *result = [NSMutableString string];
+    __block NSUInteger cursor = 0;
+    [attributedString enumerateAttribute:NSAttachmentAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (range.location > cursor) {
+            [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, range.location - cursor)]];
+        }
+        if ([value respondsToSelector:@selector(kr_originlTextBeforeTextAttachment)]) {
+            id<KRTextAttachmentStringProtocol> attachment = (id<KRTextAttachmentStringProtocol>)value;
+            [result appendString:[attachment kr_originlTextBeforeTextAttachment] ?: @""];
+        } else {
+            [result appendString:[attributedString.string substringWithRange:range]];
+        }
+        cursor = NSMaxRange(range);
+    }];
+    if (cursor < attributedString.length) {
+        [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, attributedString.length - cursor)]];
+    }
+    return result;
+}
+
 
 @interface KRLabel()
 
@@ -98,7 +126,7 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
 - (NSString *)accessibilityLabel{
     NSString * res = [super accessibilityLabel];
     if (res.length <= 0) {
-        return self.attributedText.string;
+        return KRRestoredTextAttachmentString(self.attributedText);
     }
     return res;
 }
@@ -837,5 +865,4 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     objc_setAssociatedObject(self, @selector(hr_size), [NSValue valueWithCGSize:hr_size], OBJC_ASSOCIATION_RETAIN);
 }
 @end
-
 
