@@ -23,6 +23,53 @@
 #define KRAssertMainThread() NSAssert(0 != pthread_main_np(), @"This method must be called on the main thread!")
 NSString *const KRHighlightAttributeKey = @"KRHighlightAttributeKey";
 NSString *const KRBGAttributeKey = @"KRBGAttributeKey";
+NSString *const KRSlockChromeAttributeName = @"KRSlockChromeAttributeName";
+
+#pragma mark - Slock rich-text chip chrome (task #439)
+
+// TEMPORARY BRIDGE TO TASK #442. These constants mirror the Android drawer
+// (core-render-android KRRichTextViewDrawer.kt) and the shared token source
+// SlockRichTextChromeStyleTokens.* / SLOCK_RICHTEXT_INLINE_CODE_* (mobile PR #435,
+// commit 5ffc5a044). #442 will serialize the resolved token fields into the span
+// prop so both drawers read prop data and these baked constants are deleted
+// (acceptance: fork grep finds no SLOCK constants). Do NOT let these become a new
+// long-term source of truth.
+// Fill colors: SlockRichTextChromeStyleTokens.InlineCode.chipFill etc. (ARGB).
+static const uint32_t kKRSlockInlineCodeFillARGB   = 0x66FFD84D; // InlineCode.chipFill (FFD84D @ 40%)
+static const uint32_t kKRSlockChannelFillARGB      = 0x4DFE7DA8; // Channel.chipFill (pink @ 30%)
+static const uint32_t kKRSlockThreadFillARGB       = 0x4D27CCF3; // Thread.chipFill (cyan @ 30%)
+static const uint32_t kKRSlockTaskFillARGB         = 0x66FFD440; // Task.chipFill (yellow @ 40%)
+static const uint32_t kKRSlockSelfMentionFillARGB  = 0xFFFFD440; // SelfMention.chipFill (opaque yellow)
+// Geometry ratios × textSize: SLOCK_RICHTEXT_INLINE_CODE_EDGE_PADDING / _CHAR_WRAP_BREAK et al.
+static const CGFloat kKRSlockHorizontalPaddingRatio = 4.0 / 15.0;
+static const CGFloat kKRSlockHorizontalMarginRatio  = 2.0 / 15.0;
+static const CGFloat kKRSlockVerticalPaddingRatio   = 2.0 / 15.0;
+static const CGFloat kKRSlockMinHeightRatio         = 24.0 / 15.0;
+static const CGFloat kKRSlockBorderWidthPt          = 1.0;       // 1dp black border
+
+static UIColor *KRSlockChromeFillColor(NSString *chrome) {
+    uint32_t argb;
+    if ([chrome isEqualToString:@"inlineCode"]) {
+        argb = kKRSlockInlineCodeFillARGB;
+    } else if ([chrome isEqualToString:@"channel"]) {
+        argb = kKRSlockChannelFillARGB;
+    } else if ([chrome isEqualToString:@"thread"]) {
+        argb = kKRSlockThreadFillARGB;
+    } else if ([chrome isEqualToString:@"task"]) {
+        argb = kKRSlockTaskFillARGB;
+    } else if ([chrome isEqualToString:@"selfMention"] || [chrome isEqualToString:@"active"]) {
+        argb = kKRSlockSelfMentionFillARGB;
+    } else {
+        // ordinaryMention (and any @other/@agent) renders as an underline via the
+        // existing text SpanStyle, NOT a chip — no fill/border here.
+        return nil;
+    }
+    CGFloat a = ((argb >> 24) & 0xFF) / 255.0;
+    CGFloat r = ((argb >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((argb >> 8) & 0xFF) / 255.0;
+    CGFloat b = (argb & 0xFF) / 255.0;
+    return [UIColor colorWithRed:r green:g blue:b alpha:a];
+}
 
 
 @interface KRLabel()
@@ -523,7 +570,92 @@ NSString *const KRBGAttributeKey = @"KRBGAttributeKey";
 - (void)drawBackgroundForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
     _drawAtPoint = origin;
     [super drawBackgroundForGlyphRange:glyphsToShow atPoint:origin];
+    // Slock chip chrome (task #439). Drawn in drawBackground (before glyphs) so the
+    // fill sits behind the text; the border is inset from the glyphs by the leading/
+    // trailing NBSP padding reserved on the shared side, so it never overlaps glyphs.
+    [self kr_drawSlockChipChromeForGlyphRange:glyphsToShow atPoint:origin];
     _drawAtPoint = CGPointZero;
+}
+
+// TEMPORARY BRIDGE TO TASK #442 — ports core-render-android KRRichTextViewDrawer.kt
+// drawSlockInlineCodeChrome/drawSlockMarkdownTagChrome geometry to TextKit. #442 moves
+// the resolved token values into span props so this reads prop data instead of the
+// baked kKRSlock* constants above.
+- (void)kr_drawSlockChipChromeForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
+    NSTextStorage *textStorage = self.textStorage;
+    if (textStorage.length == 0) {
+        return;
+    }
+    NSTextContainer *container = self.textContainers.firstObject;
+    if (!container) {
+        return;
+    }
+    NSRange charRange = [self characterRangeForGlyphRange:glyphsToShow actualGlyphRange:NULL];
+    if (charRange.length == 0) {
+        return;
+    }
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (!ctx) {
+        return;
+    }
+    [textStorage enumerateAttribute:KRSlockChromeAttributeName
+                            inRange:charRange
+                            options:0
+                         usingBlock:^(id value, NSRange runRange, BOOL *stop) {
+        if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] == 0) {
+            return;
+        }
+        UIColor *fillColor = KRSlockChromeFillColor((NSString *)value);
+        if (!fillColor) {
+            return; // underline-only kinds draw no chip
+        }
+        UIFont *font = [textStorage attribute:NSFontAttributeName atIndex:runRange.location effectiveRange:NULL];
+        CGFloat textSize = font ? font.pointSize : 15.0;
+        CGFloat hPadding = textSize * kKRSlockHorizontalPaddingRatio;
+        CGFloat hMargin = textSize * kKRSlockHorizontalMarginRatio;
+        CGFloat vPadding = textSize * kKRSlockVerticalPaddingRatio;
+        CGFloat minHeight = textSize * kKRSlockMinHeightRatio;
+        (void)hPadding; // continuation-line padding handled by enclosing rects in this first cut
+        NSRange runGlyphRange = [self glyphRangeForCharacterRange:runRange actualCharacterRange:NULL];
+        [self enumerateEnclosingRectsForGlyphRange:runGlyphRange
+                          withinSelectedGlyphRange:NSMakeRange(NSNotFound, 0)
+                                   inTextContainer:container
+                                        usingBlock:^(CGRect rect, BOOL *innerStop) {
+            CGRect r = CGRectOffset(rect, origin.x, origin.y);
+            // Mirror the Android leading/trailing edge: the run's glyph bounds include
+            // the reserved NBSP padding, so pull IN by hMargin on both sides to land the
+            // border exactly hPadding past the real glyphs (see KRRichTextViewDrawer.kt).
+            CGFloat left = CGRectGetMinX(r) + hMargin;
+            CGFloat right = CGRectGetMaxX(r) - hMargin;
+            if (right <= left) {
+                return;
+            }
+            CGFloat top = CGRectGetMinY(r) - vPadding;
+            CGFloat bottom = CGRectGetMaxY(r) + vPadding;
+            CGFloat height = MAX(bottom - top, minHeight);
+            CGFloat centerY = (top + bottom) / 2.0;
+            top = centerY - height / 2.0;
+            bottom = centerY + height / 2.0;
+            if (bottom <= top) {
+                return;
+            }
+            // CoreGraphics fills (portable across iOS + [macOS]; UIRectFill is iOS-only).
+            CGContextSetFillColorWithColor(ctx, fillColor.CGColor);
+            CGContextFillRect(ctx, CGRectMake(left, top, right - left, bottom - top));
+            // Black 1dp border, square corners, drawn as four crisp edge rects
+            // (SlockRichTextChromeStyleTokens border; KRRichTextViewDrawer.drawSlock*Border).
+            CGFloat bw = kKRSlockBorderWidthPt;
+            CGFloat bl = floor(left);
+            CGFloat bt = floor(top);
+            CGFloat br = ceil(right);
+            CGFloat bb = ceil(bottom);
+            CGContextSetFillColorWithColor(ctx, [UIColor blackColor].CGColor);
+            CGContextFillRect(ctx, CGRectMake(bl, bt, br - bl, bw));
+            CGContextFillRect(ctx, CGRectMake(bl, bb - bw, br - bl, bw));
+            CGContextFillRect(ctx, CGRectMake(bl, bt, bw, bb - bt));
+            CGContextFillRect(ctx, CGRectMake(br - bw, bt, bw, bb - bt));
+        }];
+    }];
 }
 - (void)dealloc{
 #if DEBUG

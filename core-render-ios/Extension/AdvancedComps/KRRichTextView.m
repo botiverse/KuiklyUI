@@ -395,6 +395,16 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
         spanAttrs.strokeWidth = strokeWidth;
         spanAttrs.shadow = textShadow;
         spanAttrs.richAttrArray = richAttrArray;
+        // Slock rich-text chip chrome (task #439): a tag chip carries its chrome kind
+        // in "slockMarkdownTagChrome" (SLOCK_MARKDOWN_TAG_CHROME); inline code carries
+        // "slockInlineCode" (SLOCK_INLINE_CODE). Normalize both to a chrome-kind string
+        // that KRLayoutManager maps to a fill/border.
+        id slockTagChrome = propStyle[@"slockMarkdownTagChrome"];
+        if ([slockTagChrome isKindOfClass:[NSString class]] && [slockTagChrome length]) {
+            spanAttrs.slockChrome = slockTagChrome;
+        } else if (propStyle[@"slockInlineCode"]) {
+            spanAttrs.slockChrome = @"inlineCode";
+        }
         // 组合属性，生成这段Span对应的富文本
         NSMutableAttributedString *spanAttrString = [self p_createSpanAttributedStringWithAttributes:spanAttrs];
         if (spanAttrString) {
@@ -457,8 +467,17 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
         [attributedString addAttribute:NSKernAttributeName value:@(attrs.letterSpacing) range:range];
     }
 
-    if (attrs.backgroundColor) {
+    if (attrs.backgroundColor && attrs.slockChrome.length == 0) {
+        // When this span is a Slock chip (task #439), the padded/bordered chip fill
+        // is drawn by KRLayoutManager; skip the tight NSBackgroundColorAttributeName
+        // rect so the chip is the single fill source (avoids double-fill on selfMention).
         [attributedString addAttribute:NSBackgroundColorAttributeName value:attrs.backgroundColor range:range];
+    }
+
+    // Slock rich-text chip chrome (task #439): tag the range so KRLayoutManager draws
+    // the bordered chip that a plain background attribute cannot express.
+    if (attrs.slockChrome.length) {
+        [attributedString addAttribute:KRSlockChromeAttributeName value:attrs.slockChrome range:range];
     }
 
     if (attrs.textDecoration == KRTextDecorationLineTypeUnderline) {

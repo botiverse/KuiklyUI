@@ -64,6 +64,9 @@ extern NSString *const KuiklyIndexAttributeName;
 @property (nonatomic, assign) CGFloat strokeWidth;
 @property (nonatomic, strong) NSShadow *shadow;
 @property (nonatomic, strong) NSArray<NSAttributedString *> *richAttrArray;
+// Slock rich-text chip chrome kind (task #439): chrome-kind wire string when this
+// span is an inline-code / tag chip, else nil. Consumed by KRLayoutManager.
+@property (nonatomic, copy, nullable) NSString *slockChrome;
 
 @end
 
