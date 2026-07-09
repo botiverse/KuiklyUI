@@ -29,6 +29,11 @@ extern NSString *const KRBGAttributeKey;
 // text SpanStyle / NSBackgroundColorAttributeName cannot express.
 extern NSString *const KRSlockChromeAttributeName;
 
+@protocol KRSlockInlineCodeAtomProtocol <NSObject>
+- (BOOL)kr_slockInlineCodeLeadingEdge;
+- (BOOL)kr_slockInlineCodeTrailingEdge;
+@end
+
 
 @interface KRLabel : UILabel
 
@@ -142,6 +147,3 @@ typedef NS_ENUM(NSUInteger, KRAttachmentAlignment) {
 @end
 
 NS_ASSUME_NONNULL_END
-
-
-

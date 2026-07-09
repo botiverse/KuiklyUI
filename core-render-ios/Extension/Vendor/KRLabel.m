@@ -19,6 +19,7 @@
 #import "KRAsyncDeallocManager.h"
 #import <objc/runtime.h>
 #import "NSObject+KR.h"
+#import "KuiklyRenderBridge.h"
 
 #define KRAssertMainThread() NSAssert(0 != pthread_main_np(), @"This method must be called on the main thread!")
 NSString *const KRHighlightAttributeKey = @"KRHighlightAttributeKey";
@@ -35,7 +36,7 @@ NSString *const KRSlockChromeAttributeName = @"KRSlockChromeAttributeName";
 // (acceptance: fork grep finds no SLOCK constants). Do NOT let these become a new
 // long-term source of truth.
 // Fill colors: SlockRichTextChromeStyleTokens.InlineCode.chipFill etc. (ARGB).
-static const uint32_t kKRSlockInlineCodeFillARGB   = 0x66FFD84D; // InlineCode.chipFill (FFD84D @ 40%)
+static const uint32_t kKRSlockInlineCodeFillARGB   = 0x66FFD440; // react bg-soft-signal/40 = #FFD440 @ 40% (was 0x66FFD84D, the Android outlier — SlockMarkdown.kt:1485-90)
 static const uint32_t kKRSlockChannelFillARGB      = 0x4DFE7DA8; // Channel.chipFill (pink @ 30%)
 static const uint32_t kKRSlockThreadFillARGB       = 0x4D27CCF3; // Thread.chipFill (cyan @ 30%)
 static const uint32_t kKRSlockTaskFillARGB         = 0x66FFD440; // Task.chipFill (yellow @ 40%)
@@ -69,6 +70,33 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
 }
 
+static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return @"";
+    }
+    NSMutableString *result = [NSMutableString string];
+    __block NSUInteger cursor = 0;
+    [attributedString enumerateAttribute:NSAttachmentAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (range.location > cursor) {
+            [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, range.location - cursor)]];
+        }
+        if ([value respondsToSelector:@selector(kr_originlTextBeforeTextAttachment)]) {
+            id<KRTextAttachmentStringProtocol> attachment = (id<KRTextAttachmentStringProtocol>)value;
+            [result appendString:[attachment kr_originlTextBeforeTextAttachment] ?: @""];
+        } else {
+            [result appendString:[attributedString.string substringWithRange:range]];
+        }
+        cursor = NSMaxRange(range);
+    }];
+    if (cursor < attributedString.length) {
+        [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, attributedString.length - cursor)]];
+    }
+    return result;
+}
+
 
 @interface KRLabel()
 
@@ -98,7 +126,7 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
 - (NSString *)accessibilityLabel{
     NSString * res = [super accessibilityLabel];
     if (res.length <= 0) {
-        return self.attributedText.string;
+        return KRRestoredTextAttachmentString(self.attributedText);
     }
     return res;
 }
@@ -641,21 +669,55 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             CGFloat baseline = lineRect.origin.y + loc.y + origin.y;
             BOOL isRunStart = (segmentGlyphRange.location == runGlyphRange.location);
             BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
-            CGFloat glyphLeft = CGRectGetMinX(gb) + origin.x;
-            CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
-            // React MSG_REF_CHIP px-1: the fill is hPadding wider than the glyphs on each
-            // OUTER edge of the run; a wrap-continuation edge stays flush with the break.
-            CGFloat left = isRunStart ? (glyphLeft - hPadding) : glyphLeft;
-            CGFloat right = isRunEnd ? (glyphRight + hPadding) : glyphRight;
+            BOOL isInlineCode = [(NSString *)value isEqualToString:@"inlineCode"];
+            if (isInlineCode && lineCharRange.length > 0) {
+                id firstAtom = [textStorage attribute:NSAttachmentAttributeName
+                                               atIndex:lineCharRange.location
+                                        effectiveRange:NULL];
+                id lastAtom = [textStorage attribute:NSAttachmentAttributeName
+                                              atIndex:NSMaxRange(lineCharRange) - 1
+                                       effectiveRange:NULL];
+                isRunStart = [firstAtom respondsToSelector:@selector(kr_slockInlineCodeLeadingEdge)] &&
+                    [(id<KRSlockInlineCodeAtomProtocol>)firstAtom kr_slockInlineCodeLeadingEdge];
+                isRunEnd = [lastAtom respondsToSelector:@selector(kr_slockInlineCodeTrailingEdge)] &&
+                    [(id<KRSlockInlineCodeAtomProtocol>)lastAtom kr_slockInlineCodeTrailingEdge];
+            }
+            CGFloat left;
+            CGFloat right;
+            if (isInlineCode) {
+                // Atom bounds already include 4/15 inner padding + 2/15 outer
+                // margin at the global span edges. Paint the final line-fragment
+                // chain only after TextKit wrapping, trimming the transparent
+                // outer margin while keeping the inner padding inside chrome.
+                CGFloat outerMargin = textSize * (2.0 / 15.0);
+                left = CGRectGetMinX(gb) + origin.x + (isRunStart ? outerMargin : 0.0);
+                right = CGRectGetMaxX(gb) + origin.x - (isRunEnd ? outerMargin : 0.0);
+            } else {
+                // Legacy non-atomic chrome fallback.
+                CGFloat glyphLeft = lineRect.origin.x + loc.x + origin.x;
+                CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
+                CGFloat boxReserve = hPadding;
+                left = isRunStart ? (glyphLeft - boxReserve) : glyphLeft;
+                right = isRunEnd ? (glyphRight + boxReserve) : glyphRight;
+            }
             if (right <= left) {
                 return;
             }
-            // React leading-[1.5]: a 1.5·fontSize tall box centered on the font's vertical
-            // center (baseline - (ascender+descender)/2) so the glyph is centered with
-            // symmetric top/bottom padding (any residual low-sit is the systemic baseline).
-            CGFloat centerY = baseline - (ascender + descender) / 2.0;
-            CGFloat top = centerY - chipHeight / 2.0;
-            CGFloat bottom = centerY + chipHeight / 2.0;
+            CGFloat top;
+            CGFloat bottom;
+            if (isInlineCode) {
+                // The atom attachment already owns the exact 1.5x box height and
+                // centers its glyph image inside that box. Reuse TextKit's final
+                // attachment bounds for chrome so measurement, glyph baseline,
+                // fill and border all share one vertical coordinate system.
+                top = CGRectGetMinY(gb) + origin.y;
+                bottom = CGRectGetMaxY(gb) + origin.y;
+            } else {
+                // Legacy glyph-flow chrome: center a 1.5x box on font metrics.
+                CGFloat centerY = baseline - (ascender + descender) / 2.0;
+                top = centerY - chipHeight / 2.0;
+                bottom = centerY + chipHeight / 2.0;
+            }
             if (bottom <= top) {
                 return;
             }
@@ -672,8 +734,16 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             CGContextSetFillColorWithColor(ctx, [UIColor blackColor].CGColor);
             CGContextFillRect(ctx, CGRectMake(bl, bt, br - bl, bw));
             CGContextFillRect(ctx, CGRectMake(bl, bb - bw, br - bl, bw));
-            CGContextFillRect(ctx, CGRectMake(bl, bt, bw, bb - bt));
-            CGContextFillRect(ctx, CGRectMake(br - bw, bt, bw, bb - bt));
+            // A wrapping inline-code chain has only two semantic side edges:
+            // the global span start and end. Line-wrap boundaries are internal
+            // atom joins; drawing vertical borders there was the old experiment's
+            // clipping bug (continuation first glyph sat under a pre-drawn edge).
+            if (!isInlineCode || isRunStart) {
+                CGContextFillRect(ctx, CGRectMake(bl, bt, bw, bb - bt));
+            }
+            if (!isInlineCode || isRunEnd) {
+                CGContextFillRect(ctx, CGRectMake(br - bw, bt, bw, bb - bt));
+            }
         }];
     }];
 }
@@ -825,5 +895,3 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     objc_setAssociatedObject(self, @selector(hr_size), [NSValue valueWithCGSize:hr_size], OBJC_ASSOCIATION_RETAIN);
 }
 @end
-
-
