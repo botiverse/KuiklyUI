@@ -428,7 +428,50 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
             resAttr = [[KuiklyRenderBridge componentExpandHandler] hr_customTextWithAttributedString:resAttr textPostProcessor:textPostProcessor];
         }
     }
+    [self p_reserveSlockChipBoxAdvance:resAttr];
     return resAttr;
+}
+
+// task #439 ⑥: reserve the chip's inline-box advance (px-1 padding + 1px border) in
+// LAYOUT via kern, so neighbors are pushed outside the box like React's inline-block
+// (border→neighbor keeps a ~1-space gap) instead of laying out into the painted
+// fill/border region (which made chips look glued to adjacent text, margin≈0).
+// Leading reserve goes on the char BEFORE the run; trailing on the run's last char.
+// The trailing kern inflates the run's boundingRect — KRLayoutManager accounts for it.
+- (void)p_reserveSlockChipBoxAdvance:(NSMutableAttributedString *)str {
+    if (str.length == 0) {
+        return;
+    }
+    NSMutableArray<NSValue *> *chipRanges = [NSMutableArray new];
+    [str enumerateAttribute:KRSlockChromeAttributeName
+                    inRange:NSMakeRange(0, str.length)
+                    options:0
+                 usingBlock:^(id value, NSRange r, BOOL *stop) {
+        if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0
+            && ![(NSString *)value isEqualToString:@"ordinaryMention"]) {
+            [chipRanges addObject:[NSValue valueWithRange:r]];
+        }
+    }];
+    for (NSValue *rv in chipRanges) {
+        NSRange r = rv.rangeValue;
+        UIFont *font = [str attribute:NSFontAttributeName atIndex:r.location effectiveRange:NULL];
+        CGFloat textSize = font ? font.pointSize : 15.0;
+        // box reserve per side = px-1 (4/15·textSize) + 1px border (mirror KRLabel.m).
+        CGFloat boxReserve = textSize * (4.0 / 15.0) + 1.0;
+        [self p_addKern:boxReserve toString:str atIndex:NSMaxRange(r) - 1];   // trailing
+        if (r.location > 0) {
+            [self p_addKern:boxReserve toString:str atIndex:r.location - 1];   // leading (char before run)
+        }
+    }
+}
+
+- (void)p_addKern:(CGFloat)delta toString:(NSMutableAttributedString *)str atIndex:(NSUInteger)idx {
+    if (idx >= str.length) {
+        return;
+    }
+    NSNumber *existing = [str attribute:NSKernAttributeName atIndex:idx effectiveRange:NULL];
+    CGFloat base = [existing isKindOfClass:[NSNumber class]] ? existing.doubleValue : 0.0;
+    [str addAttribute:NSKernAttributeName value:@(base + delta) range:NSMakeRange(idx, 1)];
 }
 
 

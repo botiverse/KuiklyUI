@@ -643,10 +643,18 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
             CGFloat glyphLeft = CGRectGetMinX(gb) + origin.x;
             CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
-            // React MSG_REF_CHIP px-1: the fill is hPadding wider than the glyphs on each
-            // OUTER edge of the run; a wrap-continuation edge stays flush with the break.
-            CGFloat left = isRunStart ? (glyphLeft - hPadding) : glyphLeft;
-            CGFloat right = isRunEnd ? (glyphRight + hPadding) : glyphRight;
+            // task #439 ⑥: KRRichTextView reserves the box advance (px-1 + border) in
+            // layout via kern (see p_reserveSlockChipBoxAdvance), so neighbors are pushed
+            // outside the box. The box outer edge = glyph ± (px-1 + border).
+            //   - left (run start): draw into the leading kern → glyphLeft - boxReserve.
+            //   - right (run end): the trailing kern is on the run's last glyph, so it is
+            //     already included in gb's maxX → glyphRight IS the box outer edge (do NOT
+            //     add padding again). [CALIBRATION: if XiShi measures the right edge ~5px
+            //     short, boundingRect excludes the kern → use glyphRight + boxReserve.]
+            //   - wrap-continuation edges: flush with the break.
+            CGFloat boxReserve = hPadding + kKRSlockBorderWidthPt;
+            CGFloat left = isRunStart ? (glyphLeft - boxReserve) : glyphLeft;
+            CGFloat right = glyphRight;
             if (right <= left) {
                 return;
             }
