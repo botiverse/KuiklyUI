@@ -35,7 +35,7 @@ NSString *const KRSlockChromeAttributeName = @"KRSlockChromeAttributeName";
 // (acceptance: fork grep finds no SLOCK constants). Do NOT let these become a new
 // long-term source of truth.
 // Fill colors: SlockRichTextChromeStyleTokens.InlineCode.chipFill etc. (ARGB).
-static const uint32_t kKRSlockInlineCodeFillARGB   = 0x66FFD84D; // InlineCode.chipFill (FFD84D @ 40%)
+static const uint32_t kKRSlockInlineCodeFillARGB   = 0x66FFD440; // react bg-soft-signal/40 = #FFD440 @ 40% (was 0x66FFD84D, the Android outlier — SlockMarkdown.kt:1485-90)
 static const uint32_t kKRSlockChannelFillARGB      = 0x4DFE7DA8; // Channel.chipFill (pink @ 30%)
 static const uint32_t kKRSlockThreadFillARGB       = 0x4D27CCF3; // Thread.chipFill (cyan @ 30%)
 static const uint32_t kKRSlockTaskFillARGB         = 0x66FFD440; // Task.chipFill (yellow @ 40%)
