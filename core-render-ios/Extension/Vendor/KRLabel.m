@@ -70,6 +70,31 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
 }
 
+static BOOL KRIsRestoredEmptyAttachment(id value) {
+    if (![value respondsToSelector:@selector(kr_originlTextBeforeTextAttachment)]) {
+        return NO;
+    }
+    id<KRTextAttachmentStringProtocol> attachment = (id<KRTextAttachmentStringProtocol>)value;
+    NSString *originalText = [attachment kr_originlTextBeforeTextAttachment];
+    return originalText.length == 0;
+}
+
+static NSRange KRTrimRestoredEmptyAttachments(NSTextStorage *textStorage, NSRange range) {
+    NSUInteger start = range.location;
+    NSUInteger end = NSMaxRange(range);
+    while (start < end && KRIsRestoredEmptyAttachment([textStorage attribute:NSAttachmentAttributeName
+                                                                     atIndex:start
+                                                              effectiveRange:NULL])) {
+        start++;
+    }
+    while (end > start && KRIsRestoredEmptyAttachment([textStorage attribute:NSAttachmentAttributeName
+                                                                     atIndex:end - 1
+                                                              effectiveRange:NULL])) {
+        end--;
+    }
+    return NSMakeRange(start, end - start);
+}
+
 static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
     if (attributedString.length == 0) {
         return @"";
@@ -635,7 +660,11 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
         if (!fillColor) {
             return; // underline-only kinds draw no chip
         }
-        NSRange runGlyphRange = [self glyphRangeForCharacterRange:runRange actualCharacterRange:NULL];
+        NSRange paintRange = KRTrimRestoredEmptyAttachments(textStorage, runRange);
+        if (paintRange.length == 0) {
+            return;
+        }
+        NSRange runGlyphRange = [self glyphRangeForCharacterRange:paintRange actualCharacterRange:NULL];
         if (runGlyphRange.length == 0) {
             return;
         }
