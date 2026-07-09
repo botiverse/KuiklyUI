@@ -43,8 +43,40 @@ static const uint32_t kKRSlockTaskFillARGB         = 0x66FFD440; // Task.chipFil
 static const uint32_t kKRSlockSelfMentionFillARGB  = 0xFFFFD440; // SelfMention.chipFill (opaque yellow)
 // Geometry ratios × textSize: SLOCK_RICHTEXT_INLINE_CODE_EDGE_PADDING / _CHAR_WRAP_BREAK et al.
 static const CGFloat kKRSlockHorizontalPaddingRatio = 4.0 / 15.0; // React MSG_REF_CHIP px-1 (≈4px @ 15pt)
+static const CGFloat kKRSlockHorizontalMarginRatio  = 2.0 / 15.0; // transparent margin outside chip border
 static const CGFloat kKRSlockLineHeightRatio        = 1.5;        // React MSG_REF_CHIP leading-[1.5]
 static const CGFloat kKRSlockBorderWidthPt          = 1.0;       // 1dp black border (border-black)
+static NSString *const KRSlockKuiklyIndexAttributeName = @"KuiklyIndexAttributeName";
+
+@interface KRSlockLabelChipSpacerAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
+
+@property (nonatomic, assign) CGFloat spacerWidth;
+
+@end
+
+@implementation KRSlockLabelChipSpacerAttachment
+
+- (instancetype)initWithWidth:(CGFloat)width {
+    if (self = [super init]) {
+        _spacerWidth = MAX(0, width);
+        self.bounds = CGRectMake(0, 0, _spacerWidth, 1.0);
+    }
+    return self;
+}
+
+- (NSString *)kr_originlTextBeforeTextAttachment {
+    return @"";
+}
+
+- (nullable UIImage *)imageForBounds:(CGRect)imageBounds textContainer:(nullable NSTextContainer *)textContainer characterIndex:(NSUInteger)charIndex {
+    return nil;
+}
+
+- (CGRect)attachmentBoundsForTextContainer:(NSTextContainer *)textContainer proposedLineFragment:(CGRect)lineFrag glyphPosition:(CGPoint)position characterIndex:(NSUInteger)charIndex {
+    return CGRectMake(0, 0, _spacerWidth, 1.0);
+}
+
+@end
 
 static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     uint32_t argb;
@@ -79,6 +111,15 @@ static BOOL KRIsRestoredEmptyAttachment(id value) {
     return originalText.length == 0;
 }
 
+static BOOL KRHasRestoredEmptyAttachmentAtIndex(NSAttributedString *attributedString, NSInteger index) {
+    if (index < 0 || index >= (NSInteger)attributedString.length) {
+        return NO;
+    }
+    return KRIsRestoredEmptyAttachment([attributedString attribute:NSAttachmentAttributeName
+                                                          atIndex:(NSUInteger)index
+                                                   effectiveRange:NULL]);
+}
+
 static NSRange KRTrimRestoredEmptyAttachments(NSTextStorage *textStorage, NSRange range) {
     NSUInteger start = range.location;
     NSUInteger end = NSMaxRange(range);
@@ -93,6 +134,80 @@ static NSRange KRTrimRestoredEmptyAttachments(NSTextStorage *textStorage, NSRang
         end--;
     }
     return NSMakeRange(start, end - start);
+}
+
+static NSAttributedString *KRSlockChipSpacerAttributedString(CGFloat width, id spanIndex) {
+    KRSlockLabelChipSpacerAttachment *attachment = [[KRSlockLabelChipSpacerAttachment alloc] initWithWidth:width];
+    NSMutableAttributedString *spacer = [[NSMutableAttributedString alloc] initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+    NSRange range = NSMakeRange(0, spacer.length);
+    [spacer addAttribute:NSWritingDirectionAttributeName
+                   value:@[@((NSInteger)NSWritingDirectionLeftToRight | (NSInteger)NSWritingDirectionOverride)]
+                   range:range];
+    if (spanIndex && spanIndex != [NSNull null]) {
+        [spacer addAttribute:KRSlockKuiklyIndexAttributeName value:spanIndex range:range];
+    }
+    return spacer;
+}
+
+static NSAttributedString *KRAttributedStringByReservingSlockChipBoxAdvance(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return attributedString;
+    }
+    NSMutableArray<NSDictionary *> *chipRanges = [NSMutableArray new];
+    [attributedString enumerateAttribute:KRSlockChromeAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange runRange, BOOL *stop) {
+        if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] == 0
+            || [(NSString *)value isEqualToString:@"ordinaryMention"]) {
+            return;
+        }
+        NSRange paintRange = NSMakeRange(runRange.location, runRange.length);
+        while (paintRange.length > 0 && KRHasRestoredEmptyAttachmentAtIndex(attributedString, (NSInteger)paintRange.location)) {
+            paintRange.location++;
+            paintRange.length--;
+        }
+        while (paintRange.length > 0 && KRHasRestoredEmptyAttachmentAtIndex(attributedString, (NSInteger)NSMaxRange(paintRange) - 1)) {
+            paintRange.length--;
+        }
+        if (paintRange.length == 0) {
+            return;
+        }
+        BOOL hasLeadingSpacer = KRHasRestoredEmptyAttachmentAtIndex(attributedString, (NSInteger)paintRange.location - 1);
+        BOOL hasTrailingSpacer = KRHasRestoredEmptyAttachmentAtIndex(attributedString, (NSInteger)NSMaxRange(paintRange));
+        if (hasLeadingSpacer && hasTrailingSpacer) {
+            return;
+        }
+        id spanIndex = [attributedString attribute:KRSlockKuiklyIndexAttributeName
+                                           atIndex:paintRange.location
+                                    effectiveRange:NULL];
+        [chipRanges addObject:@{
+            @"range": [NSValue valueWithRange:paintRange],
+            @"spanIndex": spanIndex ?: [NSNull null],
+            @"leading": @(!hasLeadingSpacer),
+            @"trailing": @(!hasTrailingSpacer),
+        }];
+    }];
+    if (chipRanges.count == 0) {
+        return attributedString;
+    }
+    NSMutableAttributedString *result = [attributedString mutableCopy];
+    for (NSDictionary *entry in [chipRanges reverseObjectEnumerator]) {
+        NSRange range = [entry[@"range"] rangeValue];
+        UIFont *font = [result attribute:NSFontAttributeName atIndex:range.location effectiveRange:NULL];
+        CGFloat textSize = font ? font.pointSize : 15.0;
+        CGFloat edgePadding = textSize * (kKRSlockHorizontalPaddingRatio + kKRSlockHorizontalMarginRatio);
+        id spanIndex = entry[@"spanIndex"];
+        if ([entry[@"trailing"] boolValue]) {
+            [result insertAttributedString:KRSlockChipSpacerAttributedString(edgePadding, spanIndex)
+                                   atIndex:NSMaxRange(range)];
+        }
+        if ([entry[@"leading"] boolValue]) {
+            [result insertAttributedString:KRSlockChipSpacerAttributedString(edgePadding, spanIndex)
+                                   atIndex:range.location];
+        }
+    }
+    return result;
 }
 
 static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
@@ -158,8 +273,15 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
 
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    [super setAttributedText:attributedText];
-    self.textRender = attributedText.hr_textRender;
+    NSAttributedString *renderAttributedText = KRAttributedStringByReservingSlockChipBoxAdvance(attributedText);
+    if (!renderAttributedText) {
+        [super setAttributedText:nil];
+        self.textRender = nil;
+        [self setNeedsDisplay];
+        return;
+    }
+    [super setAttributedText:renderAttributedText];
+    self.textRender = renderAttributedText.hr_textRender ?: [[KRTextRender alloc] initWithAttributedText:renderAttributedText];
     self.attributedText.hr_textRender = self.textRender;
     [self setNeedsDisplay];
 }
@@ -219,6 +341,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
 
 + (CGSize)sizeThatFits:(CGSize)size attributedString:(NSAttributedString *)attString numberOfLines:(NSUInteger)lines lineBreakMode:(NSLineBreakMode)mode lineBreakMarin:(CGFloat)marin lineHeight:(CGFloat)lineHeight {
     attString = [attString isKindOfClass:[NSAttributedString class]] ? attString : [[NSAttributedString alloc] initWithString:@""];
+    attString = KRAttributedStringByReservingSlockChipBoxAdvance(attString);
     NSTextStorage *textStorage = [[NSTextStorage alloc] initWithAttributedString:[attString copy]];
     textStorage.hr_hasAttachmentViews = attString.hr_hasAttachmentViews;
     KRTextRender *textRender = [[KRTextRender alloc] initWithTextStorage:textStorage lineHeight:lineHeight];
