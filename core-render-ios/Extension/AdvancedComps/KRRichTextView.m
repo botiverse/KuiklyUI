@@ -480,7 +480,13 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
         [attributedString addAttribute:KRSlockChromeAttributeName value:attrs.slockChrome range:range];
     }
 
-    if (attrs.textDecoration == KRTextDecorationLineTypeUnderline) {
+    // Slock chip chrome (task #439): a chip token (inlineCode/channel/thread/task/
+    // selfMention/active) draws a bordered fill and must NOT also carry the text
+    // underline that the shared span style leaves on tag kinds (React MSG_REF_CHIP has
+    // no underline). The underline belongs only to ordinaryMention (@other/@agent).
+    BOOL slockChipSuppressesUnderline =
+        attrs.slockChrome.length > 0 && ![attrs.slockChrome isEqualToString:@"ordinaryMention"];
+    if (attrs.textDecoration == KRTextDecorationLineTypeUnderline && !slockChipSuppressesUnderline) {
         NSUnderlineStyle underlineStyle = attrs.textDecorationThickness ? NSUnderlineStyleThick : NSUnderlineStyleSingle;
         [attributedString addAttribute:NSUnderlineStyleAttributeName value:@(underlineStyle) range:range];
         if (attrs.textDecorationColor) {
