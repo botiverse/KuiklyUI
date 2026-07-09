@@ -192,7 +192,8 @@ fun LazyListScope.pullToRefreshItem(
         DefaultRefreshIndicator(progress, refreshing, threshold)
     }
 ) {
-    // Mark that the current list uses PullToRefresh
+    // Mark the list and publish its live Android overscroll limit before the first gesture.
+    scrollState.kuiklyInfo.pullToRefreshMaxDistance = refreshThreshold.value
     scrollState.kuiklyInfo.hasPullToRefresh = true
     
     item(key = "pull_to_refresh") {
