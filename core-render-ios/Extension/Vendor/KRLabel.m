@@ -41,11 +41,9 @@ static const uint32_t kKRSlockThreadFillARGB       = 0x4D27CCF3; // Thread.chipF
 static const uint32_t kKRSlockTaskFillARGB         = 0x66FFD440; // Task.chipFill (yellow @ 40%)
 static const uint32_t kKRSlockSelfMentionFillARGB  = 0xFFFFD440; // SelfMention.chipFill (opaque yellow)
 // Geometry ratios × textSize: SLOCK_RICHTEXT_INLINE_CODE_EDGE_PADDING / _CHAR_WRAP_BREAK et al.
-static const CGFloat kKRSlockHorizontalPaddingRatio = 4.0 / 15.0;
-static const CGFloat kKRSlockHorizontalMarginRatio  = 2.0 / 15.0;
-static const CGFloat kKRSlockVerticalPaddingRatio   = 2.0 / 15.0;
-static const CGFloat kKRSlockMinHeightRatio         = 24.0 / 15.0;
-static const CGFloat kKRSlockBorderWidthPt          = 1.0;       // 1dp black border
+static const CGFloat kKRSlockHorizontalPaddingRatio = 4.0 / 15.0; // React MSG_REF_CHIP px-1 (≈4px @ 15pt)
+static const CGFloat kKRSlockLineHeightRatio        = 1.5;        // React MSG_REF_CHIP leading-[1.5]
+static const CGFloat kKRSlockBorderWidthPt          = 1.0;       // 1dp black border (border-black)
 
 static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     uint32_t argb;
@@ -637,30 +635,27 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             CGFloat textSize = font ? font.pointSize : 15.0;
             CGFloat ascender = font ? font.ascender : textSize * 0.75;   // > 0, above baseline
             CGFloat descender = font ? font.descender : -textSize * 0.25; // < 0, below baseline
-            CGFloat hPadding = textSize * kKRSlockHorizontalPaddingRatio;
-            CGFloat hMargin = textSize * kKRSlockHorizontalMarginRatio;
-            CGFloat vPadding = textSize * kKRSlockVerticalPaddingRatio;
-            CGFloat minHeight = textSize * kKRSlockMinHeightRatio;
+            CGFloat hPadding = textSize * kKRSlockHorizontalPaddingRatio; // React px-1 ≈ 4px each side
+            CGFloat chipHeight = textSize * kKRSlockLineHeightRatio;      // React leading-[1.5]
             CGPoint loc = [self locationForGlyphAtIndex:segmentGlyphRange.location];
             CGFloat baseline = lineRect.origin.y + loc.y + origin.y;
-            // Android edge logic (KRRichTextViewDrawer.kt): the run's glyph bounds include
-            // the reserved NBSP padding, so the run start/end edges pull IN by hMargin;
-            // wrap-continuation edges push OUT by hPadding.
             BOOL isRunStart = (segmentGlyphRange.location == runGlyphRange.location);
             BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
             CGFloat glyphLeft = CGRectGetMinX(gb) + origin.x;
             CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
-            CGFloat left = isRunStart ? (glyphLeft + hMargin) : (glyphLeft - hPadding);
-            CGFloat right = isRunEnd ? (glyphRight - hMargin) : (glyphRight + hPadding);
+            // React MSG_REF_CHIP px-1: the fill is hPadding wider than the glyphs on each
+            // OUTER edge of the run; a wrap-continuation edge stays flush with the break.
+            CGFloat left = isRunStart ? (glyphLeft - hPadding) : glyphLeft;
+            CGFloat right = isRunEnd ? (glyphRight + hPadding) : glyphRight;
             if (right <= left) {
                 return;
             }
-            CGFloat top = baseline - ascender - vPadding;
-            CGFloat bottom = baseline - descender + vPadding;
-            CGFloat height = MAX(bottom - top, minHeight);
-            CGFloat centerY = (top + bottom) / 2.0;
-            top = centerY - height / 2.0;
-            bottom = centerY + height / 2.0;
+            // React leading-[1.5]: a 1.5·fontSize tall box centered on the font's vertical
+            // center (baseline - (ascender+descender)/2) so the glyph is centered with
+            // symmetric top/bottom padding (any residual low-sit is the systemic baseline).
+            CGFloat centerY = baseline - (ascender + descender) / 2.0;
+            CGFloat top = centerY - chipHeight / 2.0;
+            CGFloat bottom = centerY + chipHeight / 2.0;
             if (bottom <= top) {
                 return;
             }
