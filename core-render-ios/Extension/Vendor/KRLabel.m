@@ -621,11 +621,16 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
         // glyphs on THIS line → no wrapped-segment right overhang).
         [self enumerateLineFragmentsForGlyphRange:runGlyphRange
                                        usingBlock:^(CGRect lineRect, CGRect usedRect, NSTextContainer *lineContainer, NSRange lineGlyphRange, BOOL *lineStop) {
-            if (lineGlyphRange.length == 0) {
+            // enumerateLineFragmentsForGlyphRange gives the WHOLE line fragment's glyph
+            // range, not the run's glyphs on that line — intersect with the run so the
+            // chip fill bounds only THIS token's glyphs (task #439 bug: without this the
+            // fill spanned the entire line instead of a discrete per-token chip).
+            NSRange segmentGlyphRange = NSIntersectionRange(lineGlyphRange, runGlyphRange);
+            if (segmentGlyphRange.length == 0) {
                 return;
             }
-            CGRect gb = [self boundingRectForGlyphRange:lineGlyphRange inTextContainer:lineContainer];
-            NSRange lineCharRange = [self characterRangeForGlyphRange:lineGlyphRange actualGlyphRange:NULL];
+            CGRect gb = [self boundingRectForGlyphRange:segmentGlyphRange inTextContainer:lineContainer];
+            NSRange lineCharRange = [self characterRangeForGlyphRange:segmentGlyphRange actualGlyphRange:NULL];
             UIFont *font = lineCharRange.location < textStorage.length
                 ? [textStorage attribute:NSFontAttributeName atIndex:lineCharRange.location effectiveRange:NULL]
                 : nil;
@@ -636,13 +641,13 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             CGFloat hMargin = textSize * kKRSlockHorizontalMarginRatio;
             CGFloat vPadding = textSize * kKRSlockVerticalPaddingRatio;
             CGFloat minHeight = textSize * kKRSlockMinHeightRatio;
-            CGPoint loc = [self locationForGlyphAtIndex:lineGlyphRange.location];
+            CGPoint loc = [self locationForGlyphAtIndex:segmentGlyphRange.location];
             CGFloat baseline = lineRect.origin.y + loc.y + origin.y;
             // Android edge logic (KRRichTextViewDrawer.kt): the run's glyph bounds include
             // the reserved NBSP padding, so the run start/end edges pull IN by hMargin;
             // wrap-continuation edges push OUT by hPadding.
-            BOOL isRunStart = (lineGlyphRange.location == runGlyphRange.location);
-            BOOL isRunEnd = (NSMaxRange(lineGlyphRange) >= runGlyphEnd);
+            BOOL isRunStart = (segmentGlyphRange.location == runGlyphRange.location);
+            BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
             CGFloat glyphLeft = CGRectGetMinX(gb) + origin.x;
             CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
             CGFloat left = isRunStart ? (glyphLeft + hMargin) : (glyphLeft - hPadding);
