@@ -19,6 +19,7 @@
 #import "KRAsyncDeallocManager.h"
 #import <objc/runtime.h>
 #import "NSObject+KR.h"
+#import "KuiklyRenderBridge.h"
 
 #define KRAssertMainThread() NSAssert(0 != pthread_main_np(), @"This method must be called on the main thread!")
 NSString *const KRHighlightAttributeKey = @"KRHighlightAttributeKey";
@@ -69,6 +70,33 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
 }
 
+static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return @"";
+    }
+    NSMutableString *result = [NSMutableString string];
+    __block NSUInteger cursor = 0;
+    [attributedString enumerateAttribute:NSAttachmentAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (range.location > cursor) {
+            [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, range.location - cursor)]];
+        }
+        if ([value respondsToSelector:@selector(kr_originlTextBeforeTextAttachment)]) {
+            id<KRTextAttachmentStringProtocol> attachment = (id<KRTextAttachmentStringProtocol>)value;
+            [result appendString:[attachment kr_originlTextBeforeTextAttachment] ?: @""];
+        } else {
+            [result appendString:[attributedString.string substringWithRange:range]];
+        }
+        cursor = NSMaxRange(range);
+    }];
+    if (cursor < attributedString.length) {
+        [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, attributedString.length - cursor)]];
+    }
+    return result;
+}
+
 
 @interface KRLabel()
 
@@ -98,7 +126,7 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
 - (NSString *)accessibilityLabel{
     NSString * res = [super accessibilityLabel];
     if (res.length <= 0) {
-        return self.attributedText.string;
+        return KRRestoredTextAttachmentString(self.attributedText);
     }
     return res;
 }
@@ -647,18 +675,15 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             // edge (XiShi round-2). locationForGlyphAtIndex gives the glyph's own origin.
             CGFloat glyphLeft = lineRect.origin.x + loc.x + origin.x;
             CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
-            // task #439 ⑥: the chip box outer edge = glyph ± (px-1 + 1px border). The
-            // fill/border draw boxReserve beyond the glyphs on each outer run edge.
-            //   - left (run start): boxReserve into the source space (no leading kern; the
-            //     left external gap is the source space, per XiShi calibration).
-            //   - right (run end): boxReserve past the glyph. KRRichTextView's TRAILING
-            //     kern reserved this region in layout (pushing the next token to the box
-            //     edge), and boundingRect does NOT include that kern (XiShi Case B), so we
-            //     add boxReserve here to reach the box edge.
-            //   - wrap-continuation edges: flush with the break.
-            CGFloat boxReserve = hPadding + kKRSlockBorderWidthPt;
-            CGFloat left = isRunStart ? (glyphLeft - boxReserve) : glyphLeft;
-            CGFloat right = isRunEnd ? (glyphRight + boxReserve) : glyphRight;
+            // task #448 spike: KRRichTextView inserts semantic-empty spacer attachments
+            // before/after the chip run. They reserve real TextKit advance:
+            // edgePadding = 4/15 inner padding + 2/15 outer margin. Therefore the
+            // painted border sits one margin inside the reserved edge and exactly
+            // hPadding away from the real glyphs, matching Android ReplacementSpan:
+            // getSize = textWidth + 2 * edgePadding; drawText at x + edgePadding.
+            // Continuation edges remain flush with the wrap.
+            CGFloat left = isRunStart ? (glyphLeft - hPadding) : glyphLeft;
+            CGFloat right = isRunEnd ? (glyphRight + hPadding) : glyphRight;
             if (right <= left) {
                 return;
             }
@@ -837,5 +862,3 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     objc_setAssociatedObject(self, @selector(hr_size), [NSValue valueWithCGSize:hr_size], OBJC_ASSOCIATION_RETAIN);
 }
 @end
-
-

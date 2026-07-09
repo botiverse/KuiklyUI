@@ -24,6 +24,36 @@ NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
 NSString *const kGradientInfoKeyFont = @"font";
 NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
 
+@interface KRSlockChipSpacerAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
+
+@property (nonatomic, assign) CGFloat spacerWidth;
+
+@end
+
+@implementation KRSlockChipSpacerAttachment
+
+- (instancetype)initWithWidth:(CGFloat)width {
+    if (self = [super init]) {
+        _spacerWidth = MAX(0, width);
+        self.bounds = CGRectMake(0, 0, _spacerWidth, 1.0);
+    }
+    return self;
+}
+
+- (NSString *)kr_originlTextBeforeTextAttachment {
+    return @"";
+}
+
+- (nullable UIImage *)imageForBounds:(CGRect)imageBounds textContainer:(nullable NSTextContainer *)textContainer characterIndex:(NSUInteger)charIndex {
+    return nil;
+}
+
+- (CGRect)attachmentBoundsForTextContainer:(NSTextContainer *)textContainer proposedLineFragment:(CGRect)lineFrag glyphPosition:(CGPoint)position characterIndex:(NSUInteger)charIndex {
+    return CGRectMake(0, 0, _spacerWidth, 1.0);
+}
+
+@end
+
 @interface KRRichTextView()
 
 @property (nonatomic, strong) NSNumber *css_numberOfLines;
@@ -432,49 +462,55 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
     return resAttr;
 }
 
-// task #439 ⑥: reserve the chip's inline-box advance (px-1 padding + 1px border) in
-// LAYOUT via kern, so neighbors are pushed outside the box like React's inline-block
-// (border→neighbor keeps a ~1-space gap) instead of laying out into the painted
-// fill/border region (which made chips look glued to adjacent text, margin≈0).
-// Leading reserve goes on the char BEFORE the run; trailing on the run's last char.
-// The trailing kern inflates the run's boundingRect — KRLayoutManager accounts for it.
+// task #448 spike: reserve chip inline-box advance with semantic-empty spacer
+// attachments instead of kern. The real glyphs stay in the attributed string, while
+// TextKit sees actual before/after advance equal to Android's edgePadding:
+// 4/15 inner padding + 2/15 outer margin. Copy/selection can restore the original
+// text because the spacers implement KRTextAttachmentStringProtocol and return "".
 - (void)p_reserveSlockChipBoxAdvance:(NSMutableAttributedString *)str {
     if (str.length == 0) {
         return;
     }
-    NSMutableArray<NSValue *> *chipRanges = [NSMutableArray new];
+    NSMutableArray<NSDictionary *> *chipRanges = [NSMutableArray new];
     [str enumerateAttribute:KRSlockChromeAttributeName
                     inRange:NSMakeRange(0, str.length)
                     options:0
                  usingBlock:^(id value, NSRange r, BOOL *stop) {
         if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0
             && ![(NSString *)value isEqualToString:@"ordinaryMention"]) {
-            [chipRanges addObject:[NSValue valueWithRange:r]];
+            id spanIndex = [str attribute:KuiklyIndexAttributeName atIndex:r.location effectiveRange:NULL];
+            [chipRanges addObject:@{
+                @"range": [NSValue valueWithRange:r],
+                @"spanIndex": spanIndex ?: [NSNull null],
+            }];
         }
     }];
-    for (NSValue *rv in chipRanges) {
-        NSRange r = rv.rangeValue;
+    for (NSDictionary *entry in [chipRanges reverseObjectEnumerator]) {
+        NSRange r = [entry[@"range"] rangeValue];
         UIFont *font = [str attribute:NSFontAttributeName atIndex:r.location effectiveRange:NULL];
         CGFloat textSize = font ? font.pointSize : 15.0;
-        // box reserve = px-1 (4/15·textSize) + 1px border (mirror KRLabel.m).
-        // TRAILING only: reserve the box's right region so the next token (e.g. a comma
-        // with no source space) is pushed to the box edge, giving right-side inner
-        // padding. XiShi calibration (a510610f): a LEADING kern over-added the left
-        // external gap (17px) — the left gap should come from the source space alone, so
-        // no leading kern; the left inner padding is drawn by KRLayoutManager into the
-        // source space.
-        CGFloat boxReserve = textSize * (4.0 / 15.0) + 1.0;
-        [self p_addKern:boxReserve toString:str atIndex:NSMaxRange(r) - 1];   // trailing only
+        CGFloat edgePadding = textSize * ((4.0 + 2.0) / 15.0);
+        id spanIndex = entry[@"spanIndex"];
+        [str insertAttributedString:[self p_slockChipSpacerWithWidth:edgePadding
+                                                            spanIndex:spanIndex]
+                             atIndex:NSMaxRange(r)];
+        [str insertAttributedString:[self p_slockChipSpacerWithWidth:edgePadding
+                                                            spanIndex:spanIndex]
+                             atIndex:r.location];
     }
 }
 
-- (void)p_addKern:(CGFloat)delta toString:(NSMutableAttributedString *)str atIndex:(NSUInteger)idx {
-    if (idx >= str.length) {
-        return;
+- (NSAttributedString *)p_slockChipSpacerWithWidth:(CGFloat)width spanIndex:(id)spanIndex {
+    KRSlockChipSpacerAttachment *attachment = [[KRSlockChipSpacerAttachment alloc] initWithWidth:width];
+    NSMutableAttributedString *spacer = [[NSMutableAttributedString alloc] initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+    NSRange range = NSMakeRange(0, spacer.length);
+    [spacer addAttribute:NSWritingDirectionAttributeName
+                   value:@[@((NSInteger)NSWritingDirectionLeftToRight | (NSInteger)NSWritingDirectionOverride)]
+                   range:range];
+    if (spanIndex && spanIndex != [NSNull null]) {
+        [spacer addAttribute:KuiklyIndexAttributeName value:spanIndex range:range];
     }
-    NSNumber *existing = [str attribute:NSKernAttributeName atIndex:idx effectiveRange:NULL];
-    CGFloat base = [existing isKindOfClass:[NSNumber class]] ? existing.doubleValue : 0.0;
-    [str addAttribute:NSKernAttributeName value:@(base + delta) range:NSMakeRange(idx, 1)];
+    return spacer;
 }
 
 
