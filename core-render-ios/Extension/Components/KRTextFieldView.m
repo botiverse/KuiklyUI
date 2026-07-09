@@ -21,6 +21,8 @@
 // 字典key常量
 NSString *const KRVFontSizeKey = @"fontSize";
 NSString *const KRVFontWeightKey = @"fontWeight";
+NSString *const KRVFontFamilyKey = @"fontFamily";
+NSString *const KRVFontContextParamKey = @"contextParam";
 
 /*
  * @brief 暴露给Kotlin侧调用的多行输入框组件
@@ -34,6 +36,8 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 @property (nonatomic, strong)  NSNumber *KUIKLY_PROP(fontSize);
 /** attr is fontWeight */
 @property (nonatomic, strong)  NSString *KUIKLY_PROP(fontWeight);
+/** attr is fontFamily */
+@property (nonatomic, strong)  NSString *KUIKLY_PROP(fontFamily);
 /** attr is placeholder */
 @property (nonatomic, strong)  NSString *KUIKLY_PROP(placeholder);
 /** attr is textAign */
@@ -79,6 +83,7 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
 - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
+- (void)p_updateFont;
 
 @end
 
@@ -227,13 +232,17 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 - (void)setCss_fontSize:(NSNumber *)css_fontSize {
     _css_fontSize = css_fontSize;
-    self.font = [KRConvertUtil UIFont:@{KRVFontSizeKey: css_fontSize ?: @(16),
-                                        KRVFontWeightKey: _css_fontWeight ?: @"400"}];
+    [self p_updateFont];
 }
 
 - (void)setCss_fontWeight:(NSString *)css_fontWeight {
     _css_fontWeight = css_fontWeight;
-    [self setCss_fontSize:_css_fontSize];
+    [self p_updateFont];
+}
+
+- (void)setCss_fontFamily:(NSString *)css_fontFamily {
+    _css_fontFamily = css_fontFamily;
+    [self p_updateFont];
 }
 
 - (void)setCss_placeholder:(NSString *)css_placeholder {
@@ -576,6 +585,20 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 
 #pragma mark - private
+
+- (void)p_updateFont {
+    NSMutableDictionary *fontStyle = [@{
+        KRVFontSizeKey: _css_fontSize ?: @(16),
+        KRVFontWeightKey: _css_fontWeight ?: @"400"
+    } mutableCopy];
+    if (_css_fontFamily.length > 0) {
+        fontStyle[KRVFontFamilyKey] = _css_fontFamily;
+    }
+    if (self.hr_rootView.contextParam) {
+        fontStyle[KRVFontContextParamKey] = self.hr_rootView.contextParam;
+    }
+    self.font = [KRConvertUtil UIFont:fontStyle];
+}
 
 - (void)p_addKeyboardNotificationIfNeed {
     if (_didAddKeyboardNotification) {
@@ -921,4 +944,3 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 }
 
 @end
-
