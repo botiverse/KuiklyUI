@@ -267,6 +267,9 @@ internal fun TextAttr.applySoftWrap(softWrap: Boolean) {
     val target = if (softWrap) "wordWrapping" else "clip"
 
     val current = getProp(TextConst.TEXT_OVERFLOW) as? String
+    if (softWrap && current == "tail") {
+        return
+    }
     if (softWrap && (current == null || current == target) && getProp(TextConst.LINES) == null) {
         return
     }
