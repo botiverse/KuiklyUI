@@ -641,7 +641,11 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             CGFloat baseline = lineRect.origin.y + loc.y + origin.y;
             BOOL isRunStart = (segmentGlyphRange.location == runGlyphRange.location);
             BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
-            CGFloat glyphLeft = CGRectGetMinX(gb) + origin.x;
+            // Use the first glyph's pen position for the LEFT edge, not gb.minX:
+            // boundingRectForGlyphRange's minX includes leading space/context, which made
+            // the left inner padding too big (~19px) and asymmetric vs the tight right
+            // edge (XiShi round-2). locationForGlyphAtIndex gives the glyph's own origin.
+            CGFloat glyphLeft = lineRect.origin.x + loc.x + origin.x;
             CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
             // task #439 ⑥: the chip box outer edge = glyph ± (px-1 + 1px border). The
             // fill/border draw boxReserve beyond the glyphs on each outer run edge.
