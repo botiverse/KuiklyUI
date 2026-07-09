@@ -456,12 +456,15 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
         NSRange r = rv.rangeValue;
         UIFont *font = [str attribute:NSFontAttributeName atIndex:r.location effectiveRange:NULL];
         CGFloat textSize = font ? font.pointSize : 15.0;
-        // box reserve per side = px-1 (4/15·textSize) + 1px border (mirror KRLabel.m).
+        // box reserve = px-1 (4/15·textSize) + 1px border (mirror KRLabel.m).
+        // TRAILING only: reserve the box's right region so the next token (e.g. a comma
+        // with no source space) is pushed to the box edge, giving right-side inner
+        // padding. XiShi calibration (a510610f): a LEADING kern over-added the left
+        // external gap (17px) — the left gap should come from the source space alone, so
+        // no leading kern; the left inner padding is drawn by KRLayoutManager into the
+        // source space.
         CGFloat boxReserve = textSize * (4.0 / 15.0) + 1.0;
-        [self p_addKern:boxReserve toString:str atIndex:NSMaxRange(r) - 1];   // trailing
-        if (r.location > 0) {
-            [self p_addKern:boxReserve toString:str atIndex:r.location - 1];   // leading (char before run)
-        }
+        [self p_addKern:boxReserve toString:str atIndex:NSMaxRange(r) - 1];   // trailing only
     }
 }
 

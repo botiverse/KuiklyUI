@@ -643,18 +643,18 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
             BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
             CGFloat glyphLeft = CGRectGetMinX(gb) + origin.x;
             CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
-            // task #439 ⑥: KRRichTextView reserves the box advance (px-1 + border) in
-            // layout via kern (see p_reserveSlockChipBoxAdvance), so neighbors are pushed
-            // outside the box. The box outer edge = glyph ± (px-1 + border).
-            //   - left (run start): draw into the leading kern → glyphLeft - boxReserve.
-            //   - right (run end): the trailing kern is on the run's last glyph, so it is
-            //     already included in gb's maxX → glyphRight IS the box outer edge (do NOT
-            //     add padding again). [CALIBRATION: if XiShi measures the right edge ~5px
-            //     short, boundingRect excludes the kern → use glyphRight + boxReserve.]
+            // task #439 ⑥: the chip box outer edge = glyph ± (px-1 + 1px border). The
+            // fill/border draw boxReserve beyond the glyphs on each outer run edge.
+            //   - left (run start): boxReserve into the source space (no leading kern; the
+            //     left external gap is the source space, per XiShi calibration).
+            //   - right (run end): boxReserve past the glyph. KRRichTextView's TRAILING
+            //     kern reserved this region in layout (pushing the next token to the box
+            //     edge), and boundingRect does NOT include that kern (XiShi Case B), so we
+            //     add boxReserve here to reach the box edge.
             //   - wrap-continuation edges: flush with the break.
             CGFloat boxReserve = hPadding + kKRSlockBorderWidthPt;
             CGFloat left = isRunStart ? (glyphLeft - boxReserve) : glyphLeft;
-            CGFloat right = glyphRight;
+            CGFloat right = isRunEnd ? (glyphRight + boxReserve) : glyphRight;
             if (right <= left) {
                 return;
             }
