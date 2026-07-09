@@ -15,11 +15,15 @@
 
 package com.tencent.kuikly.core.render.android.css.ktx
 
+import com.tencent.kuikly.core.render.android.adapter.IKRLogAdapter
+import com.tencent.kuikly.core.render.android.adapter.KuiklyRenderAdapterManager
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -30,6 +34,28 @@ import org.junit.Test
  * the rest of the payload.
  */
 class KuiklyRenderExtensionMarshalTest {
+
+    private class RecordingLogAdapter : IKRLogAdapter {
+        override val asyncLogEnable: Boolean = false
+        val errors = mutableListOf<Pair<String, String>>()
+        override fun i(tag: String, msg: String) = Unit
+        override fun d(tag: String, msg: String) = Unit
+        override fun e(tag: String, msg: String) {
+            errors.add(tag to msg)
+        }
+    }
+
+    private val recordingAdapter = RecordingLogAdapter()
+
+    @Before
+    fun installRecordingAdapter() {
+        KuiklyRenderAdapterManager.krLogAdapter = recordingAdapter
+    }
+
+    @After
+    fun removeRecordingAdapter() {
+        KuiklyRenderAdapterManager.krLogAdapter = null
+    }
 
     @Test
     fun jsonObjectAndArrayValuesPassThrough() {
@@ -85,9 +111,11 @@ class KuiklyRenderExtensionMarshalTest {
     }
 
     @Test
-    fun arrayMarshalSurvivesErasedCastNulls() {
+    fun arrayMarshalSurvivesErasedCastNullsSilently() {
         // List<Any> by declaration, but erased casts from Java can smuggle
-        // nulls — the marshal must skip them, not NPE (Codex review edge).
+        // nulls — absence stays SILENT: skipped, no crash, and the error
+        // adapter is never invoked (a loud null would flood the persistent
+        // diagnostics ring once the app wires e() into it).
         @Suppress("UNCHECKED_CAST")
         val listWithNull = listOf("a", null, "b") as List<Any>
         val result = listWithNull.toJSONArray()
@@ -95,6 +123,34 @@ class KuiklyRenderExtensionMarshalTest {
         assertEquals(2, result.length())
         assertEquals("a", result.getString(0))
         assertEquals("b", result.getString(1))
+        assertTrue("null must not reach the error adapter", recordingAdapter.errors.isEmpty())
+    }
+
+    @Test
+    fun unsupportedMapValueLogsExactlyOnceWithKeyAndType() {
+        val result = mapOf<String, Any?>(
+            "good" to 1,
+            "bad" to Any()
+        ).toJSONObject()
+
+        assertEquals(1, result.getInt("good"))
+        assertFalse(result.has("bad"))
+        assertEquals(1, recordingAdapter.errors.size)
+        val (tag, msg) = recordingAdapter.errors.single()
+        assertEquals("KuiklyRenderExtension", tag)
+        assertTrue("message must carry the key", msg.contains("key=bad"))
+        assertTrue("message must carry the type", msg.contains("java.lang.Object"))
+    }
+
+    @Test
+    fun unsupportedListElementLogsExactlyOnceWithType() {
+        val result = listOf<Any>("keep", Any()).toJSONArray()
+
+        assertEquals(1, result.length())
+        assertEquals(1, recordingAdapter.errors.size)
+        val (tag, msg) = recordingAdapter.errors.single()
+        assertEquals("KuiklyRenderExtension", tag)
+        assertTrue("message must carry the type", msg.contains("java.lang.Object"))
     }
 
     @Test
