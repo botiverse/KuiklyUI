@@ -303,7 +303,7 @@ internal fun Map<String, Any?>.toJSONObject(): JSONObject {
  * [List]转[JSONArray]
  */
 @Suppress("UNCHECKED_CAST")
-internal fun List<Any>.toJSONArray(): JSONArray {
+internal fun List<Any?>.toJSONArray(): JSONArray {
     val serializationArray = JSONArray()
     forEach { value ->
         when (value) {
@@ -341,12 +341,10 @@ internal fun List<Any>.toJSONArray(): JSONArray {
             is JSONArray -> {
                 serializationArray.put(value)
             }
-            // The receiver is List<Any>, but erased casts from Java can still
-            // smuggle nulls in. Null is ABSENCE, not an unsupported type: it
-            // skips silently (same contract as toJSONObject's null branch) and
-            // must never reach the loud path — once the app persists e() logs,
-            // a loud null would turn every legal absent element into noise.
-            @Suppress("SENSELESS_COMPARISON")
+            // Null is ABSENCE, not an unsupported type: it skips silently
+            // (same contract as toJSONObject's null branch) and must never
+            // reach the loud path — once the app persists e() logs, a loud
+            // null would turn every legal absent element into noise.
             null -> Unit
             else -> {
                 KuiklyRenderLog.e(
