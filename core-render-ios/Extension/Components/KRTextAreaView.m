@@ -25,6 +25,7 @@
 NSString *const KRFontSizeKey = @"fontSize";
 NSString *const KRFontWeightKey = @"fontWeight";
 NSString *const KRFontFamilyKey = @"fontFamily";
+NSString *const KRFontContextParamKey = @"contextParam";
 static const NSInteger KRTextAreaViewKeyEventTypeDown = 2;
 static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
@@ -105,6 +106,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 - (BOOL)p_shouldForwardHardwareTabKey;
 - (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
 #endif
+- (void)p_updateFont;
 
 @end
 
@@ -293,20 +295,17 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 - (void)setCss_fontSize:(NSNumber *)css_fontSize {
     _css_fontSize = css_fontSize;
-    self.font = [KRConvertUtil UIFont:@{KRFontSizeKey: css_fontSize ?: @(16),
-                                        KRFontWeightKey: _css_fontWeight ?: @"400",
-                                        KRFontFamilyKey: _css_fontFamily ?: @""}];
-    [self setNeedsLayout];
+    [self p_updateFont];
 }
 
 - (void)setCss_fontWeight:(NSString *)css_fontWeight {
     _css_fontWeight = css_fontWeight;
-    [self setCss_fontSize:_css_fontSize];
+    [self p_updateFont];
 }
 
 - (void)setCss_fontFamily:(NSString *)css_fontFamily {
     _css_fontFamily = css_fontFamily;
-    [self setCss_fontSize:_css_fontSize];
+    [self p_updateFont];
 }
 
 - (void)setCss_placeholder:(NSString *)css_placeholder {
@@ -1068,6 +1067,21 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 
 #pragma mark - private
+
+- (void)p_updateFont {
+    NSMutableDictionary *fontStyle = [@{
+        KRFontSizeKey: _css_fontSize ?: @(16),
+        KRFontWeightKey: _css_fontWeight ?: @"400"
+    } mutableCopy];
+    if (_css_fontFamily.length > 0) {
+        fontStyle[KRFontFamilyKey] = _css_fontFamily;
+    }
+    if (self.hr_rootView.contextParam) {
+        fontStyle[KRFontContextParamKey] = self.hr_rootView.contextParam;
+    }
+    self.font = [KRConvertUtil UIFont:fontStyle];
+    [self setNeedsLayout];
+}
 
 /// iOS 17+ 使用公开属性 insertionPointColor 独立设置光标颜色，避免与 tintColor（选中高亮色）冲突
 #if !TARGET_OS_OSX
