@@ -23,6 +23,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 extern NSString *const KRHighlightAttributeKey;
 extern NSString *const KRBGAttributeKey;
+// Slock rich-text chip chrome (task #439): carries the chrome-kind wire string
+// (SlockRichTextChromeKind.wireValue — inlineCode/channel/thread/task/selfMention/active)
+// on a span's range so KRLayoutManager can draw the bordered chip that a plain
+// text SpanStyle / NSBackgroundColorAttributeName cannot express.
+extern NSString *const KRSlockChromeAttributeName;
 
 
 @interface KRLabel : UILabel
