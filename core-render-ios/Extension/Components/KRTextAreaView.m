@@ -18,11 +18,14 @@
 #import "KRConvertUtil.h"
 #import "KRRichTextView.h"
 #import "KuiklyRenderBridge.h"
+#import "KuiklyRenderView.h"
 #import "NSObject+KR.h"
 
 // 字典key常量
 NSString *const KRFontSizeKey = @"fontSize";
 NSString *const KRFontWeightKey = @"fontWeight";
+static const NSInteger KRTextAreaViewKeyEventTypeDown = 2;
+static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 /*
  * @brief 暴露给Kotlin侧调用的多行输入框组件
@@ -95,6 +98,10 @@ NSString *const KRFontWeightKey = @"fontWeight";
 - (BOOL)p_shouldReapplyTextPostProcessorForIncomingRawText:(NSString *)rawText;
 - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
 - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
+#if !TARGET_OS_OSX
+- (BOOL)p_shouldForwardHardwareTabKey;
+- (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
+#endif
 
 @end
 
@@ -308,6 +315,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
 }
 
 - (void)setCss_keyboardType:(NSString *)css_keyboardType {
+    _css_keyboardType = css_keyboardType;
     self.keyboardType = [KRConvertUtil hr_keyBoardType:css_keyboardType];
     BOOL isPassword = [css_keyboardType isEqualToString:@"password"];
     BOOL isEmail = [css_keyboardType isEqualToString:@"email"];
@@ -549,6 +557,61 @@ NSString *const KRFontWeightKey = @"fontWeight";
     for (UIView *subview in view.subviews) {
         [self p_restoreCursorColorInView:subview];
     }
+}
+#endif
+
+#if !TARGET_OS_OSX
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if ([self p_shouldForwardHardwareTabKey]) {
+        for (UIPress *press in presses) {
+            if (@available(iOS 13.4, *)) {
+                UIKey *key = press.key;
+                if ([key.charactersIgnoringModifiers isEqualToString:@"\t"]) {
+                    BOOL shiftPressed = (key.modifierFlags & UIKeyModifierShift) == UIKeyModifierShift;
+                    [self p_forwardHardwareTabKeyWithShiftPressed:shiftPressed];
+                    return;
+                }
+            }
+        }
+    }
+    [super pressesBegan:presses withEvent:event];
+}
+
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    NSArray<UIKeyCommand *> *superCommands = [super keyCommands];
+    if (![self p_shouldForwardHardwareTabKey]) {
+        return superCommands;
+    }
+    NSMutableArray<UIKeyCommand *> *commands = [NSMutableArray array];
+    [commands addObject:[UIKeyCommand keyCommandWithInput:@"\t"
+                                            modifierFlags:0
+                                                   action:@selector(p_handleHardwareTabKeyCommand:)]];
+    [commands addObject:[UIKeyCommand keyCommandWithInput:@"\t"
+                                            modifierFlags:UIKeyModifierShift
+                                                   action:@selector(p_handleHardwareTabKeyCommand:)]];
+    [commands addObjectsFromArray:superCommands ?: @[]];
+    return commands;
+}
+
+- (BOOL)p_shouldForwardHardwareTabKey {
+    return [_css_keyboardType isEqualToString:@"email"] ||
+        [_css_keyboardType isEqualToString:@"password"] ||
+        self.secureTextEntry;
+}
+
+- (void)p_handleHardwareTabKeyCommand:(UIKeyCommand *)command {
+    BOOL shiftPressed = (command.modifierFlags & UIKeyModifierShift) == UIKeyModifierShift;
+    [self p_forwardHardwareTabKeyWithShiftPressed:shiftPressed];
+}
+
+- (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed {
+    [self.hr_rootView sendKeyEventWithKeyCode:KRTextAreaViewKeyCodeTab
+                                         type:KRTextAreaViewKeyEventTypeDown
+                              utf16CodePoint:KRTextAreaViewKeyCodeTab
+                                   altPressed:NO
+                                  ctrlPressed:NO
+                                  metaPressed:NO
+                                 shiftPressed:shiftPressed];
 }
 #endif
 
@@ -838,6 +901,12 @@ NSString *const KRFontWeightKey = @"fontWeight";
     if (_ignoreTextDidChanged) {
         return  NO;
     }
+#if !TARGET_OS_OSX
+    if ([text isEqualToString:@"\t"] && [self p_shouldForwardHardwareTabKey]) {
+        [self p_forwardHardwareTabKeyWithShiftPressed:NO];
+        return NO;
+    }
+#endif
     if (text == nil || [text isEqualToString:@""]) { // 删除操作
         return YES;
             // It's a delete operation
