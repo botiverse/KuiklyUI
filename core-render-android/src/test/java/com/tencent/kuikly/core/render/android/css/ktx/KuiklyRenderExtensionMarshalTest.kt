@@ -85,6 +85,19 @@ class KuiklyRenderExtensionMarshalTest {
     }
 
     @Test
+    fun arrayMarshalSurvivesErasedCastNulls() {
+        // List<Any> by declaration, but erased casts from Java can smuggle
+        // nulls — the marshal must skip them, not NPE (Codex review edge).
+        @Suppress("UNCHECKED_CAST")
+        val listWithNull = listOf("a", null, "b") as List<Any>
+        val result = listWithNull.toJSONArray()
+
+        assertEquals(2, result.length())
+        assertEquals("a", result.getString(0))
+        assertEquals("b", result.getString(1))
+    }
+
+    @Test
     fun arrayMarshalPassesJsonThroughAndDropsUnsupportedLoudly() {
         val nested = JSONObject().put("id", 7)
         val result = listOf<Any>("s", 1, nested, Any(), JSONArray().put(false)).toJSONArray()

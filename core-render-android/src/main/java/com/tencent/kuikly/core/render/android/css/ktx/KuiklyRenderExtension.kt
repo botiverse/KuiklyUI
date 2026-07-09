@@ -342,9 +342,13 @@ internal fun List<Any>.toJSONArray(): JSONArray {
                 serializationArray.put(value)
             }
             else -> {
+                // The receiver is List<Any>, but erased casts from Java can
+                // still smuggle nulls in — they must not NPE the marshal.
+                @Suppress("SENSELESS_COMPARISON")
+                val typeName = if (value == null) "null" else value.javaClass.name
                 KuiklyRenderLog.e(
                     "KuiklyRenderExtension",
-                    "toJSONArray dropped unsupported element: type=${value.javaClass.name}"
+                    "toJSONArray dropped unsupported element: type=$typeName"
                 )
             }
         }
