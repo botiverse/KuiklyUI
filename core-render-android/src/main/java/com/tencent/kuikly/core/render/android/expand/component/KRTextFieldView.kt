@@ -88,6 +88,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
     private var selectionChangeCallback: KuiklyRenderCallback? = null
 
     private var isSettingTextInputState = false
+    private var textInputSyncRevision = 0
 
     /**
      * 聚焦回调
@@ -672,6 +673,9 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
     private fun setTextInputState(params: String?) {
         val json = runCatching { JSONObject(params ?: "{}") }.getOrElse { JSONObject() }
+        if (json.has(KEY_SYNC_REVISION)) {
+            textInputSyncRevision = json.optInt(KEY_SYNC_REVISION, textInputSyncRevision)
+        }
         val rawText = json.optString(KEY_TEXT, "")
         if (shouldRejectProgrammaticShortcodeInput(rawText)) {
             textLengthBeyondLimitCallback?.invoke(null)
@@ -853,12 +857,14 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         }
         return if (length == null) {
             mapOf(
-                KEY_TEXT to rawText.toString()
+                KEY_TEXT to rawText.toString(),
+                KEY_SYNC_REVISION to textInputSyncRevision
             )
         } else {
             mapOf(
                 KEY_TEXT to rawText.toString(),
-                KEY_LENGTH to length!!
+                KEY_LENGTH to length!!,
+                KEY_SYNC_REVISION to textInputSyncRevision
             )
         }
     }
@@ -872,7 +878,8 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             KEY_SELECTION_START to selectionStart,
             KEY_SELECTION_END to selectionEnd,
             KEY_COMPOSITION_START to NO_COMPOSITION,
-            KEY_COMPOSITION_END to NO_COMPOSITION
+            KEY_COMPOSITION_END to NO_COMPOSITION,
+            KEY_SYNC_REVISION to textInputSyncRevision
         )
         // 应用 textPostProcessor 获取处理后的文本（如将 [smile] 转为 ImageSpan）
         val processedText = applyTextPostProcessorForLengthCalculation(text)
@@ -1100,6 +1107,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val KEY_COMPOSITION_START = "compositionStart"
         private const val KEY_COMPOSITION_END = "compositionEnd"
         private const val KEY_LENGTH = "length"
+        private const val KEY_SYNC_REVISION = "syncRevision"
         private const val NO_COMPOSITION = -1
 
         private const val LENGTH_LIMIT_TYPE_UNSET = -1

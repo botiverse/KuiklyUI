@@ -101,6 +101,8 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     BOOL _ignoreSelectionChange;
     /** suppress intermediate textInputStateChange during programmatic state sync */
     BOOL _suppressTextInputStateChange;
+    /** revision of the most recently applied controlled textInputState */
+    NSInteger _textInputSyncRevision;
     /** collect props */
     NSMutableDictionary *_props;
     /** 显式设置的光标颜色 */
@@ -338,6 +340,9 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     NSError *error = nil;
     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
     if (!json) return;
+    if (json[@"syncRevision"] != nil) {
+        _textInputSyncRevision = [json[@"syncRevision"] integerValue];
+    }
 
     NSString *requestedRawText = json[@"text"] ?: @"";
     NSInteger requestedSelectionStart = json[@"selectionStart"] ? [json[@"selectionStart"] integerValue] : requestedRawText.length;
@@ -393,6 +398,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
             @"selectionEnd": @(cursorEnd),
             @"compositionStart": @(-1),
             @"compositionEnd": @(-1),
+            @"syncRevision": @(_textInputSyncRevision),
             @"length": @([self p_calculateLengthForText:self.text])
         });
     }
@@ -479,7 +485,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
         if (enablePinyinCallback) {
             if (self.css_textDidChange) {
                 NSString *text = textField.text.copy ?: @"";
-                self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text])});
+                self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text]), @"syncRevision": @(_textInputSyncRevision)});
             }
         }
         return;
@@ -487,7 +493,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     [self p_limitTextInput];
     if (self.css_textDidChange) {
         NSString *text = textField.text.copy ?: @"";
-        self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text])});
+        self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text]), @"syncRevision": @(_textInputSyncRevision)});
     }
     [self p_notifyTextInputStateChangeIfNeeded];
 }
@@ -638,6 +644,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
         @"selectionEnd": @(selectionEnd),
         @"compositionStart": @(-1),
         @"compositionEnd": @(-1),
+        @"syncRevision": @(_textInputSyncRevision),
         @"length": @([self p_calculateLengthForText:text])
     };
 }

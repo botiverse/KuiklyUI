@@ -73,6 +73,7 @@ constexpr char kKeySelectionEnd[] = "selectionEnd";
 constexpr char kKeyCompositionStart[] = "compositionStart";
 constexpr char kKeyCompositionEnd[] = "compositionEnd";
 constexpr char kKeyLength[] = "length";
+constexpr char kKeySyncRevision[] = "syncRevision";
 constexpr int kNoComposition = -1;
 
 ArkUI_NodeHandle KRTextFieldView::CreateNode() {
@@ -437,6 +438,7 @@ void KRTextFieldView::SetTextInputStateInternal(const std::string &json) {
     };
 
     std::string text = get_string(kKeyText);
+    text_input_sync_revision_ = get_int(kKeySyncRevision, text_input_sync_revision_);
     if (ShouldRejectProgrammaticShortcodeInput(text)) {
         NotifyTextLengthBeyondLimit();
         NotifyTextInputStateChange();
@@ -495,6 +497,7 @@ KRRenderValueMap KRTextFieldView::CreateTextInputStateMap() {
     map[kKeySelectionEnd] = NewKRRenderValue(selection_end);
     map[kKeyCompositionStart] = NewKRRenderValue(kNoComposition);
     map[kKeyCompositionEnd] = NewKRRenderValue(kNoComposition);
+    map[kKeySyncRevision] = NewKRRenderValue(text_input_sync_revision_);
     if (length_limit_type_ != -1) {
         int length = CalculateTextLength(text);
         map[kKeyLength] = NewKRRenderValue(length);
@@ -586,6 +589,7 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
         auto text = GetContentText();
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(text);
+        map[kKeySyncRevision] = NewKRRenderValue(text_input_sync_revision_);
         if (length_limit_type_ != -1) {
             int length = CalculateTextLength(text);
             map["length"] = NewKRRenderValue(length);
