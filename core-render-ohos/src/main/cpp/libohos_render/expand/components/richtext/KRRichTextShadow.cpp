@@ -28,7 +28,9 @@
 #include <multimedia/image_framework/image/image_source_native.h>
 #include <multimedia/image_framework/image/pixelmap_native.h>
 
+#include <algorithm>
 #include <codecvt>
+#include <locale>
 #include <thread>
 #include <unordered_set>
 
@@ -64,6 +66,80 @@ template <class Facet> struct deletable_facet : Facet {
 };
 
 constexpr char kRawFilePrefix[] = "rawfile:";
+
+namespace {
+
+constexpr char16_t kSlockNonBreakingSpace = u'\u00A0';
+constexpr char16_t kSlockZeroWidthBreak = u'\u200B';
+constexpr char16_t kObjectReplacementCharacter = u'\uFFFC';
+constexpr float kSlockInnerPaddingRatio = 4.0f / 15.0f;
+constexpr float kSlockOuterMarginRatio = 2.0f / 15.0f;
+constexpr float kSlockTrailingMarginRatio = 1.0f / 15.0f;
+constexpr float kSlockChipLineHeightRatio = 1.5f;
+
+std::u16string KRUtf8ToUtf16(const std::string &text) {
+    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> converter;
+    return converter.from_bytes(text);
+}
+
+std::string KRUtf16ToUtf8(const std::u16string &text) {
+    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> converter;
+    return converter.to_bytes(text);
+}
+
+struct KRSlockInlineCodeTextPlan {
+    std::u16string layout_text;
+    std::u16string semantic_text;
+    std::vector<size_t> layout_to_semantic_offsets{0};
+};
+
+KRSlockInlineCodeTextPlan KRBuildSlockInlineCodeTextPlan(const std::string &text) {
+    const std::u16string input = KRUtf8ToUtf16(text);
+    size_t begin = 0;
+    size_t end = input.size();
+    // The shared OHOS bridge currently wraps inline code in NBSP. Native chrome owns
+    // its edge geometry, so consume (do not render) those bridge-only sentinels here.
+    // Consume exactly one sentinel on each edge. If the source itself begins or
+    // ends with NBSP, the shared bridge emits two and the source unit must remain.
+    if (begin < end && input[begin] == kSlockNonBreakingSpace) {
+        ++begin;
+    }
+    if (end > begin && input[end - 1] == kSlockNonBreakingSpace) {
+        --end;
+    }
+
+    KRSlockInlineCodeTextPlan result;
+    for (size_t i = begin; i < end; ++i) {
+        const char16_t code_unit = input[i];
+        result.layout_text.push_back(code_unit);
+        if (code_unit != kSlockZeroWidthBreak) {
+            result.semantic_text.push_back(code_unit);
+        }
+        result.layout_to_semantic_offsets.push_back(result.semantic_text.size());
+    }
+    return result;
+}
+
+uint32_t KRSlockChromeFillColor(const std::string &kind) {
+    if (kind == "inlineCode") {
+        return 0x66FFD440;
+    }
+    if (kind == "channel") {
+        return 0x4DFE7DA8;
+    }
+    if (kind == "thread") {
+        return 0x4D27CCF3;
+    }
+    if (kind == "task") {
+        return 0x66FFD440;
+    }
+    if (kind == "selfMention" || kind == "active") {
+        return 0xFFFFD440;
+    }
+    return 0;
+}
+
+}  // namespace
 
 static bool isRawFilePath(const std::string &src) {
     return src.find(kRawFilePrefix) == 0;
@@ -112,6 +188,26 @@ KRAnyValue KRRichTextShadow::Call(const std::string &method_name, const std::str
         return NewKRRenderValue(did_exceed_max_lines_ && OH_Drawing_DestroyTextLines? "1" : "0");
     }
     return KRRenderValue::Make(nullptr);
+}
+
+std::string KRRichTextShadow::SemanticSelection(int layout_start, int layout_end, std::string &pre,
+                                                std::string &post) const {
+    const std::u16string semantic = KRUtf8ToUtf16(main_thread_semantic_text_content_);
+    const auto &offsets = main_thread_layout_to_semantic_offsets_;
+    if (offsets.empty()) {
+        pre.clear();
+        post.clear();
+        return main_thread_semantic_text_content_;
+    }
+
+    const size_t clamped_start = std::min(static_cast<size_t>(std::max(layout_start, 0)), offsets.size() - 1);
+    const size_t clamped_end = std::min(static_cast<size_t>(std::max(layout_end, 0)), offsets.size() - 1);
+    const size_t semantic_start = std::min(offsets[std::min(clamped_start, clamped_end)], semantic.size());
+    const size_t semantic_end = std::min(offsets[std::max(clamped_start, clamped_end)], semantic.size());
+
+    pre = KRUtf16ToUtf8(semantic.substr(0, semantic_start));
+    post = KRUtf16ToUtf8(semantic.substr(semantic_end));
+    return KRUtf16ToUtf8(semantic.substr(semantic_start, semantic_end - semantic_start));
 }
 
 /**
@@ -199,13 +295,22 @@ KRSchedulerTask KRRichTextShadow::TaskToMainQueueWhenWillSetShadowToView() {
     auto offsetX = context_thread_drawOffsetX_;
     auto measure_size = context_measure_size_;
     auto text_align = context_thread_text_align_;
-    return [self, typography, offsetY, offsetX, measure_size, text_align] {
+    auto text_content = context_thread_text_content_;
+    auto semantic_text_content = context_thread_semantic_text_content_;
+    auto layout_to_semantic_offsets = context_thread_layout_to_semantic_offsets_;
+    auto slock_chrome_runs = context_thread_slock_chrome_runs_;
+    return [self, typography, offsetY, offsetX, measure_size, text_align, text_content,
+            semantic_text_content, layout_to_semantic_offsets, slock_chrome_runs] {
         KRRichTextShadow *shadow = reinterpret_cast<KRRichTextShadow *>(self.get());
         shadow->SetMainThreadTypography(typography);
         shadow->main_thread_drawOffsetY_ = offsetY;
         shadow->main_thread_drawOffsetX_ = offsetX;
         shadow->main_thread_text_align_ = text_align;
         shadow->main_measure_size_ = measure_size;
+        shadow->main_thread_text_content_ = text_content;
+        shadow->main_thread_semantic_text_content_ = semantic_text_content;
+        shadow->main_thread_layout_to_semantic_offsets_ = layout_to_semantic_offsets;
+        shadow->main_thread_slock_chrome_runs_ = slock_chrome_runs;
     };
 }
 
@@ -330,6 +435,10 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
     span_offsets_.clear();
     placeholder_index_map_.clear();
     image_draw_records_.clear();
+    context_thread_slock_chrome_runs_.clear();
+    context_thread_layout_to_semantic_offsets_.clear();
+    context_thread_text_content_.clear();
+    context_thread_semantic_text_content_.clear();
     KRRenderValue::Array spans = values_;
     if (spans.empty()) {
         spans.push_back(KRRenderValue::Make(props_));
@@ -431,7 +540,29 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
     int placeholder_count = 0;
     OH_Drawing_TextAlign text_align = TEXT_ALIGN_LEFT;
     int charOffset = 0;
-    std::string text_content;
+    std::u16string layout_text_content;
+    std::u16string semantic_text_content;
+    std::vector<size_t> layout_to_semantic_offsets{0};
+    auto append_mapped_text = [&](const std::u16string &layout_text, const std::u16string &semantic_text,
+                                  const std::vector<size_t> *local_offsets) {
+        const size_t semantic_base = semantic_text_content.size();
+        layout_text_content.append(layout_text);
+        semantic_text_content.append(semantic_text);
+        if (local_offsets && local_offsets->size() == layout_text.size() + 1) {
+            for (size_t i = 1; i < local_offsets->size(); ++i) {
+                layout_to_semantic_offsets.push_back(semantic_base + (*local_offsets)[i]);
+            }
+        } else {
+            for (size_t i = 1; i <= layout_text.size(); ++i) {
+                layout_to_semantic_offsets.push_back(semantic_base + std::min(i, semantic_text.size()));
+            }
+        }
+    };
+    auto append_placeholder_mapping = [&](const std::u16string &semantic_text) {
+        layout_text_content.push_back(kObjectReplacementCharacter);
+        semantic_text_content.append(semantic_text);
+        layout_to_semantic_offsets.push_back(semantic_text_content.size());
+    };
     for (auto span : spans) {
         auto spanMap = span->toMap();
         auto fontSize = (GetKRValue("fontSize", spanMap, props_)->toFloat() ?: 15.0) * dpi * fontSizeScale;
@@ -464,6 +595,18 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         auto strokeWidth = GetKRValue("strokeWidth", spanMap, props_)->toFloat();
         auto strokeColorStr = GetKRValue("strokeColor", spanMap, props_)->toString();
         auto strokeColor = strokeColorStr.length() ? kuikly::util::ConvertToHexColor(strokeColorStr) : 0xff000000;
+
+        const bool slockInlineCode = GetKRValue("slockInlineCode", spanMap, spanMap)->toBool();
+        const bool slockInlineCodeTrailingMargin =
+            GetKRValue("slockInlineCodeTrailingMargin", spanMap, spanMap)->toBool();
+        const std::string slockTagChrome =
+            GetKRValue("slockMarkdownTagChrome", spanMap, spanMap)->toString();
+        const std::string slockChromeKind = slockInlineCode ? "inlineCode" : slockTagChrome;
+        const uint32_t slockFillColor = KRSlockChromeFillColor(slockChromeKind);
+        const bool isSlockChip = slockFillColor != 0;
+        if (isSlockChip) {
+            textDecoration = TEXT_DECORATION_NONE;
+        }
         
         auto placeholderWidth = GetKRValue("placeholderWidth", spanMap, spanMap)->toDouble();
         // 创建文本样式对象txtStyle
@@ -473,7 +616,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         OH_Drawing_Brush *textBackgroundBrush = nullptr;
         // 设置文字大小、字重等属性设置到文本样式对象中
         OH_Drawing_SetTextStyleColor(txtStyle, color);
-        if (backgroundColorStr.length() && backgroundColor != 0x00000000) {
+        if (!isSlockChip && backgroundColorStr.length() && backgroundColor != 0x00000000) {
             textBackgroundBrush = OH_Drawing_BrushCreate();
             OH_Drawing_BrushSetColor(textBackgroundBrush, backgroundColor);
             OH_Drawing_SetTextStyleBackgroundBrush(txtStyle, textBackgroundBrush);
@@ -649,15 +792,76 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             }
             placeholder_count++;
             charOffset += 1;
+            append_placeholder_mapping({});
+        } else if (slockInlineCodeTrailingMargin) {
+            // Android's KRSlockInlineCodeTrailingMarginSpan contract: the source
+            // space remains semantic text, while layout uses a 1/15 transparent
+            // advance instead of painting a visible whitespace glyph.
+            OH_Drawing_PlaceholderSpan trailingMargin = {
+                fontSize * kSlockTrailingMarginRatio,
+                fontSize * kSlockChipLineHeightRatio,
+                ALIGNMENT_CENTER_OF_ROW_BOX,
+                TEXT_BASELINE_ALPHABETIC,
+                0,
+            };
+            const int spanStart = charOffset;
+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &trailingMargin);
+            placeholder_count++;
+            charOffset += 1;
+            append_placeholder_mapping(KRUtf8ToUtf16(text));
+            span_offsets_.emplace_back(std::tuple(spanIndex, spanStart, charOffset));
+        } else if (isSlockChip) {
+            const float edgeAdvance =
+                fontSize * (kSlockInnerPaddingRatio + kSlockOuterMarginRatio);
+            OH_Drawing_PlaceholderSpan edgePlaceholder = {
+                edgeAdvance,
+                fontSize * kSlockChipLineHeightRatio,
+                ALIGNMENT_CENTER_OF_ROW_BOX,
+                TEXT_BASELINE_ALPHABETIC,
+                0,
+            };
+            const int spanStart = charOffset;
+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &edgePlaceholder);
+            placeholder_count++;
+            charOffset += 1;
+            append_placeholder_mapping({});
+
+            const int chromeStart = charOffset;
+            if (slockInlineCode) {
+                const auto plan = KRBuildSlockInlineCodeTextPlan(text);
+                const std::string layoutText = KRUtf16ToUtf8(plan.layout_text);
+                if (!layoutText.empty()) {
+                    OH_Drawing_TypographyHandlerAddText(handler, layoutText.c_str());
+                    charOffset += static_cast<int>(plan.layout_text.size());
+                    append_mapped_text(plan.layout_text, plan.semantic_text,
+                                       &plan.layout_to_semantic_offsets);
+                }
+            } else {
+                const std::u16string text16 = KRUtf8ToUtf16(text);
+                if (!text.empty()) {
+                    OH_Drawing_TypographyHandlerAddText(handler, text.c_str());
+                    charOffset += static_cast<int>(text16.size());
+                    append_mapped_text(text16, text16, nullptr);
+                }
+            }
+            const int chromeEnd = charOffset;
+            if (chromeEnd > chromeStart) {
+                context_thread_slock_chrome_runs_.push_back(
+                    KRSlockChromeRun{chromeStart, chromeEnd, slockFillColor, static_cast<float>(fontSize)});
+            }
+
+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &edgePlaceholder);
+            placeholder_count++;
+            charOffset += 1;
+            append_placeholder_mapping({});
+            span_offsets_.emplace_back(std::tuple(spanIndex, spanStart, charOffset));
         } else {
             OH_Drawing_TypographyHandlerAddText(handler, text.c_str());  // 添加文本
-            text_content.append(text);
-
-            std::wstring_convert<deletable_facet<std::codecvt<char16_t, char, std::mbstate_t>>, char16_t> conv16;
-            std::u16string str16 = conv16.from_bytes(text);
-            int codePointCount = str16.size();
+            const std::u16string text16 = KRUtf8ToUtf16(text);
+            const int codePointCount = static_cast<int>(text16.size());
             span_offsets_.emplace_back(std::tuple(spanIndex, charOffset, charOffset + codePointCount));
             charOffset += codePointCount;
+            append_mapped_text(text16, text16, nullptr);
         }
         OH_Drawing_DestroyTextStyle(txtStyle);
         if (textForegroundPen) {
@@ -699,7 +903,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
 #ifndef NDEBUG
     if (ouput_measure_width_ < 0.01) {
         KR_LOG_ERROR << "Measure size:" << ouput_measure_width_ << ", " << ouput_measure_height_
-                     << ", content bytes:" << GetTextContent().size() << ", in shadow view:" << this;
+                     << ", content bytes:" << layout_text_content.size() << ", in shadow view:" << this;
     }
 #endif
     context_measure_size_ = KRSize(ouput_measure_width_, ouput_measure_height_);
@@ -709,7 +913,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
     if (typoStyle != nullptr) {
         OH_Drawing_DestroyTypographyStyle(typoStyle);
     }
-    text_content_ = text_content;
+    context_thread_text_content_ = KRUtf16ToUtf8(layout_text_content);
+    context_thread_semantic_text_content_ = KRUtf16ToUtf8(semantic_text_content);
+    context_thread_layout_to_semantic_offsets_ = std::move(layout_to_semantic_offsets);
     // 触发 image span 异步预加载（决策 3C）。当 image_draw_records_ 为空（业务未注册
     // PostProcessor / 全是文本）时本方法立即返回，零开销。
     TriggerImagePrefetchIfNeed();
@@ -729,6 +935,10 @@ void KRRichTextShadow::ReleaseLastTypography() {
     context_thread_drawOffsetX_ = 0;
     context_thread_text_align_ = TEXT_ALIGN_LEFT;
     context_measure_size_ = KRSize(0, 0);
+    context_thread_text_content_.clear();
+    context_thread_semantic_text_content_.clear();
+    context_thread_layout_to_semantic_offsets_.clear();
+    context_thread_slock_chrome_runs_.clear();
 }
 
 // ===== Phase 3: image span 异步预加载（委托 KRCustomEmojiPixmapCache） =====

@@ -15,6 +15,8 @@
 
 #include "libohos_render/expand/components/richtext/KRRichTextView.h"
 
+#include <algorithm>
+#include <cmath>
 #include <codecvt>
 #include <locale>
 #include <multimedia/image_framework/image/pixelmap_native.h>
@@ -52,6 +54,121 @@ extern size_t OH_Drawing_GetEndFromRange(OH_Drawing_Range* range) __attribute__(
 #ifdef __cplusplus
 }
 #endif
+
+namespace {
+
+constexpr float kSlockChipInnerPaddingRatio = 4.0f / 15.0f;
+constexpr float kSlockChipLineHeightRatio = 1.5f;
+constexpr float kSlockChipBorderWidthVp = 1.0f;
+
+struct KRSlockChromeFragment {
+    float left = 0;
+    float top = 0;
+    float right = 0;
+    float bottom = 0;
+};
+
+void KRDrawBrushRect(OH_Drawing_Canvas *canvas, float left, float top, float right, float bottom) {
+    if (!canvas || right <= left || bottom <= top) {
+        return;
+    }
+    OH_Drawing_Rect *rect = OH_Drawing_RectCreate(left, top, right, bottom);
+    OH_Drawing_CanvasDrawRect(canvas, rect);
+    OH_Drawing_RectDestroy(rect);
+}
+
+std::vector<KRSlockChromeFragment> KRCollectSlockChromeFragments(OH_Drawing_Typography *typography,
+                                                                const KRSlockChromeRun &run) {
+    std::vector<KRSlockChromeFragment> fragments;
+    if (!typography || run.end <= run.start) {
+        return fragments;
+    }
+    OH_Drawing_TextBox *boxes = OH_Drawing_TypographyGetRectsForRange(
+        typography, run.start, run.end, RECT_HEIGHT_STYLE_MAX, RECT_WIDTH_STYLE_TIGHT);
+    if (!boxes) {
+        return fragments;
+    }
+    const int count = OH_Drawing_GetSizeOfTextBox(boxes);
+    for (int i = 0; i < count; ++i) {
+        KRSlockChromeFragment next{
+            OH_Drawing_GetLeftFromTextBox(boxes, i),
+            OH_Drawing_GetTopFromTextBox(boxes, i),
+            OH_Drawing_GetRightFromTextBox(boxes, i),
+            OH_Drawing_GetBottomFromTextBox(boxes, i),
+        };
+        if (!fragments.empty()) {
+            auto &last = fragments.back();
+            const float lastCenter = (last.top + last.bottom) / 2.0f;
+            const float nextCenter = (next.top + next.bottom) / 2.0f;
+            if (std::fabs(lastCenter - nextCenter) <= 1.0f) {
+                last.left = std::min(last.left, next.left);
+                last.top = std::min(last.top, next.top);
+                last.right = std::max(last.right, next.right);
+                last.bottom = std::max(last.bottom, next.bottom);
+                continue;
+            }
+        }
+        fragments.push_back(next);
+    }
+    OH_Drawing_TypographyDestroyTextBox(boxes);
+    return fragments;
+}
+
+void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typography,
+                           const std::vector<KRSlockChromeRun> &runs, float drawOffsetY, bool drawFill) {
+    if (!canvas || !typography || runs.empty()) {
+        return;
+    }
+    const float density = KRConfig::GetDpi();
+    OH_Drawing_Brush *brush = OH_Drawing_BrushCreate();
+    OH_Drawing_BrushSetAntiAlias(brush, drawFill);
+    OH_Drawing_CanvasAttachBrush(canvas, brush);
+
+    for (const auto &run : runs) {
+        auto fragments = KRCollectSlockChromeFragments(typography, run);
+        if (fragments.empty()) {
+            continue;
+        }
+        OH_Drawing_BrushSetColor(brush, drawFill ? run.fill_color : 0xFF000000);
+        const float innerPadding = run.font_size_px * kSlockChipInnerPaddingRatio;
+        const float chipHeight = run.font_size_px * kSlockChipLineHeightRatio;
+        const float borderWidth = std::max(1.0f, density * kSlockChipBorderWidthVp);
+        for (size_t i = 0; i < fragments.size(); ++i) {
+            const auto &fragment = fragments[i];
+            const bool isSpanStart = i == 0;
+            const bool isSpanEnd = i + 1 == fragments.size();
+            const float left = fragment.left - (isSpanStart ? innerPadding : 0.0f);
+            const float right = fragment.right + (isSpanEnd ? innerPadding : 0.0f);
+            const float centerY = (fragment.top + fragment.bottom) / 2.0f - drawOffsetY;
+            const float top = centerY - chipHeight / 2.0f;
+            const float bottom = centerY + chipHeight / 2.0f;
+            if (drawFill) {
+                KRDrawBrushRect(canvas, left, top, right, bottom);
+                continue;
+            }
+
+            const float borderLeft = std::floor(left);
+            const float borderTop = std::floor(top);
+            const float borderRight = std::ceil(right);
+            const float borderBottom = std::ceil(bottom);
+            KRDrawBrushRect(canvas, borderLeft, borderTop, borderRight, borderTop + borderWidth);
+            KRDrawBrushRect(canvas, borderLeft, borderBottom - borderWidth, borderRight, borderBottom);
+            // Internal line-wrap boundaries are not real span edges. Keep their
+            // fill continuous without drawing side borders that would cover glyphs.
+            if (isSpanStart) {
+                KRDrawBrushRect(canvas, borderLeft, borderTop, borderLeft + borderWidth, borderBottom);
+            }
+            if (isSpanEnd) {
+                KRDrawBrushRect(canvas, borderRight - borderWidth, borderTop, borderRight, borderBottom);
+            }
+        }
+    }
+
+    OH_Drawing_CanvasDetachBrush(canvas);
+    OH_Drawing_BrushDestroy(brush);
+}
+
+}  // namespace
 
 // UTF-8 to UTF-16
 static std::u16string utf8_to_utf16(const std::string& utf8_string) {
@@ -229,6 +346,11 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
         }
     }
 
+    // Native Slock chip fill is painted after final typography layout but before
+    // selection and glyphs. The shadow reserved real inline advance at each true
+    // edge; this pass only paints inside that collision volume.
+    KRDrawSlockChipChrome(drawingHandle, textTypo, richTextShadow->SlockChromeRuns(), drawOffsetY, true);
+
     if (!selection_rects_.selection_rects.empty()) {
         double density = KRConfig::GetDpi();
         OH_Drawing_Brush *backgroundBrush = OH_Drawing_BrushCreate();
@@ -265,6 +387,7 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
             }
         }
         if(line_count > 0){
+            KRDrawSlockChipChrome(drawingHandle, textTypo, richTextShadow->SlockChromeRuns(), drawOffsetY, false);
             return;
         }
     }
@@ -344,6 +467,9 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
             OH_Drawing_TypographyDestroyTextBox(placeholder_rects);
         }
     }
+
+    // Border is deliberately last so the 1dp edge stays crisp above glyph AA.
+    KRDrawSlockChipChrome(drawingHandle, textTypo, richTextShadow->SlockChromeRuns(), drawOffsetY, false);
 }
 
 void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &prop_value,
@@ -764,6 +890,9 @@ KRParagraphInfo KRRichTextView::GetParagraphInfo() {
 }
 
 std::string KRRichTextView::GetSelectedContent(std::string &pre, std::string &post) {
+    if (auto richTextShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow_)) {
+        return richTextShadow->SemanticSelection(selection_rects_.start, selection_rects_.end, pre, post);
+    }
     std::u16string str16 = utf8_to_utf16(selection_rects_.text_content);
 
     if (selection_rects_.start > 0) {
