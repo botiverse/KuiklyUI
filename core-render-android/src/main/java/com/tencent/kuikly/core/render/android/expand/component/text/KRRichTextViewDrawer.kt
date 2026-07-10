@@ -134,6 +134,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         val layoutRight = textLayout.width.toFloat()
 
         spans.forEach { span ->
+            if (!span.kind.isSlockMarkdownTagChipChrome()) return@forEach
             val start = spanned.getSpanStart(span)
             val end = spanned.getSpanEnd(span)
             if (start < 0 || end <= start) return@forEach
