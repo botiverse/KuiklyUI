@@ -203,6 +203,7 @@ internal fun CoreTextField(
     var pendingTextInputStateText by remember { mutableStateOf<String?>(null) }
     // 记录上一次原生层真实生效的编辑态，避免仅因 text 相同而误判 selection/composition 同步
     var lastSyncedTextInputState by remember { mutableStateOf<TextInputState?>(null) }
+    val textInputSyncRevisionTracker = remember { TextInputSyncRevisionTracker() }
     // 标记是否正在处理原生事件，避免 set(value) 反向同步导致选择状态被重置
     var isProcessingNativeEvent by remember { mutableStateOf(false) }
 
@@ -445,6 +446,9 @@ internal fun CoreTextField(
                     set(Triple(onValueChange, onLimitChange, maxLength)) {
                         withTextAreaView {
                             getViewEvent().textInputStateChange {
+                                if (textInputSyncRevisionTracker.isStale(it.syncRevision)) {
+                                    return@textInputStateChange
+                                }
                                 // 标记正在处理原生事件，避免 set(value) 反向同步导致选择状态被重置
                                 isProcessingNativeEvent = true
                                 pendingTextInputStateText = it.text
@@ -454,7 +458,8 @@ internal fun CoreTextField(
                                     selectionEnd = it.selectionEnd,
                                     compositionStart = it.compositionStart,
                                     compositionEnd = it.compositionEnd,
-                                    length = it.length
+                                    length = it.length,
+                                    syncRevision = it.syncRevision
                                 )
                                 autoHeightTextAreaView.getViewAttr()
                                     .updatePropCache(TextConst.VALUE, it.text)
@@ -476,6 +481,9 @@ internal fun CoreTextField(
                                 dispatchLimitChange(it.length, pendingLimitChangeNotification)
                             }
                             getViewEvent().selectionChange {
+                                if (textInputSyncRevisionTracker.isStale(it.syncRevision)) {
+                                    return@selectionChange
+                                }
                                 // 标记正在处理原生事件，避免 set(value) 反向同步导致选择状态被重置
                                 isProcessingNativeEvent = true
                                 lastSyncedTextInputState = TextInputState(
@@ -484,7 +492,8 @@ internal fun CoreTextField(
                                     selectionEnd = it.selectionEnd,
                                     compositionStart = it.compositionStart,
                                     compositionEnd = it.compositionEnd,
-                                    length = it.length
+                                    length = it.length,
+                                    syncRevision = it.syncRevision
                                 )
                                 val composition = if (
                                     it.compositionStart != TextInputState.NO_COMPOSITION &&
@@ -503,6 +512,9 @@ internal fun CoreTextField(
                                 )
                             }
                             getViewEvent().textDidChange {
+                                if (textInputSyncRevisionTracker.isStale(it.syncRevision)) {
+                                    return@textDidChange
+                                }
                                 val shouldIgnoreFallback = pendingTextInputStateText == it.text
                                 pendingTextInputStateText = null
                                 if (shouldIgnoreFallback) {
@@ -584,8 +596,11 @@ internal fun CoreTextField(
                                 !(lastSyncedTextInputState?.hasSameEditingState(incomingTextInputState) ?: false)
 
                             if (shouldSyncToNative) {
-                                setTextInputState(incomingTextInputState)
-                                lastSyncedTextInputState = incomingTextInputState
+                                val revisionedState = incomingTextInputState.copy(
+                                    syncRevision = textInputSyncRevisionTracker.issue()
+                                )
+                                setTextInputState(revisionedState)
+                                lastSyncedTextInputState = revisionedState
                             }
 
                             // 长度计算统一依赖原生层回调，避免 Kotlin 层和原生层计算不一致
@@ -600,6 +615,21 @@ internal fun CoreTextField(
         }
     }
 }
+
+internal class TextInputSyncRevisionTracker {
+    private var latestIssuedRevision: Int = 0
+
+    fun issue(): Int {
+        latestIssuedRevision += 1
+        return latestIssuedRevision
+    }
+
+    fun isStale(callbackRevision: Int?): Boolean =
+        callbackRevision != null &&
+            latestIssuedRevision != 0 &&
+            callbackRevision < latestIssuedRevision
+}
+
 /**
  * 将 Modifier 拆分为两部分：SetPropElement/SetEventElement 和其他 Element
  * 使用 foldOut 从内到外遍历，保持原始顺序
