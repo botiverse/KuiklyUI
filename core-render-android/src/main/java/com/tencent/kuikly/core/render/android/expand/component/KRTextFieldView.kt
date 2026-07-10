@@ -88,7 +88,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
     private var selectionChangeCallback: KuiklyRenderCallback? = null
 
     private var isSettingTextInputState = false
-    private var textInputSyncRevision = 0
+    private val textInputSyncRevisionState = TextInputSyncRevisionState()
 
     /**
      * 聚焦回调
@@ -673,9 +673,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
     private fun setTextInputState(params: String?) {
         val json = runCatching { JSONObject(params ?: "{}") }.getOrElse { JSONObject() }
-        if (json.has(KEY_SYNC_REVISION)) {
-            textInputSyncRevision = json.optInt(KEY_SYNC_REVISION, textInputSyncRevision)
-        }
+        textInputSyncRevisionState.apply(json.optIntOrNull(KEY_SYNC_REVISION))
         val rawText = json.optString(KEY_TEXT, "")
         if (shouldRejectProgrammaticShortcodeInput(rawText)) {
             textLengthBeyondLimitCallback?.invoke(null)
@@ -855,18 +853,9 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         } else {
             null
         }
-        return if (length == null) {
-            mapOf(
-                KEY_TEXT to rawText.toString(),
-                KEY_SYNC_REVISION to textInputSyncRevision
-            )
-        } else {
-            mapOf(
-                KEY_TEXT to rawText.toString(),
-                KEY_LENGTH to length!!,
-                KEY_SYNC_REVISION to textInputSyncRevision
-            )
-        }
+        val result = mutableMapOf<String, Any>(KEY_TEXT to rawText.toString())
+        length?.let { result[KEY_LENGTH] = it }
+        return textInputSyncRevisionState.snapshot(result)
     }
 
     private fun createTextInputStateParamMap(): Map<String, Any> {
@@ -878,8 +867,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             KEY_SELECTION_START to selectionStart,
             KEY_SELECTION_END to selectionEnd,
             KEY_COMPOSITION_START to NO_COMPOSITION,
-            KEY_COMPOSITION_END to NO_COMPOSITION,
-            KEY_SYNC_REVISION to textInputSyncRevision
+            KEY_COMPOSITION_END to NO_COMPOSITION
         )
         // 应用 textPostProcessor 获取处理后的文本（如将 [smile] 转为 ImageSpan）
         val processedText = applyTextPostProcessorForLengthCalculation(text)
@@ -889,7 +877,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             null
         }
         length?.let { result[KEY_LENGTH] = it }
-        return result
+        return textInputSyncRevisionState.snapshot(result)
     }
 
     private fun resetDefaultStyle() {
@@ -1116,6 +1104,25 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val LENGTH_LIMIT_TYPE_VISUAL_WIDTH = 2
     }
 }
+
+internal class TextInputSyncRevisionState {
+    var current: Int = 0
+        private set
+
+    fun apply(requestedRevision: Int?) {
+        if (requestedRevision != null) {
+            current = requestedRevision
+        }
+    }
+
+    fun snapshot(payload: MutableMap<String, Any>): Map<String, Any> {
+        payload["syncRevision"] = current
+        return payload
+    }
+}
+
+private fun JSONObject.optIntOrNull(key: String): Int? =
+    if (has(key)) optInt(key) else null
 
 private val PROGRAMMATIC_SHORTCODE_REGEX = Regex("\\[[a-zA-Z0-9_\\-]+\\]")
 
