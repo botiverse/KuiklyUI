@@ -125,7 +125,10 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 if (spanProps is TextSpanProps && spanProps.slockInlineCode) {
                     spannedBuilder.applySlockInlineCodeAtomicTextSpans(spanStart, spanEnd)
                 }
-                if (spanProps is TextSpanProps && spanProps.slockMarkdownTagChrome != null) {
+                if (
+                    spanProps is TextSpanProps &&
+                    spanProps.slockMarkdownTagChrome.isSlockMarkdownTagChipChrome()
+                ) {
                     spannedBuilder.applySlockMarkdownTagAtomicTextSpan(spanStart, spanEnd)
                 }
             }
@@ -415,6 +418,11 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 
 class KRSlockInlineCodeSpan
 class KRSlockMarkdownTagSpan(val kind: String)
+
+internal const val SLOCK_MARKDOWN_TAG_KIND_ORDINARY_MENTION = "ordinaryMention"
+
+internal fun String?.isSlockMarkdownTagChipChrome(): Boolean =
+    this != null && this != SLOCK_MARKDOWN_TAG_KIND_ORDINARY_MENTION
 
 private class KRSlockInlineCodeTrailingMarginSpan : ReplacementSpan() {
 
