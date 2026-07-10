@@ -399,12 +399,6 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
             renderView?.callMethod("setHasPullToRefresh", if (enabled) "1" else "0", null)
         }
     }
-
-    fun setPullToRefreshMaxDistance(maxDistance: Float) {
-        performTaskWhenRenderViewDidLoad {
-            renderView?.callMethod("setPullToRefreshMaxDistance", maxDistance.coerceAtLeast(0f).toString(), null)
-        }
-    }
 }
 
 enum class KRNestedScrollMode(val value: String){
