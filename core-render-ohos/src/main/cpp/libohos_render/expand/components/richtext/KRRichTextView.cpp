@@ -122,14 +122,17 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
     const float density = KRConfig::GetDpi();
     OH_Drawing_Brush *brush = OH_Drawing_BrushCreate();
     OH_Drawing_BrushSetAntiAlias(brush, drawFill);
-    OH_Drawing_CanvasAttachBrush(canvas, brush);
 
     for (const auto &run : runs) {
         auto fragments = KRCollectSlockChromeFragments(typography, run);
         if (fragments.empty()) {
             continue;
         }
+        // Native Drawing captures the brush state when it is attached to the
+        // canvas. Set the per-run color first; mutating an already attached
+        // brush leaves some HarmonyOS versions drawing the default black.
         OH_Drawing_BrushSetColor(brush, drawFill ? run.fill_color : 0xFF000000);
+        OH_Drawing_CanvasAttachBrush(canvas, brush);
         const float innerPadding = run.font_size_px * kSlockChipInnerPaddingRatio;
         const float chipHeight = run.font_size_px * kSlockChipLineHeightRatio;
         const float borderWidth = std::max(1.0f, density * kSlockChipBorderWidthVp);
@@ -162,9 +165,9 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
                 KRDrawBrushRect(canvas, borderRight - borderWidth, borderTop, borderRight, borderBottom);
             }
         }
+        OH_Drawing_CanvasDetachBrush(canvas);
     }
 
-    OH_Drawing_CanvasDetachBrush(canvas);
     OH_Drawing_BrushDestroy(brush);
 }
 
