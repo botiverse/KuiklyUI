@@ -132,20 +132,8 @@ class KuiklyScrollInfo {
      */
     var hasPullToRefresh: Boolean = false
         set(value) {
-            if (field == value) return
             field = value
             scrollView?.let { updatePullToRefreshOnScrollView(it, value) }
-        }
-
-    /** Maximum visible top overscroll for pull-to-refresh, in logical pixels. */
-    var pullToRefreshMaxDistance: Float = 0f
-        set(value) {
-            val normalized = value.coerceAtLeast(0f)
-            if (field == normalized) return
-            field = normalized
-            if (hasPullToRefresh) {
-                scrollView?.let { updatePullToRefreshOnScrollView(it, true) }
-            }
         }
 
     private fun updatePullToRefreshOnScrollView(
@@ -156,9 +144,6 @@ class KuiklyScrollInfo {
         fun applyIfCurrent() {
             if (scrollView === targetScrollView && hasPullToRefresh == enabled) {
                 targetScrollView.setHasPullToRefresh(enabled)
-                targetScrollView.setPullToRefreshMaxDistance(
-                    if (enabled) pullToRefreshMaxDistance else 0f
-                )
             }
         }
         if (KuiklyContextScheduler.isOnKuiklyThread(pagerId)) {
