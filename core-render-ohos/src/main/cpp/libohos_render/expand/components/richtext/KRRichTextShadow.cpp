@@ -74,6 +74,7 @@ constexpr char16_t kSlockZeroWidthBreak = u'\u200B';
 constexpr char16_t kObjectReplacementCharacter = u'\uFFFC';
 constexpr float kSlockInnerPaddingRatio = 4.0f / 15.0f;
 constexpr float kSlockOuterMarginRatio = 2.0f / 15.0f;
+constexpr float kSlockChipBorderWidthVp = 1.0f;
 constexpr float kSlockTrailingMarginRatio = 1.0f / 15.0f;
 constexpr float kSlockChipLineHeightRatio = 1.5f;
 
@@ -604,7 +605,33 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         const std::string slockChromeKind = slockInlineCode ? "inlineCode" : slockTagChrome;
         const uint32_t slockFillColor = KRSlockChromeFillColor(slockChromeKind);
         const bool isSlockChip = slockFillColor != 0;
-        if (isSlockChip) {
+        const std::string inlineBoxBackgroundColorStr =
+            GetKRValue("inlineBoxBackgroundColor", spanMap, spanMap)->toString();
+        const std::string inlineBoxBorderColorStr =
+            GetKRValue("inlineBoxBorderColor", spanMap, spanMap)->toString();
+        const float inlineBoxBorderWidth =
+            GetKRValue("inlineBoxBorderWidth", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingStart =
+            GetKRValue("inlineBoxPaddingStart", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingEnd =
+            GetKRValue("inlineBoxPaddingEnd", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingTop =
+            GetKRValue("inlineBoxPaddingTop", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingBottom =
+            GetKRValue("inlineBoxPaddingBottom", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxMarginStart =
+            GetKRValue("inlineBoxMarginStart", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxMarginEnd =
+            GetKRValue("inlineBoxMarginEnd", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxCornerRadius =
+            GetKRValue("inlineBoxCornerRadius", spanMap, spanMap)->toFloat() * dpi;
+        const bool isInlineBox = inlineBoxBackgroundColorStr.length() ||
+            inlineBoxBorderColorStr.length() || inlineBoxBorderWidth > 0 ||
+            inlineBoxPaddingStart > 0 || inlineBoxPaddingEnd > 0 ||
+            inlineBoxPaddingTop > 0 || inlineBoxPaddingBottom > 0 ||
+            inlineBoxMarginStart > 0 || inlineBoxMarginEnd > 0 || inlineBoxCornerRadius > 0;
+        const bool hasBoxChrome = isSlockChip || isInlineBox;
+        if (hasBoxChrome) {
             textDecoration = TEXT_DECORATION_NONE;
         }
         
@@ -616,7 +643,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         OH_Drawing_Brush *textBackgroundBrush = nullptr;
         // 设置文字大小、字重等属性设置到文本样式对象中
         OH_Drawing_SetTextStyleColor(txtStyle, color);
-        if (!isSlockChip && backgroundColorStr.length() && backgroundColor != 0x00000000) {
+        if (!hasBoxChrome && backgroundColorStr.length() && backgroundColor != 0x00000000) {
             textBackgroundBrush = OH_Drawing_BrushCreate();
             OH_Drawing_BrushSetColor(textBackgroundBrush, backgroundColor);
             OH_Drawing_SetTextStyleBackgroundBrush(txtStyle, textBackgroundBrush);
@@ -810,18 +837,41 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             charOffset += 1;
             append_placeholder_mapping(KRUtf8ToUtf16(text));
             span_offsets_.emplace_back(std::tuple(spanIndex, spanStart, charOffset));
-        } else if (isSlockChip) {
-            const float edgeAdvance =
-                fontSize * (kSlockInnerPaddingRatio + kSlockOuterMarginRatio);
-            OH_Drawing_PlaceholderSpan edgePlaceholder = {
-                edgeAdvance,
-                fontSize * kSlockChipLineHeightRatio,
+        } else if (hasBoxChrome) {
+            const float borderWidth = isInlineBox
+                ? inlineBoxBorderWidth
+                : std::max(1.0f, static_cast<float>(dpi) * kSlockChipBorderWidthVp);
+            const float paddingStart = isInlineBox
+                ? inlineBoxPaddingStart
+                : fontSize * kSlockInnerPaddingRatio;
+            const float paddingEnd = isInlineBox
+                ? inlineBoxPaddingEnd
+                : fontSize * kSlockInnerPaddingRatio;
+            const float marginStart = isInlineBox
+                ? inlineBoxMarginStart
+                : fontSize * kSlockOuterMarginRatio;
+            const float marginEnd = isInlineBox
+                ? inlineBoxMarginEnd
+                : fontSize * kSlockOuterMarginRatio;
+            const float boxHeight = isInlineBox
+                ? fontSize + inlineBoxPaddingTop + inlineBoxPaddingBottom + borderWidth * 2.0f
+                : fontSize * kSlockChipLineHeightRatio;
+            OH_Drawing_PlaceholderSpan leadingEdgePlaceholder = {
+                marginStart + borderWidth + paddingStart,
+                boxHeight,
+                ALIGNMENT_CENTER_OF_ROW_BOX,
+                TEXT_BASELINE_ALPHABETIC,
+                0,
+            };
+            OH_Drawing_PlaceholderSpan trailingEdgePlaceholder = {
+                paddingEnd + borderWidth + marginEnd,
+                boxHeight,
                 ALIGNMENT_CENTER_OF_ROW_BOX,
                 TEXT_BASELINE_ALPHABETIC,
                 0,
             };
             const int spanStart = charOffset;
-            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &edgePlaceholder);
+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &leadingEdgePlaceholder);
             placeholder_count++;
             charOffset += 1;
             append_placeholder_mapping({});
@@ -847,10 +897,30 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             const int chromeEnd = charOffset;
             if (chromeEnd > chromeStart) {
                 context_thread_slock_chrome_runs_.push_back(
-                    KRSlockChromeRun{chromeStart, chromeEnd, slockFillColor, static_cast<float>(fontSize)});
+                    KRSlockChromeRun{
+                        chromeStart,
+                        chromeEnd,
+                        isInlineBox
+                            ? (inlineBoxBackgroundColorStr.length()
+                                ? kuikly::util::ConvertToHexColor(inlineBoxBackgroundColorStr)
+                                : 0)
+                            : slockFillColor,
+                        isInlineBox
+                            ? (inlineBoxBorderColorStr.length()
+                                ? kuikly::util::ConvertToHexColor(inlineBoxBorderColorStr)
+                                : 0)
+                            : 0xFF000000,
+                        borderWidth,
+                        paddingStart,
+                        paddingEnd,
+                        marginStart,
+                        marginEnd,
+                        boxHeight,
+                        inlineBoxCornerRadius,
+                    });
             }
 
-            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &edgePlaceholder);
+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &trailingEdgePlaceholder);
             placeholder_count++;
             charOffset += 1;
             append_placeholder_mapping({});

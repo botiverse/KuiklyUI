@@ -67,7 +67,14 @@ struct KRSlockChromeRun {
     int start = 0;
     int end = 0;
     uint32_t fill_color = 0;
-    float font_size_px = 0;
+    uint32_t border_color = 0xFF000000;
+    float border_width_px = 0;
+    float padding_start_px = 0;
+    float padding_end_px = 0;
+    float margin_start_px = 0;
+    float margin_end_px = 0;
+    float box_height_px = 0;
+    float corner_radius_px = 0;
 };
 
 inline KRTypographyHandle KRMakeTypographyHandle(OH_Drawing_Typography *raw) {

@@ -208,6 +208,46 @@ internal class TestPage : BasePager() {
 `Span.longPress` 从 **2.23.0** 开始支持。
 :::
 
+### Span inline box decoration
+
+`TextSpan` supports a semantic-agnostic inline box decoration through
+`inlineBoxStyle`. The style participates in text measurement and keeps the
+original span click/long-press and copied text semantics.
+
+```kotlin
+Span {
+    text("linked message")
+    inlineBoxStyle(
+        InlineBoxSpanStyle(
+            backgroundColor = Color(0x33FFD440),
+            borderColor = Color.BLACK,
+            borderWidth = 1f,
+            paddingStart = 4f,
+            paddingEnd = 4f,
+            paddingTop = 2f,
+            paddingBottom = 2f,
+        )
+    )
+}
+```
+
+Compose DSL uses the same existing span carrier:
+
+```kotlin
+SpanStyle(
+    inlineBoxStyle = InlineBoxSpanStyle(
+        backgroundColor = Color.Yellow.copy(alpha = 0.2f),
+        borderColor = Color.Black,
+        borderWidth = 1.dp,
+        paddingStart = 4.dp,
+        paddingEnd = 4.dp,
+    )
+)
+```
+
+The decoration is presentation-only. Business meanings such as message,
+channel, task, or mention stay in the caller's annotation/action layer.
+
 `RichText` 中的 `Span` / `ImageSpan` 支持单独注册 `longPress` 事件。命中可长按的 span 时，会优先回调该 span 的 `longPress`；如果当前触点未命中任何注册了 `longPress` 的 span，则会回退到 `RichText.longPress`。
 
 `longPress` 回调参数为 `LongPressParams`，字段说明可参考[通用事件文档](basic-attr-event.md)。

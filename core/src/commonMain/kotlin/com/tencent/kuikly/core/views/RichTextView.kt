@@ -454,6 +454,21 @@ open class TextSpan : TextAttr(), ISpan {
         return this
     }
 
+    /** Attach generic inline box decoration to this existing text span. */
+    fun inlineBoxStyle(style: InlineBoxSpanStyle): TextSpan {
+        style.backgroundColor?.let { setProp(TextConst.INLINE_BOX_BACKGROUND_COLOR, it.toString()) }
+        style.borderColor?.let { setProp(TextConst.INLINE_BOX_BORDER_COLOR, it.toString()) }
+        setProp(TextConst.INLINE_BOX_BORDER_WIDTH, style.borderWidth)
+        setProp(TextConst.INLINE_BOX_PADDING_START, style.paddingStart)
+        setProp(TextConst.INLINE_BOX_PADDING_END, style.paddingEnd)
+        setProp(TextConst.INLINE_BOX_PADDING_TOP, style.paddingTop)
+        setProp(TextConst.INLINE_BOX_PADDING_BOTTOM, style.paddingBottom)
+        setProp(TextConst.INLINE_BOX_MARGIN_START, style.marginStart)
+        setProp(TextConst.INLINE_BOX_MARGIN_END, style.marginEnd)
+        setProp(TextConst.INLINE_BOX_CORNER_RADIUS, style.cornerRadius)
+        return this
+    }
+
     override fun textDecorationColor(color: Color): TextSpan {
         TextConst.TEXT_DECORATION_COLOR with color.toString()
         return this

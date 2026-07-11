@@ -44,6 +44,7 @@ import com.tencent.kuikly.compose.ui.unit.isSpecified
 import com.tencent.kuikly.core.base.Attr
 import com.tencent.kuikly.core.base.Attr.StyleConst
 import com.tencent.kuikly.core.views.ISpan
+import com.tencent.kuikly.core.views.InlineBoxSpanStyle as CoreInlineBoxSpanStyle
 import com.tencent.kuikly.core.base.BoxShadow
 import com.tencent.kuikly.core.collection.fastArrayListOf
 import com.tencent.kuikly.core.collection.fastMutableSetOf
@@ -481,6 +482,22 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
     applyStyleColor(spanStyle)
     if (spanStyle.background.isSpecified) {
         setProp(Attr.StyleConst.BACKGROUND_COLOR, spanStyle.background.toKuiklyColor().toString())
+    }
+    spanStyle.inlineBoxStyle?.let { box ->
+        inlineBoxStyle(
+            CoreInlineBoxSpanStyle(
+                backgroundColor = box.backgroundColor.takeIf { it.isSpecified }?.toKuiklyColor(),
+                borderColor = box.borderColor.takeIf { it.isSpecified }?.toKuiklyColor(),
+                borderWidth = box.borderWidth.value,
+                paddingStart = box.paddingStart.value,
+                paddingEnd = box.paddingEnd.value,
+                paddingTop = box.paddingTop.value,
+                paddingBottom = box.paddingBottom.value,
+                marginStart = box.marginStart.value,
+                marginEnd = box.marginEnd.value,
+                cornerRadius = box.cornerRadius.value,
+            )
+        )
     }
     if (spanStyle.brush is SolidColor) {
         color((spanStyle.brush as SolidColor).value.toKuiklyColor())

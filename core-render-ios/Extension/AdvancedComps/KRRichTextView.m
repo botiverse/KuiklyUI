@@ -145,6 +145,111 @@ static UIColor *KRSlockAtomicChipFillColor(NSString *chrome, UIColor *resolvedSt
 
 @end
 
+@interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
+
+@property (nonatomic, copy) NSString *originalText;
+
+- (instancetype)initWithText:(NSString *)text
+                         font:(UIFont *)font
+                    textColor:(UIColor *)textColor
+                        style:(NSDictionary<NSString *, id> *)style
+                letterSpacing:(CGFloat)letterSpacing;
+
+@end
+
+@implementation KRInlineBoxAttachment
+
+- (instancetype)initWithText:(NSString *)text
+                         font:(UIFont *)font
+                    textColor:(UIColor *)textColor
+                        style:(NSDictionary<NSString *, id> *)style
+                letterSpacing:(CGFloat)letterSpacing {
+    if (self = [super init]) {
+        _originalText = [text copy] ?: @"";
+        UIFont *resolvedFont = font ?: [UIFont systemFontOfSize:15.0];
+        UIColor *resolvedTextColor = textColor ?: [UIColor blackColor];
+        UIColor *backgroundColor = style[@"backgroundColor"] ?: [UIColor clearColor];
+        UIColor *borderColor = style[@"borderColor"] ?: [UIColor clearColor];
+        CGFloat borderWidth = [style[@"borderWidth"] doubleValue];
+        CGFloat paddingStart = [style[@"paddingStart"] doubleValue];
+        CGFloat paddingEnd = [style[@"paddingEnd"] doubleValue];
+        CGFloat paddingTop = [style[@"paddingTop"] doubleValue];
+        CGFloat paddingBottom = [style[@"paddingBottom"] doubleValue];
+        CGFloat marginStart = [style[@"marginStart"] doubleValue];
+        CGFloat marginEnd = [style[@"marginEnd"] doubleValue];
+        CGFloat cornerRadius = [style[@"cornerRadius"] doubleValue];
+        NSMutableDictionary<NSAttributedStringKey, id> *attributes = [@{
+            NSFontAttributeName: resolvedFont,
+            NSForegroundColorAttributeName: resolvedTextColor,
+        } mutableCopy];
+        if (letterSpacing != 0) {
+            attributes[NSKernAttributeName] = @(letterSpacing);
+        }
+        NSAttributedString *displayText = [[NSAttributedString alloc] initWithString:_originalText attributes:attributes];
+        CTLineRef line = CTLineCreateWithAttributedString((CFAttributedStringRef)displayText);
+        CGFloat ascent = 0;
+        CGFloat descent = 0;
+        CGFloat leading = 0;
+        CGFloat textWidth = (CGFloat)CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
+        CGFloat contentHeight = ascent + descent;
+        CGFloat boxHeight = contentHeight + paddingTop + paddingBottom + borderWidth * 2.0;
+        CGFloat totalWidth = textWidth + marginStart + marginEnd + paddingStart + paddingEnd + borderWidth * 2.0;
+        CGFloat boxLeft = marginStart;
+        CGFloat boxWidth = totalWidth - marginStart - marginEnd;
+
+        UIGraphicsBeginImageContextWithOptions(CGSizeMake(totalWidth, boxHeight), NO, 0.0);
+        CGContextRef context = UIGraphicsGetCurrentContext();
+        if (context) {
+            CGRect boxRect = CGRectMake(boxLeft, 0, boxWidth, boxHeight);
+            CGPathRef boxPath = CGPathCreateWithRoundedRect(boxRect, cornerRadius, cornerRadius, NULL);
+            CGContextAddPath(context, boxPath);
+            CGContextSetFillColorWithColor(context, backgroundColor.CGColor);
+            CGContextFillPath(context);
+            if (borderWidth > 0 && borderColor) {
+                CGRect strokeRect = CGRectInset(boxRect, borderWidth / 2.0, borderWidth / 2.0);
+                CGPathRef strokePath = CGPathCreateWithRoundedRect(
+                    strokeRect,
+                    MAX(0, cornerRadius - borderWidth / 2.0),
+                    MAX(0, cornerRadius - borderWidth / 2.0),
+                    NULL
+                );
+                CGContextAddPath(context, strokePath);
+                CGContextSetStrokeColorWithColor(context, borderColor.CGColor);
+                CGContextSetLineWidth(context, borderWidth);
+                CGContextStrokePath(context);
+                CGPathRelease(strokePath);
+            }
+            CGPathRelease(boxPath);
+
+            CGContextSaveGState(context);
+            CGContextTranslateCTM(context, 0, boxHeight);
+            CGContextScaleCTM(context, 1.0, -1.0);
+            CGContextSetTextMatrix(context, CGAffineTransformIdentity);
+            CGContextSetTextPosition(
+                context,
+                marginStart + borderWidth + paddingStart,
+                borderWidth + paddingBottom + descent
+            );
+            CTLineDraw(line, context);
+            CGContextRestoreGState(context);
+        }
+        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        CFRelease(line);
+
+        self.image = image;
+        CGFloat baselineOffset = (resolvedFont.ascender + resolvedFont.descender) / 2.0 - boxHeight / 2.0;
+        self.bounds = CGRectMake(0, baselineOffset, totalWidth, boxHeight);
+    }
+    return self;
+}
+
+- (NSString *)kr_originlTextBeforeTextAttachment {
+    return self.originalText ?: @"";
+}
+
+@end
+
 // Inline code uses the same atomic inline-box model as reference chips, at a
 // finer granularity: one attachment per composed grapheme. Each atom owns its
 // glyph measurement/drawing and original text, while KRLayoutManager paints one
@@ -627,6 +732,28 @@ static BOOL KRSlockUsesAtomicChipBox(NSString *chrome) {
         } else if (propStyle[@"slockInlineCode"]) {
             spanAttrs.slockChrome = @"inlineCode";
         }
+        BOOL hasInlineBoxStyle = propStyle[@"inlineBoxBackgroundColor"] ||
+            propStyle[@"inlineBoxBorderColor"] || propStyle[@"inlineBoxBorderWidth"] ||
+            propStyle[@"inlineBoxPaddingStart"] || propStyle[@"inlineBoxPaddingEnd"] ||
+            propStyle[@"inlineBoxPaddingTop"] || propStyle[@"inlineBoxPaddingBottom"] ||
+            propStyle[@"inlineBoxMarginStart"] || propStyle[@"inlineBoxMarginEnd"] ||
+            propStyle[@"inlineBoxCornerRadius"];
+        if (hasInlineBoxStyle) {
+            NSMutableDictionary<NSString *, id> *box = [NSMutableDictionary new];
+            UIColor *boxBackground = [UIView css_color:propStyle[@"inlineBoxBackgroundColor"]];
+            UIColor *boxBorder = [UIView css_color:propStyle[@"inlineBoxBorderColor"]];
+            if (boxBackground) box[@"backgroundColor"] = boxBackground;
+            if (boxBorder) box[@"borderColor"] = boxBorder;
+            box[@"borderWidth"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxBorderWidth"]]);
+            box[@"paddingStart"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingStart"]]);
+            box[@"paddingEnd"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingEnd"]]);
+            box[@"paddingTop"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingTop"]]);
+            box[@"paddingBottom"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingBottom"]]);
+            box[@"marginStart"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxMarginStart"]]);
+            box[@"marginEnd"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxMarginEnd"]]);
+            box[@"cornerRadius"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxCornerRadius"]]);
+            spanAttrs.inlineBoxStyle = box;
+        }
         // 组合属性，生成这段Span对应的富文本
         NSMutableAttributedString *spanAttrString = [self p_createSpanAttributedStringWithAttributes:spanAttrs];
         if (spanAttrString) {
@@ -761,6 +888,32 @@ static BOOL KRSlockUsesAtomicChipBox(NSString *chrome) {
 
 
 - (nullable NSMutableAttributedString *)p_createSpanAttributedStringWithAttributes:(KRSpanAttributes *)attrs {
+    if (attrs.inlineBoxStyle && attrs.text.length > 0) {
+        KRInlineBoxAttachment *attachment = [[KRInlineBoxAttachment alloc]
+            initWithText:attrs.text
+                    font:attrs.font
+               textColor:attrs.color
+                   style:attrs.inlineBoxStyle
+           letterSpacing:attrs.letterSpacing];
+        NSMutableAttributedString *atomicBox = [[NSMutableAttributedString alloc]
+            initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+        NSRange atomicRange = NSMakeRange(0, atomicBox.length);
+        [atomicBox addAttribute:NSWritingDirectionAttributeName
+                         value:@[@((NSInteger)NSWritingDirectionLeftToRight | (NSInteger)NSWritingDirectionOverride)]
+                         range:atomicRange];
+        [atomicBox addAttribute:NSFontAttributeName value:attrs.font ?: [UIFont systemFontOfSize:15.0] range:atomicRange];
+        [atomicBox addAttribute:KuiklyIndexAttributeName value:@(attrs.spanIndex) range:atomicRange];
+        [self p_applyTextAttributeWithAttr:atomicBox
+                                textAliment:attrs.textAlign
+                               lineSpacing:attrs.lineSpacing
+                          paragraphSpacing:attrs.paragraphSpacing
+                                lineHeight:attrs.lineHeight
+                                     range:atomicRange
+                                  fontSize:attrs.font.pointSize
+                                headIndent:attrs.headIndent
+                                      font:attrs.font ?: [UIFont systemFontOfSize:15.0]];
+        return atomicBox;
+    }
     if ([attrs.slockChrome isEqualToString:@"inlineCode"] && attrs.text.length > 0) {
         return [self p_createSlockInlineCodeAtomChainWithAttributes:attrs];
     }

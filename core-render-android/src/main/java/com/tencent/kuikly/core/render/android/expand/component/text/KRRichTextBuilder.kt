@@ -131,6 +131,13 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 ) {
                     spannedBuilder.applySlockMarkdownTagAtomicTextSpan(spanStart, spanEnd)
                 }
+                if (spanProps is TextSpanProps && spanProps.inlineBoxStyle != null) {
+                    spannedBuilder.applyInlineBoxAtomicTextSpan(
+                        spanStart,
+                        spanEnd,
+                        spanProps.inlineBoxStyle
+                    )
+                }
             }
         }
         if (textProps.richTextHeadIndent != 0) {
@@ -221,7 +228,8 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         textSpans.add(ForegroundColorSpan(spanProps.color))
         if (spanProps.backgroundColor != Color.TRANSPARENT &&
             !spanProps.slockInlineCode &&
-            spanProps.slockMarkdownTagChrome == null
+            spanProps.slockMarkdownTagChrome == null &&
+            spanProps.inlineBoxStyle == null
         ) {
             textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
         }
@@ -255,6 +263,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         }
         spanProps.slockMarkdownTagChrome?.let { kind ->
             textSpans.add(KRSlockMarkdownTagSpan(kind))
+        }
+        spanProps.inlineBoxStyle?.let { style ->
+            textSpans.add(KRInlineBoxSpan(style))
         }
 
         spanProps.textShadow?.let {
@@ -311,6 +322,7 @@ class TextSpanProps(
     val slockInlineCode: Boolean
     val slockInlineCodeTrailingMargin: Boolean
     val slockMarkdownTagChrome: String?
+    val inlineBoxStyle: KRInlineBoxSpanStyle?
     var textShadow: BoxShadow? = null
     var useDpFontSizeDim = false
 
@@ -383,6 +395,7 @@ class TextSpanProps(
         slockMarkdownTagChrome =
             spanValue.optString(TextConst.SLOCK_MARKDOWN_TAG_CHROME, "")
                 .takeIf { it.isNotEmpty() }
+        inlineBoxStyle = KRInlineBoxSpanStyle.from(spanValue, kuiklyContext)
         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
         textShadow = BoxShadow(textShadowStr, kuiklyContext)
         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
@@ -418,6 +431,54 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
 
 class KRSlockInlineCodeSpan
 class KRSlockMarkdownTagSpan(val kind: String)
+
+data class KRInlineBoxSpanStyle(
+    val backgroundColor: Int?,
+    val borderColor: Int?,
+    val borderWidth: Float,
+    val paddingStart: Float,
+    val paddingEnd: Float,
+    val paddingTop: Float,
+    val paddingBottom: Float,
+    val marginStart: Float,
+    val marginEnd: Float,
+    val cornerRadius: Float,
+) {
+    companion object {
+        fun from(value: JSONObject, context: IKuiklyRenderContext?): KRInlineBoxSpanStyle? {
+            val hasStyle = value.has(TextConst.INLINE_BOX_BACKGROUND_COLOR) ||
+                value.has(TextConst.INLINE_BOX_BORDER_COLOR) ||
+                value.has(TextConst.INLINE_BOX_BORDER_WIDTH) ||
+                value.has(TextConst.INLINE_BOX_PADDING_START) ||
+                value.has(TextConst.INLINE_BOX_PADDING_END) ||
+                value.has(TextConst.INLINE_BOX_PADDING_TOP) ||
+                value.has(TextConst.INLINE_BOX_PADDING_BOTTOM) ||
+                value.has(TextConst.INLINE_BOX_MARGIN_START) ||
+                value.has(TextConst.INLINE_BOX_MARGIN_END) ||
+                value.has(TextConst.INLINE_BOX_CORNER_RADIUS)
+            if (!hasStyle) return null
+            fun color(key: String): Int? = value.optString(key).takeIf { it.isNotEmpty() }?.toColor()
+            fun dimension(key: String): Float {
+                val logicalPx = value.optDouble(key, 0.0).toFloat()
+                return if (logicalPx == 0f) 0f else context.toPxF(logicalPx)
+            }
+            return KRInlineBoxSpanStyle(
+                backgroundColor = color(TextConst.INLINE_BOX_BACKGROUND_COLOR),
+                borderColor = color(TextConst.INLINE_BOX_BORDER_COLOR),
+                borderWidth = dimension(TextConst.INLINE_BOX_BORDER_WIDTH),
+                paddingStart = dimension(TextConst.INLINE_BOX_PADDING_START),
+                paddingEnd = dimension(TextConst.INLINE_BOX_PADDING_END),
+                paddingTop = dimension(TextConst.INLINE_BOX_PADDING_TOP),
+                paddingBottom = dimension(TextConst.INLINE_BOX_PADDING_BOTTOM),
+                marginStart = dimension(TextConst.INLINE_BOX_MARGIN_START),
+                marginEnd = dimension(TextConst.INLINE_BOX_MARGIN_END),
+                cornerRadius = dimension(TextConst.INLINE_BOX_CORNER_RADIUS),
+            )
+        }
+    }
+}
+
+class KRInlineBoxSpan(val style: KRInlineBoxSpanStyle)
 
 internal const val SLOCK_MARKDOWN_TAG_KIND_ORDINARY_MENTION = "ordinaryMention"
 
@@ -506,6 +567,61 @@ private fun SpannableStringBuilder.applySlockMarkdownTagAtomicTextSpan(start: In
             end,
             Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
         )
+    }
+}
+
+private fun SpannableStringBuilder.applyInlineBoxAtomicTextSpan(
+    start: Int,
+    end: Int,
+    style: KRInlineBoxSpanStyle,
+) {
+    if (start < end) {
+        setSpan(
+            KRInlineBoxAtomicTextSpan(style),
+            start,
+            end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
+}
+
+private class KRInlineBoxAtomicTextSpan(
+    private val style: KRInlineBoxSpanStyle,
+) : ReplacementSpan() {
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int {
+        if (text == null || start >= end) return 0
+        fm?.let {
+            it.ascent -= ceil(style.paddingTop).toInt()
+            it.top -= ceil(style.paddingTop).toInt()
+            it.descent += ceil(style.paddingBottom).toInt()
+            it.bottom += ceil(style.paddingBottom).toInt()
+        }
+        val edgeStart = style.marginStart + style.borderWidth + style.paddingStart
+        val edgeEnd = style.paddingEnd + style.borderWidth + style.marginEnd
+        return ceil((paint.measureText(text, start, end) + edgeStart + edgeEnd).toDouble()).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text != null && start < end) {
+            val textX = x + style.marginStart + style.borderWidth + style.paddingStart
+            canvas.drawText(text, start, end, textX, y.toFloat(), paint)
+        }
     }
 }
 

@@ -89,6 +89,13 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         isAntiAlias = false
     }
     private val slockMarkdownTagRect = RectF()
+    private val inlineBoxFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val inlineBoxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
+    private val inlineBoxRect = RectF()
 
     private val wordIterator by lazy(LazyThreadSafetyMode.NONE) {
         WordIterator(textLayout.text, 0, textLayout.text.length, Locale.getDefault())
@@ -112,11 +119,74 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
      * 将文本内容绘制到 [canvas]，对接到 [Layout.draw]。
      */
     fun draw(canvas: Canvas) {
+        drawInlineBoxChrome(canvas, drawFill = true, drawBorder = false)
         drawSlockInlineCodeChrome(canvas, drawFill = true, drawBorder = false)
         drawSlockMarkdownTagChrome(canvas, drawFill = true, drawBorder = false)
         textLayout.draw(canvas)
         drawSlockInlineCodeChrome(canvas, drawFill = false, drawBorder = true)
         drawSlockMarkdownTagChrome(canvas, drawFill = false, drawBorder = true)
+        drawInlineBoxChrome(canvas, drawFill = false, drawBorder = true)
+    }
+
+    private fun drawInlineBoxChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRInlineBoxSpan::class.java)
+        if (spans.isEmpty()) return
+
+        val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
+        val metrics = textLayout.paint.fontMetrics
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+            val style = span.style
+            val startLine = textLayout.getLineForOffset(start)
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val lineStart = textLayout.getLineStart(line)
+                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
+                val segmentStart = max(start, lineStart)
+                val segmentEnd = min(end, lineVisibleEnd)
+                if (segmentEnd <= segmentStart) continue
+                val startX = textLayout.getPrimaryHorizontal(segmentStart)
+                val endX = textLayout.getPrimaryHorizontal(segmentEnd)
+                val segmentLeft = min(startX, endX)
+                val segmentRight = max(startX, endX)
+                val left = (segmentLeft + if (segmentStart == start) style.marginStart else 0f)
+                    .coerceAtLeast(layoutLeft)
+                val right = (segmentRight - if (segmentEnd == end) style.marginEnd else 0f)
+                    .coerceAtMost(layoutRight)
+                if (right <= left) continue
+
+                val baseline = textLayout.getLineBaseline(line).toFloat()
+                val top = baseline + metrics.ascent - style.paddingTop - style.borderWidth
+                val bottom = baseline + metrics.descent + style.paddingBottom + style.borderWidth
+                if (bottom <= top) continue
+                inlineBoxRect.set(left, top, right, bottom)
+                if (drawFill && style.backgroundColor != null) {
+                    inlineBoxFillPaint.color = style.backgroundColor
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        style.cornerRadius,
+                        style.cornerRadius,
+                        inlineBoxFillPaint
+                    )
+                }
+                if (drawBorder && style.borderColor != null && style.borderWidth > 0f) {
+                    inlineBoxBorderPaint.color = style.borderColor
+                    inlineBoxBorderPaint.strokeWidth = style.borderWidth
+                    val inset = style.borderWidth / 2f
+                    inlineBoxRect.inset(inset, inset)
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        max(0f, style.cornerRadius - inset),
+                        max(0f, style.cornerRadius - inset),
+                        inlineBoxBorderPaint
+                    )
+                }
+            }
+        }
     }
 
     private fun drawSlockMarkdownTagChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
