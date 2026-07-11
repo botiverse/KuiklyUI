@@ -397,6 +397,10 @@ internal fun RichTextAttr.applyAnnotatedString(
                         this@applyAnnotatedString.scaleToDensity(density, placeholder.item.width.value),
                         this@applyAnnotatedString.scaleToDensity(density, placeholder.item.height.value),
                     )
+                    // Preserve the AnnotatedString alternate text so native
+                    // selection/copy and accessibility do not degrade an
+                    // inline composable to PlaceholderSpan's default space.
+                    description(annoText.text.substring(start, end))
                 })
             }
         } else if (start < end) {
