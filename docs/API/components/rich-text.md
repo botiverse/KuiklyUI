@@ -191,6 +191,49 @@ internal class TestPage : BasePager() {
 
 :::
 
+### InlineBoxGroup方法
+
+`InlineBoxGroup` 用于将多个不同样式的 `Span` / `PlaceholderSpan` 作为一个明确的行内分组进行排版。
+子 Span 仍保留各自的字体、字号、颜色和占位尺寸；原生 RichText 排版引擎负责文本测量、换行、统一背景/边框绘制、点击命中与语义文本。
+
+```kotlin
+RichText {
+    InlineBoxGroup(
+        InlineBoxSpanStyle(
+            backgroundColor = Color(0xFFFCEFBD),
+            borderColor = Color.BLACK,
+            borderWidth = 1f,
+            paddingStart = 4f,
+            paddingEnd = 4f,
+            paddingTop = 1f,
+            paddingBottom = 1f,
+            marginStart = 2f,
+            marginEnd = 2f,
+        )
+    ) {
+        PlaceholderSpan {
+            placeholderSize(12f, 12f)
+        }
+        Span {
+            text("#project")
+            fontSize(14f)
+            fontWeightBold()
+        }
+        Span {
+            text(" msg")
+            fontSize(10f)
+            color(Color(0x80000000))
+        }
+        semanticText("#project msg")
+        click {
+            // 整个 group 共用一个点击区域
+        }
+    }
+}
+```
+
+`semanticText` 用于为含占位符或布局辅助字符的 group 提供稳定的复制/无障碍文本。布局辅助字符不会作为 group 身份或业务语义。
+
 ## 事件
 
 支持[Text组件的所有事件](text.md#事件)

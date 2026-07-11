@@ -36,6 +36,7 @@
 #include "libohos_render/foundation/thread/KRMainThread.h"
 #include "libohos_render/foundation/KRPoint.h"
 #include "libohos_render/export/IKRRenderViewExport.h"
+#include "libohos_render/utils/KRViewUtil.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -147,8 +148,12 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
             const auto &fragment = fragments[i];
             const bool isSpanStart = i == 0;
             const bool isSpanEnd = i + 1 == fragments.size();
-            const float left = fragment.left - (isSpanStart ? run.padding_start_px + borderWidth : 0.0f);
-            const float right = fragment.right + (isSpanEnd ? run.padding_end_px + borderWidth : 0.0f);
+            const float left = run.includes_reserved_edges
+                ? fragment.left + (isSpanStart ? run.margin_start_px : 0.0f)
+                : fragment.left - (isSpanStart ? run.padding_start_px + borderWidth : 0.0f);
+            const float right = run.includes_reserved_edges
+                ? fragment.right - (isSpanEnd ? run.margin_end_px : 0.0f)
+                : fragment.right + (isSpanEnd ? run.padding_end_px + borderWidth : 0.0f);
             const float centerY = (fragment.top + fragment.bottom) / 2.0f - drawOffsetY;
             const float top = centerY - chipHeight / 2.0f;
             const float bottom = centerY + chipHeight / 2.0f;
@@ -241,6 +246,9 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
     shadow_ = shadow;
 
     auto textShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow);
+    if (textShadow && !has_explicit_accessibility_) {
+        kuikly::util::UpdateNodeAccessibility(GetNode(), textShadow->GetSemanticTextContent());
+    }
     // 决策 6C：image span（由 PostProcessor("richtext") 拆段产生）只在 V1（老 typography）
     // OnForegroundDraw 路径下能被绘制——因为 V2 的 StyledString 是交给 ArkUI 节点直接
     // 渲染，SDK 当前没暴露插入图片绘制 hook 的入口。这个判定已收敛到
@@ -300,6 +308,7 @@ void KRRichTextView::DidRemoveFromParentView() {
     shadow_ = nullptr;
     paragraph_ = nullptr;
     use_styled_string_ = false;
+    has_explicit_accessibility_ = false;
     last_draw_frame_width_ = -1.0;
 }
 
@@ -521,6 +530,14 @@ void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &pr
         IKRRenderViewExport::ToSetProp(prop_key, prop_value, middleManCallback);
     } else if(prop_key == kPropNameLineBreakMargin) {
         line_break_margin_ = prop_value->toFloat();
+    } else if (prop_key == "accessibility") {
+        has_explicit_accessibility_ = !prop_value->toString().empty();
+        IKRRenderViewExport::ToSetProp(prop_key, prop_value, event_callback);
+        if (!has_explicit_accessibility_) {
+            if (auto richTextShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow_)) {
+                kuikly::util::UpdateNodeAccessibility(GetNode(), richTextShadow->GetSemanticTextContent());
+            }
+        }
     }else {
         IKRRenderViewExport::ToSetProp(prop_key, prop_value, event_callback);
     }
