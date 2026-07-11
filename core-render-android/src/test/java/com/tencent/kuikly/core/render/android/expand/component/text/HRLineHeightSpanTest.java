@@ -55,4 +55,21 @@ public class HRLineHeightSpanTest {
         assertEquals(7, metrics.descent);
         assertEquals(22, metrics.bottom - metrics.top);
     }
+
+    @Test
+    public void compressedLineHeightStillIgnoresFontPaddingExtents() {
+        Paint.FontMetricsInt metrics = new Paint.FontMetricsInt();
+        metrics.top = -18;
+        metrics.ascent = -13;
+        metrics.descent = 4;
+        metrics.bottom = 6;
+
+        new HRLineHeightSpan(14).chooseHeight("", 0, 0, 0, 0, metrics);
+
+        assertEquals(-12, metrics.top);
+        assertEquals(-12, metrics.ascent);
+        assertEquals(2, metrics.bottom);
+        assertEquals(2, metrics.descent);
+        assertEquals(14, metrics.bottom - metrics.top);
+    }
 }
