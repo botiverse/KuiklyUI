@@ -106,5 +106,40 @@ enum class KuiklyRenderNativeMethod(val value: Int) {
 
 typealias KuiklyRenderNativeMethodCallback = (methodId: KuiklyRenderNativeMethod, args: List<Any?>) -> Any?
 
+internal fun kuiklyNativeMethodRequiresContextThread(
+    method: KuiklyRenderNativeMethod,
+    args: List<Any?>
+): Boolean {
+    if (method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallModuleMethod ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod
+    ) {
+        return (args.getOrNull(5) as? Int ?: 0) == 1
+    }
+    return method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCalculateRenderViewSize ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCreateShadow ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodRemoveShadow ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowForView ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowProp ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetTimeout ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallShadowMethod ||
+        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSyncFlushUI
+}
+
+internal fun dispatchKuiklyNativeCall(
+    isContextThread: Boolean,
+    requiresContextThread: Boolean,
+    scheduleOnContextThread: (() -> Unit) -> Unit,
+    call: () -> Any?
+): Any? {
+    if (isContextThread) {
+        return call()
+    }
+    check(!requiresContextThread) {
+        "Synchronous Kuikly native calls must run on the context thread"
+    }
+    scheduleOnContextThread { call() }
+    return null
+}
+
 // 用于记录各个callNative的task的次数
 internal var nativeMethodCallCounts = IntArray(KuiklyRenderNativeMethod.values().size + 1)

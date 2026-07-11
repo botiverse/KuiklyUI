@@ -15,9 +15,11 @@
 
 #include "libohos_render/context/KRRenderNativeContextHandlerManager.h"
 
+#include <cstdlib>
 #include "libohos_render/context/DefaultRenderNativeContextHandler.h"
 #include "libohos_render/manager/KRRenderManager.h"
 #include "libohos_render/scheduler/KRContextScheduler.h"
+#include "libohos_render/utils/KRRenderLoger.h"
 
 extern CallKotlin callKotlin_;
 
@@ -85,21 +87,28 @@ void KRRenderNativeContextHandlerManager::ScheduleDeallocRenderValues(
 KRRenderCValue KRRenderNativeContextHandlerManager::DispatchCallNative(
     const std::string &instanceId, int methodId, const KRRenderCValue &arg0, const KRRenderCValue &arg1,
     const KRRenderCValue &arg2, const KRRenderCValue &arg3, const KRRenderCValue &arg4, const KRRenderCValue &arg5) {
-    auto handler = context_handler_map_.Get(instanceId);
-    if (!handler || nullptr == KRRenderManager::GetInstance().GetRenderView(instanceId)) {
-        auto cv = KRRenderCValue();
-        cv.type = KRRenderCValue::NULL_VALUE;
-        return cv;
-    }
     auto cv0 = KRRenderValue::Make(arg0);
     auto cv1 = KRRenderValue::Make(arg1);
     auto cv2 = KRRenderValue::Make(arg2);
     auto cv3 = KRRenderValue::Make(arg3);
     auto cv4 = KRRenderValue::Make(arg4);
     auto cv5 = KRRenderValue::Make(arg5);
+    auto method = static_cast<KuiklyRenderNativeMethod>(methodId);
+    if (!KRContextScheduler::IsCurrentOnContextThread()) {
+        if (KRNativeMethodRequiresContextThread(method, cv5)) {
+            KR_LOG_ERROR << "Synchronous Kuikly native method " << methodId
+                         << " called off the context thread; aborting";
+            std::abort();
+        }
+        KRContextScheduler::ScheduleTask(0, [this, instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5]() mutable {
+            DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
+        });
+        KRRenderCValue null_return_value;
+        null_return_value.type = KRRenderCValue::NULL_VALUE;
+        return null_return_value;
+    }
 
-    auto return_value =
-        handler->OnCallNative(static_cast<KuiklyRenderNativeMethod>(methodId), cv0, cv1, cv2, cv3, cv4, cv5);
+    auto return_value = DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
     if (return_value == nullptr) {
         KRRenderCValue null_return_value;
         null_return_value.type = KRRenderCValue::NULL_VALUE;
@@ -107,4 +116,16 @@ KRRenderCValue KRRenderNativeContextHandlerManager::DispatchCallNative(
     }
     ScheduleDeallocRenderValues(return_value);
     return return_value->toCValue();
+}
+
+std::shared_ptr<KRRenderValue> KRRenderNativeContextHandlerManager::DispatchPreparedCallNative(
+    const std::string &instanceId, const KuiklyRenderNativeMethod &method, std::shared_ptr<KRRenderValue> &arg0,
+    std::shared_ptr<KRRenderValue> &arg1, std::shared_ptr<KRRenderValue> &arg2,
+    std::shared_ptr<KRRenderValue> &arg3, std::shared_ptr<KRRenderValue> &arg4,
+    std::shared_ptr<KRRenderValue> &arg5) {
+    auto handler = context_handler_map_.Get(instanceId);
+    if (!handler || nullptr == KRRenderManager::GetInstance().GetRenderView(instanceId)) {
+        return nullptr;
+    }
+    return handler->OnCallNative(method, arg0, arg1, arg2, arg3, arg4, arg5);
 }

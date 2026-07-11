@@ -82,6 +82,11 @@ class KRRenderNativeContextHandlerManager {
 
  private:
     KRRenderNativeContextHandlerManager() {}
+    std::shared_ptr<KRRenderValue>
+    DispatchPreparedCallNative(const std::string &instanceId, const KuiklyRenderNativeMethod &method,
+                               std::shared_ptr<KRRenderValue> &arg0, std::shared_ptr<KRRenderValue> &arg1,
+                               std::shared_ptr<KRRenderValue> &arg2, std::shared_ptr<KRRenderValue> &arg3,
+                               std::shared_ptr<KRRenderValue> &arg4, std::shared_ptr<KRRenderValue> &arg5);
     void ScheduleDeallocRenderValues(std::shared_ptr<KRRenderValue> will_dealloc_render_value);
 
  private:
