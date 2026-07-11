@@ -127,6 +127,7 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 }
                 if (
                     spanProps is TextSpanProps &&
+                    spanProps.inlineBoxStyle == null &&
                     spanProps.slockMarkdownTagChrome.isSlockMarkdownTagChipChrome()
                 ) {
                     spannedBuilder.applySlockMarkdownTagAtomicTextSpan(spanStart, spanEnd)
@@ -261,8 +262,10 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         if (spanProps.slockInlineCodeTrailingMargin) {
             textSpans.add(KRSlockInlineCodeTrailingMarginSpan())
         }
-        spanProps.slockMarkdownTagChrome?.let { kind ->
-            textSpans.add(KRSlockMarkdownTagSpan(kind))
+        if (spanProps.inlineBoxStyle == null) {
+            spanProps.slockMarkdownTagChrome?.let { kind ->
+                textSpans.add(KRSlockMarkdownTagSpan(kind))
+            }
         }
         spanProps.inlineBoxStyle?.let { style ->
             textSpans.add(KRInlineBoxSpan(style))
