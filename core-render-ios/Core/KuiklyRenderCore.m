@@ -271,19 +271,7 @@ NSString *const kCustomFirstScreenTag = @"customFirstScreenTag";
 
 // 判断事件是否需要同步调用
 - (BOOL)p_shouldSyncCallWithWithMethod:(KuiklyRenderNativeMethod)method args:(NSArray *)args {
-    if (method == KuiklyRenderNativeMethodCallModuleMethod) {
-        return [FIVE_ARG isKindOfClass:[NSNumber class]] ? [FIVE_ARG boolValue] : NO;  //
-    }
-    return method == KuiklyRenderNativeMethodCalculateRenderViewSize ||
-           method == KuiklyRenderNativeMethodCreateShadow ||
-           method == KuiklyRenderNativeMethodRemoveShadow ||
-           method == KuiklyRenderNativeMethodSetShadowForView ||
-           method == KuiklyRenderNativeMethodSetShadowProp ||
-           method == KuiklyRenderNativeMethodSetTimeout ||
-           method == KuiklyRenderNativeMethodCallShadowMethod ||
-           method == KuiklyRenderNativeMethodFireFatalException ||
-           method == KuiklyRenderNativeMethodSyncFlushUI ||
-           method == KuiklyRenderNativeMethodCallTDFModuleMethod;
+    return KRNativeMethodRequiresContextThread(method, args);
 }
 
 // 执行KuiklyKotlin侧调用Native侧的事件
