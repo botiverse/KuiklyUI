@@ -826,14 +826,12 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
 
 class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
 
-    // History (Slock task #355 audit): 7b9503d re-based the distribution on
-    // ascent/descent and b992014 centered on the measured text's ink bounds
-    // (LineHeightSpan.WithDensity + getTextBounds). Ink-bounds centering made
-    // the line's vertical position depend on WHICH glyphs are present — the
-    // composer jumped while typing and static rows with different strings sat
-    // on different baselines (React's CSS line-height never does this). Both
-    // are reverted to the content-independent additive centering below
-    // (0989f41 semantics: even top/bottom split of the extra leading).
+    // CSS line-height distributes extra leading around the font's ascent and
+    // descent. Android top/bottom include font-padding extents even when
+    // StaticLayout.setIncludePad(false), which pushes custom fonts such as
+    // Space Grotesk below the equivalent browser baseline. Keep this strictly
+    // metrics-based: glyph-bounds centering makes placement depend on the text
+    // itself and causes editable content to jump while typing.
     override fun chooseHeight(
         text: CharSequence?,
         start: Int,
@@ -842,12 +840,12 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
         lineHeight: Int,
         fm: Paint.FontMetricsInt
     ) {
-        val additional: Int = height - (-fm.top + fm.bottom)
+        val additional: Int = height - (fm.descent - fm.ascent)
         val topExtra = additional / 2
-        fm.top -= topExtra
-        fm.bottom += additional - topExtra
-        fm.ascent = fm.top
-        fm.descent = fm.bottom
+        fm.ascent -= topExtra
+        fm.descent += additional - topExtra
+        fm.top = fm.ascent
+        fm.bottom = fm.descent
     }
 }
 
