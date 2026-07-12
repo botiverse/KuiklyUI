@@ -523,7 +523,7 @@ void KRTextFieldView::GetTextInputStateInternal(const KRRenderCallback &callback
 }
 
 /**
- * 在 OnTextDidChanged 末尾按需触发 textInputStateChange。
+ * 在 OnTextDidChanged 中按需触发 textInputStateChange。
  * 主动写入期间通过 is_setting_text_input_state_ 抑制，避免业务死循环。
  */
 void KRTextFieldView::NotifyTextInputStateChange() {
@@ -566,12 +566,11 @@ void KRTextFieldView::NotifySelectionChange() {
  * 「触发信号」存在；如果未来发现 attribute 读取与事件值不一致带来体感问题，
  * 可以改为优先使用 event 参数构造 map。
  *
- * 我们同时触发 selectionChange 与 textInputStateChange，与 Compose `CoreTextField`
- * 业务侧期望的「选区变化即可拿到完整 state」语义对齐。
+ * selectionChange 已经携带完整 state；与 Android onSelectionChanged 对齐，
+ * 这里只发一次，避免 Compose 对同一选区变化连续处理两份等价状态。
  */
 void KRTextFieldView::OnTextSelectionChange(ArkUI_NodeEvent *event) {
     NotifySelectionChange();
-    NotifyTextInputStateChange();
 }
 
 /**
@@ -593,6 +592,10 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
         LimitInputContentTextInMaxLength();
         drag_entered_ = false;
     }
+    // Android afterTextChanged 先发带 selection 的完整 state，再发 legacy textDidChange。
+    // Compose 依赖这个顺序跳过不含 selection 的 fallback；如果反过来，
+    // 新文本会先被配上 (0, 0) 选区回灌 native，导致光标跳到最前面。
+    NotifyTextInputStateChange();
     if (text_did_change_callback_) {
         auto text = GetContentText();
         KRRenderValueMap map;
@@ -604,9 +607,6 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
         }
         text_did_change_callback_(NewKRRenderValue(map));
     }
-    // 同一时机触发 textInputStateChange（与 Android KRTextFieldView 一致）。
-    // 主动写入期间由 NotifyTextInputStateChange 内部抑制，避免业务回流。
-    NotifyTextInputStateChange();
 }
 
 /**
