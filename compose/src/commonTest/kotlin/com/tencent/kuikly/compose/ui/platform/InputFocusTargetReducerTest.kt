@@ -200,7 +200,7 @@ class InputFocusTargetReducerTest {
     }
 
     @Test
-    fun unregisterClearsDetachedDesiredAndObservedView() {
+    fun unregisterBlursDetachedObservedViewAndClearsFocusState() {
         val reducer = InputFocusTargetReducer<View>()
         val view = View("detached")
 
@@ -208,8 +208,30 @@ class InputFocusTargetReducerTest {
         val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
         reducer.onNativeFocus(view, request.generation)
 
-        reducer.unregister(view)
+        val commands = reducer.unregister(view)
 
+        val blur = assertIs<InputFocusTargetReducer.Command.Blur<View>>(commands.single())
+        assertSame(view, blur.view)
+        assertEquals(reducer.generation, blur.generation)
+        assertNull(reducer.desiredView)
+        assertNull(reducer.observedView)
+        assertNull(reducer.reconcile())
+    }
+
+    @Test
+    fun lateProgrammaticFocusAfterUnregisterCannotReviveDetachedView() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("detached-while-focus-queued")
+
+        reducer.start(view)
+        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        val commands = reducer.unregister(view)
+
+        assertIs<InputFocusTargetReducer.Command.CancelPendingFocus<View>>(commands.single())
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
+            reducer.onNativeFocus(view, request.generation),
+        )
         assertNull(reducer.desiredView)
         assertNull(reducer.observedView)
         assertNull(reducer.reconcile())

@@ -102,8 +102,6 @@ internal class InputFocusTargetReducer<T : Any> {
     }
 
     internal fun onNativeFocus(view: T, requestId: Long?): NativeFocusDecision {
-        observedView = view
-        pendingBlurView = null
         if (requestId != null) {
             val matchesCurrentRequest =
                 requestId == generation &&
@@ -113,6 +111,8 @@ internal class InputFocusTargetReducer<T : Any> {
             if (!matchesCurrentRequest) {
                 return NativeFocusDecision.IgnoreStale
             }
+            observedView = view
+            pendingBlurView = null
             pendingFocusView = null
             pendingFocusGeneration = null
             focusAttemptCount = 0
@@ -121,6 +121,8 @@ internal class InputFocusTargetReducer<T : Any> {
 
         // A native focus event without a request id came from a platform/user focus action. It is
         // an intent, not authority: Compose FocusOwner still has to accept it.
+        observedView = view
+        pendingBlurView = null
         if (desiredView === view) {
             pendingFocusView = null
             pendingFocusGeneration = null
@@ -157,7 +159,14 @@ internal class InputFocusTargetReducer<T : Any> {
             pendingFocusView = null
             pendingFocusGeneration = null
         }
-        if (observedView === view) observedView = null
+        if (observedView === view) {
+            // Disposal removes the common callback surface immediately, but the native editor can
+            // still be first responder until it is explicitly blurred. Clear the observation only
+            // after emitting that terminal command so a detached/recreated field cannot leave the
+            // software keyboard visible without a logical focus owner.
+            commands += Command.Blur(view, generation)
+            observedView = null
+        }
         if (pendingBlurView === view) pendingBlurView = null
         return commands
     }
