@@ -51,6 +51,7 @@ constexpr char kPropTextInputState[] = "textInputState"; // 受控组件模式�
 
 constexpr char kMethodFocus[] = "focus";
 constexpr char kMethodBlur[] = "blur";
+constexpr char kMethodCancelPendingFocus[] = "cancelPendingFocus";
 constexpr char kMethodSetText[] = "setText";
 constexpr char kMethodGetCursorIndex[] = "getCursorIndex";
 constexpr char kMethodSetCursorIndex[] = "setCursorIndex";
@@ -137,8 +138,8 @@ void KRTextFieldView::UpdateInputNodeEnterKeyType(const std::string& propValue){
 void KRTextFieldView::UpdateInputNodeMaxLength(int maxLength){
     kuikly::util::UpdateInputNodeMaxLength(GetNode(), maxLength);  // 直接限制
 }
-void KRTextFieldView::UpdateInputNodeFocusStatus(int status){
-    kuikly::util::UpdateInputNodeFocusStatus(GetNode(), status);
+bool KRTextFieldView::UpdateInputNodeFocusStatus(int status){
+    return kuikly::util::UpdateInputNodeFocusStatus(GetNode(), status);
 }
 uint32_t KRTextFieldView::GetInputNodeSelectionStartPosition(){
     return kuikly::util::GetInputNodeSelectionStartPosition(GetNode());
@@ -347,9 +348,11 @@ void KRTextFieldView::OnEvent(ArkUI_NodeEvent *event, const ArkUI_NodeEventType 
 void KRTextFieldView::CallMethod(const std::string &method, const KRAnyValue &params,
                                  const KRRenderCallback &callback) {
     if (kuikly::util::isEqual(method, kMethodFocus)) {  // 获焦
-        Focus();
+        Focus(params ? params->toLong() : 0);
     } else if (kuikly::util::isEqual(method, kMethodBlur)) {  // 失焦
-        Blur();
+        Blur(params ? params->toLong() : 0);
+    } else if (kuikly::util::isEqual(method, kMethodCancelPendingFocus)) {
+        pending_focus_request_id_ = 0;
     } else if (kuikly::util::isEqual(method, kMethodSetText)) {  // 主动设置文本
         SetContentText(params->toString());
     } else if (kuikly::util::isEqual(method, kMethodGetCursorIndex)) {  // 获取光标位置
@@ -368,15 +371,23 @@ void KRTextFieldView::CallMethod(const std::string &method, const KRAnyValue &pa
 /**
  * 输入框获焦（弹起键盘）
  */
-void KRTextFieldView::Focus() {
-    UpdateInputNodeFocusStatus(1);
+void KRTextFieldView::Focus(int64_t request_id) {
+    pending_focus_request_id_ = request_id;
+    pending_blur_request_id_ = 0;
+    if (!UpdateInputNodeFocusStatus(1)) {
+        pending_focus_request_id_ = 0;
+    }
 }
 
 /**
  * 输入框失焦（收起键盘）
  */
-void KRTextFieldView::Blur() {
-    UpdateInputNodeFocusStatus(0);
+void KRTextFieldView::Blur(int64_t request_id) {
+    pending_blur_request_id_ = request_id;
+    pending_focus_request_id_ = 0;
+    if (!UpdateInputNodeFocusStatus(0)) {
+        pending_blur_request_id_ = 0;
+    }
 }
 
 /**
@@ -602,21 +613,31 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
  * 获焦回调
  */
 void KRTextFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
+    pending_blur_request_id_ = 0;
     if (input_focus_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(GetContentText());
+        if (pending_focus_request_id_ > 0) {
+            map["focusRequestId"] = NewKRRenderValue(pending_focus_request_id_);
+        }
         input_focus_callback_(NewKRRenderValue(map));
     }
+    pending_focus_request_id_ = 0;
 }
 /**
  * 失焦回调
  */
 void KRTextFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
+    pending_focus_request_id_ = 0;
     if (input_blur_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(GetContentText());
+        if (pending_blur_request_id_ > 0) {
+            map["focusRequestId"] = NewKRRenderValue(pending_blur_request_id_);
+        }
         input_blur_callback_(NewKRRenderValue(map));
     }
+    pending_blur_request_id_ = 0;
 }
 /**
  * 按下完成键回调

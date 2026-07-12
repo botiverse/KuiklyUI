@@ -395,7 +395,8 @@ data class InputParams(
     val text: String,
     val imeAction: String? = null,
     val length: Int? = null,
-    val syncRevision: Int? = null
+    val syncRevision: Int? = null,
+    val focusRequestId: Long? = null,
 )
 
 data class KeyboardParams(
@@ -459,7 +460,8 @@ class InputEvent : Event() {
         register(INPUT_FOCUS){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(InputParams(text, focusRequestId = focusRequestId))
         }
     }
 
@@ -471,7 +473,8 @@ class InputEvent : Event() {
         register(INPUT_BLUR){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(InputParams(text, focusRequestId = focusRequestId))
         }
     }
 

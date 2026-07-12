@@ -64,60 +64,103 @@ interface SoftwareKeyboardController {
 }
 
 internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
-    private enum class PendingAction {
-        NONE, START_INPUT, STOP_INPUT, SHOW_KEYBOARD, HIDE_KEYBOARD
-    }
-    private var activeView: AutoHeightTextAreaView? = null
-    private var pendingView: AutoHeightTextAreaView? = null
-    private var pendingAction = PendingAction.NONE
-    private var scheduleInputCommand = false
+    private val focusReducer = InputFocusTargetReducer<AutoHeightTextAreaView>()
+    private var reconcileScheduled = false
+    private var keyboardHidden = false
 
     override fun show() {
-        activeView?.also { sendInputCommand(it, PendingAction.SHOW_KEYBOARD) }
+        keyboardHidden = false
+        scheduleReconcile(focusReducer.desiredView ?: focusReducer.observedView)
     }
 
     override fun hide() {
-        activeView?.also { sendInputCommand(it, PendingAction.HIDE_KEYBOARD) }
+        keyboardHidden = true
+        scheduleReconcile(focusReducer.desiredView ?: focusReducer.observedView)
     }
 
     internal fun startInput(view: AutoHeightTextAreaView) {
-        sendInputCommand(view, PendingAction.START_INPUT)
+        keyboardHidden = false
+        execute(focusReducer.start(view))
+        scheduleReconcile(view)
     }
 
     internal fun stopInput(view: AutoHeightTextAreaView) {
-        sendInputCommand(view, PendingAction.STOP_INPUT)
+        execute(focusReducer.stop(view))
+        scheduleReconcile(view)
     }
 
-    private fun sendInputCommand(view: AutoHeightTextAreaView, action: PendingAction) {
-        if (!scheduleInputCommand) {
-            scheduleInputCommand = true
-            setTimeout(view.pagerId) {
-                scheduleInputCommand = false
-                when (pendingAction) {
-                    PendingAction.START_INPUT -> {
-                        pendingView?.focus()
-                        activeView = pendingView
-                    }
-                    PendingAction.STOP_INPUT -> {
-                        if (activeView == pendingView) {
-                            activeView?.blur()
-                            activeView = null
-                        }
-                    }
-                    PendingAction.SHOW_KEYBOARD -> {
-                        activeView?.focus()
-                    }
-                    PendingAction.HIDE_KEYBOARD -> {
-                        activeView?.blur()
-                    }
-                    else -> {}
-                }
-                pendingAction = PendingAction.NONE
-                pendingView = null
+    internal fun onNativeFocus(
+        view: AutoHeightTextAreaView,
+        requestId: Long?,
+    ): InputFocusTargetReducer.NativeFocusDecision {
+        val decision = focusReducer.onNativeFocus(view, requestId)
+        if (decision == InputFocusTargetReducer.NativeFocusDecision.IgnoreStale) {
+            scheduleReconcile(view)
+        }
+        return decision
+    }
+
+    internal fun onNativeBlur(
+        view: AutoHeightTextAreaView,
+        requestId: Long?,
+    ): InputFocusTargetReducer.NativeBlurDecision {
+        val decision = focusReducer.onNativeBlur(view, requestId)
+        scheduleReconcile(view)
+        return decision
+    }
+
+    internal fun rejectNativeFocus(view: AutoHeightTextAreaView) {
+        focusReducer.rejectNativeFocus(view)
+        view.blur(focusReducer.generation)
+    }
+
+    internal fun unregisterInput(view: AutoHeightTextAreaView) {
+        execute(focusReducer.unregister(view))
+    }
+
+    private fun scheduleReconcile(anchor: AutoHeightTextAreaView?) {
+        val pagerId = anchor?.pagerId ?: return
+        if (reconcileScheduled) return
+        reconcileScheduled = true
+        setTimeout(pagerId) {
+            reconcileScheduled = false
+            if (!keyboardHidden || focusReducer.desiredView == null) {
+                execute(focusReducer.reconcile())
+            }
+            if (keyboardHidden) {
+                focusReducer.observedView?.blur(focusReducer.generation)
             }
         }
-        pendingView = view
-        pendingAction = action
     }
 
+    private fun execute(commands: List<InputFocusTargetReducer.Command<AutoHeightTextAreaView>>) {
+        commands.forEach(::execute)
+    }
+
+    private fun execute(command: InputFocusTargetReducer.Command<AutoHeightTextAreaView>?) {
+        when (command) {
+            is InputFocusTargetReducer.Command.Focus ->
+                executeFocus(command)
+            is InputFocusTargetReducer.Command.Blur ->
+                command.view.blur(command.generation)
+            is InputFocusTargetReducer.Command.CancelPendingFocus ->
+                command.view.cancelPendingFocus(command.generation)
+            null -> Unit
+        }
+    }
+
+    private fun executeFocus(
+        command: InputFocusTargetReducer.Command.Focus<AutoHeightTextAreaView>,
+    ) {
+        command.view.focus(command.generation)
+        setTimeout(command.view.pagerId, FocusCompletionTimeoutMs) {
+            if (focusReducer.onFocusRequestTimeout(command.view, command.generation)) {
+                scheduleReconcile(command.view)
+            }
+        }
+    }
+
+    private companion object {
+        const val FocusCompletionTimeoutMs = 120
+    }
 }

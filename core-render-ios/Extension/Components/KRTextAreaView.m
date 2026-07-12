@@ -113,6 +113,9 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 @implementation KRTextAreaView {
     NSString *_text;
     BOOL _didAddKeyboardNotification;
+    NSNumber *_pendingFocusRequestId;
+    NSNumber *_pendingBlurRequestId;
+    NSUInteger _focusRequestEpoch;
     NSInteger _textInputSyncRevision;
     NSMutableDictionary *_props;
     BOOL _ignoreTextDidChanged;
@@ -357,13 +360,40 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 #pragma mark - css method
 
 - (void)css_focus:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    NSUInteger requestEpoch = ++_focusRequestEpoch;
+    _pendingFocusRequestId = requestId;
+    _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self becomeFirstResponder];
+        // Keep cancellation independent from the optional request id so legacy focus(nil) can be
+        // invalidated before this main-queue block runs.
+        if (requestEpoch != self->_focusRequestEpoch) {
+            return;
+        }
+        if (self.isFirstResponder) {
+            self->_pendingFocusRequestId = nil;
+            return;
+        }
+        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
+            self->_pendingFocusRequestId = nil;
+        }
     });
 }
 
 - (void)css_blur:(NSDictionary *)args  {
-    [self resignFirstResponder];
+    ++_focusRequestEpoch;
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = nil;
+    if (!self.isFirstResponder || ![self resignFirstResponder]) {
+        _pendingBlurRequestId = nil;
+    }
+}
+
+- (void)css_cancelPendingFocus:(NSDictionary *)args {
+    ++_focusRequestEpoch;
+    _pendingFocusRequestId = nil;
 }
 
 - (void)css_getCursorIndex:(NSDictionary *)args {
@@ -1013,16 +1043,28 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 }
 
 - (void)textViewDidBeginEditing:(UITextView *)textView { // 获焦
+    _pendingBlurRequestId = nil;
     if (self.css_inputFocus) {
-        self.css_inputFocus(@{@"text": textView.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
+        if (_pendingFocusRequestId) {
+            payload[@"focusRequestId"] = _pendingFocusRequestId;
+        }
+        self.css_inputFocus(payload);
     }
+    _pendingFocusRequestId = nil;
 }
 
 
 - (void)textViewDidEndEditing:(UITextView *)textView{ // 失焦
+    _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
-        self.css_inputBlur(@{@"text": textView.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
+        if (_pendingBlurRequestId) {
+            payload[@"focusRequestId"] = _pendingBlurRequestId;
+        }
+        self.css_inputBlur(payload);
     }
+    _pendingBlurRequestId = nil;
 }
 
 #pragma mark - notication

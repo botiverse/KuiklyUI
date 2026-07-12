@@ -282,6 +282,7 @@ static constexpr const char *kTextInputState = "textInputState";
 
 static constexpr const char kMethodFocus[] = "focus";
 static constexpr const char kMethodBlur[] = "blur";
+static constexpr const char kMethodCancelPendingFocus[] = "cancelPendingFocus";
 static constexpr const char kMethodSetText[] = "setText";
 static constexpr const char kMethodGetCursorIndex[] = "getCursorIndex";
 static constexpr const char kMethodSetCursorIndex[] = "setCursorIndex";
@@ -346,6 +347,8 @@ struct KRTextEditorState {
     // 抑制 textDidChange / textInputStateChange / selectionChange 三个回调，
     // 避免业务层 set->callback->set 形成回环。
     bool is_setting_text_input_state_ = false;
+    int64_t pending_focus_request_id_ = 0;
+    int64_t pending_blur_request_id_ = 0;
 
     KRRenderCallback text_did_change_callback_;
     KRRenderCallback input_focus_callback_;
@@ -772,10 +775,11 @@ inline void UpdateSingleLine(ArkUI_NodeHandle node, bool single_line) {
 }
 
 // Focus / Blur：使用通用 NODE_FOCUS_STATUS。
-inline void UpdateFocusStatus(ArkUI_NodeHandle node, bool focus) {
+inline bool UpdateFocusStatus(ArkUI_NodeHandle node, bool focus) {
     ArkUI_NumberValue value = {.i32 = focus ? 1 : 0};
     ArkUI_AttributeItem item = {&value, 1};
-    kuikly::util::GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item);
+    return kuikly::util::GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item) ==
+           ARKUI_ERROR_CODE_NO_ERROR;
 }
 
 // focusable

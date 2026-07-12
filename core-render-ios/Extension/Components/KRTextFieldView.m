@@ -97,6 +97,9 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     BOOL _setNeedUpdatePlaceholder;
     /** maxTextLength backing store */
     NSNumber *_css_maxTextLength;
+    NSNumber *_pendingFocusRequestId;
+    NSNumber *_pendingBlurRequestId;
+    NSUInteger _focusRequestEpoch;
     /** suppress native selection callback during programmatic selection updates */
     BOOL _ignoreSelectionChange;
     /** suppress intermediate textInputStateChange during programmatic state sync */
@@ -295,13 +298,41 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 #pragma mark - css method
 
 - (void)css_focus:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    NSUInteger requestEpoch = ++_focusRequestEpoch;
+    _pendingFocusRequestId = requestId;
+    _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self becomeFirstResponder];
+        // The epoch is the cancellation token. A nullable request id cannot serve this purpose:
+        // legacy focus(nil) followed by blur/cancel would otherwise compare nil == nil and revive
+        // a stale first responder on the next main-queue drain.
+        if (requestEpoch != self->_focusRequestEpoch) {
+            return;
+        }
+        if (self.isFirstResponder) {
+            self->_pendingFocusRequestId = nil;
+            return;
+        }
+        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
+            self->_pendingFocusRequestId = nil;
+        }
     });
 }
 
 - (void)css_blur:(NSDictionary *)args  {
-    [self resignFirstResponder];
+    ++_focusRequestEpoch;
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = nil;
+    if (!self.isFirstResponder || ![self resignFirstResponder]) {
+        _pendingBlurRequestId = nil;
+    }
+}
+
+- (void)css_cancelPendingFocus:(NSDictionary *)args {
+    ++_focusRequestEpoch;
+    _pendingFocusRequestId = nil;
 }
 
 - (void)css_setText:(NSDictionary *)args {
@@ -500,15 +531,27 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {  // 聚焦
+    _pendingBlurRequestId = nil;
     if (self.css_inputFocus) {
-        self.css_inputFocus(@{@"text": textField.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
+        if (_pendingFocusRequestId) {
+            payload[@"focusRequestId"] = _pendingFocusRequestId;
+        }
+        self.css_inputFocus(payload);
     }
+    _pendingFocusRequestId = nil;
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {  // 失焦
+    _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
-        self.css_inputBlur(@{@"text": textField.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
+        if (_pendingBlurRequestId) {
+            payload[@"focusRequestId"] = _pendingBlurRequestId;
+        }
+        self.css_inputBlur(payload);
     }
+    _pendingBlurRequestId = nil;
 }
 
 - (void)textFieldDidChangeSelection:(UITextField *)textField {
