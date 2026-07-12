@@ -28,6 +28,8 @@ extern NSString *const KRBGAttributeKey;
 // on a span's range so KRLayoutManager can draw the bordered chip that a plain
 // text SpanStyle / NSBackgroundColorAttributeName cannot express.
 extern NSString *const KRSlockChromeAttributeName;
+extern NSString *const KRInlineBoxStyleAttributeName;
+extern NSString *const KRInlineBoxSemanticAttributeName;
 
 @protocol KRSlockInlineCodeAtomProtocol <NSObject>
 - (BOOL)kr_slockInlineCodeLeadingEdge;

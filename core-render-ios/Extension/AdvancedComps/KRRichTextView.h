@@ -67,6 +67,8 @@ extern NSString *const KuiklyIndexAttributeName;
 // Slock rich-text chip chrome kind (task #439): chrome-kind wire string when this
 // span is an inline-code / tag chip, else nil. Consumed by KRLayoutManager.
 @property (nonatomic, copy, nullable) NSString *slockChrome;
+// Generic semantic-free inline box decoration carried by the existing TextSpan.
+@property (nonatomic, strong, nullable) NSDictionary<NSString *, id> *inlineBoxStyle;
 
 @end
 

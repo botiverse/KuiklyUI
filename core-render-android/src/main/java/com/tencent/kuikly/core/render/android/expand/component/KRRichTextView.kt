@@ -599,8 +599,10 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
     override fun call(methodName: String, params: String): Any? {
         when(methodName) {
             METHOD_GET_PLACEHOLDER_SPAN_RECT -> {
-                val index = params.toInt()
-                val spanRect = getPlaceholderSpanRect(index)
+                val path = params.split(" ")
+                val index = path.firstOrNull()?.toIntOrNull() ?: -1
+                val childIndex = path.getOrNull(1)?.toIntOrNull()
+                val spanRect = getPlaceholderSpanRect(index, childIndex)
                 return "${spanRect.left} ${spanRect.top} ${spanRect.width()} ${spanRect.height()}"
             }
             METHOD_IS_LINE_BREAK_MARGIN -> {
@@ -613,10 +615,12 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
     /**
      * 根据 index 获取 PlaceholderSpan 的绘制区域
      */
-    private fun getPlaceholderSpanRect(index: Int) : Rect {
+    private fun getPlaceholderSpanRect(index: Int, childIndex: Int? = null) : Rect {
         var rect = Rect(0, 0, 0, 0)
         textDrawer?.textLayout?.let { layout ->
-            var phSpanTextRange: SpanTextRange? = spanTextRanges.find { it.index == index }
+            val phSpanTextRange: SpanTextRange? = spanTextRanges.find {
+                it.index == index && it.childIndex == childIndex
+            }
 
             if (phSpanTextRange != null) {
 

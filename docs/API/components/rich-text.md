@@ -191,6 +191,49 @@ internal class TestPage : BasePager() {
 
 :::
 
+### InlineBoxGroup方法
+
+`InlineBoxGroup` 用于将多个不同样式的 `Span` / `PlaceholderSpan` 作为一个明确的行内分组进行排版。
+子 Span 仍保留各自的字体、字号、颜色和占位尺寸；原生 RichText 排版引擎负责文本测量、换行、统一背景/边框绘制、点击命中与语义文本。
+
+```kotlin
+RichText {
+    InlineBoxGroup(
+        InlineBoxSpanStyle(
+            backgroundColor = Color(0xFFFCEFBD),
+            borderColor = Color.BLACK,
+            borderWidth = 1f,
+            paddingStart = 4f,
+            paddingEnd = 4f,
+            paddingTop = 1f,
+            paddingBottom = 1f,
+            marginStart = 2f,
+            marginEnd = 2f,
+        )
+    ) {
+        PlaceholderSpan {
+            placeholderSize(12f, 12f)
+        }
+        Span {
+            text("#project")
+            fontSize(14f)
+            fontWeightBold()
+        }
+        Span {
+            text(" msg")
+            fontSize(10f)
+            color(Color(0x80000000))
+        }
+        semanticText("#project msg")
+        click {
+            // 整个 group 共用一个点击区域
+        }
+    }
+}
+```
+
+`semanticText` 用于为含占位符或布局辅助字符的 group 提供稳定的复制/无障碍文本。布局辅助字符不会作为 group 身份或业务语义。
+
 ## 事件
 
 支持[Text组件的所有事件](text.md#事件)
@@ -207,6 +250,46 @@ internal class TestPage : BasePager() {
 :::tip 版本说明
 `Span.longPress` 从 **2.23.0** 开始支持。
 :::
+
+### Span inline box decoration
+
+`TextSpan` supports a semantic-agnostic inline box decoration through
+`inlineBoxStyle`. The style participates in text measurement and keeps the
+original span click/long-press and copied text semantics.
+
+```kotlin
+Span {
+    text("linked message")
+    inlineBoxStyle(
+        InlineBoxSpanStyle(
+            backgroundColor = Color(0x33FFD440),
+            borderColor = Color.BLACK,
+            borderWidth = 1f,
+            paddingStart = 4f,
+            paddingEnd = 4f,
+            paddingTop = 2f,
+            paddingBottom = 2f,
+        )
+    )
+}
+```
+
+Compose DSL uses the same existing span carrier:
+
+```kotlin
+SpanStyle(
+    inlineBoxStyle = InlineBoxSpanStyle(
+        backgroundColor = Color.Yellow.copy(alpha = 0.2f),
+        borderColor = Color.Black,
+        borderWidth = 1.dp,
+        paddingStart = 4.dp,
+        paddingEnd = 4.dp,
+    )
+)
+```
+
+The decoration is presentation-only. Business meanings such as message,
+channel, task, or mention stay in the caller's annotation/action layer.
 
 `RichText` 中的 `Span` / `ImageSpan` 支持单独注册 `longPress` 事件。命中可长按的 span 时，会优先回调该 span 的 `longPress`；如果当前触点未命中任何注册了 `longPress` 的 span，则会回退到 `RichText.longPress`。
 

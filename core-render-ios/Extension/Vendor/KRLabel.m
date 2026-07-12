@@ -25,6 +25,8 @@
 NSString *const KRHighlightAttributeKey = @"KRHighlightAttributeKey";
 NSString *const KRBGAttributeKey = @"KRBGAttributeKey";
 NSString *const KRSlockChromeAttributeName = @"KRSlockChromeAttributeName";
+NSString *const KRInlineBoxStyleAttributeName = @"KRInlineBoxStyleAttributeName";
+NSString *const KRInlineBoxSemanticAttributeName = @"KRInlineBoxSemanticAttributeName";
 
 #pragma mark - Slock rich-text chip chrome (task #439)
 
@@ -70,7 +72,7 @@ static UIColor *KRSlockChromeFillColor(NSString *chrome) {
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
 }
 
-static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
+static NSString *KRRestoredAttachmentString(NSAttributedString *attributedString) {
     if (attributedString.length == 0) {
         return @"";
     }
@@ -95,6 +97,35 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
         [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, attributedString.length - cursor)]];
     }
     return result;
+}
+
+static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return @"";
+    }
+    NSMutableString *result = [NSMutableString string];
+    __block NSUInteger cursor = 0;
+    [attributedString enumerateAttribute:KRInlineBoxSemanticAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (![value isKindOfClass:[NSString class]]) {
+            return;
+        }
+        if (range.location > cursor) {
+            NSAttributedString *prefix = [attributedString attributedSubstringFromRange:NSMakeRange(cursor, range.location - cursor)];
+            [result appendString:KRRestoredAttachmentString(prefix)];
+        }
+        [result appendString:(NSString *)value];
+        cursor = NSMaxRange(range);
+    }];
+    if (cursor < attributedString.length) {
+        NSAttributedString *suffix = [attributedString attributedSubstringFromRange:NSMakeRange(cursor, attributedString.length - cursor)];
+        [result appendString:KRRestoredAttachmentString(suffix)];
+    }
+    NSString *restored = result.length > 0 ? result : KRRestoredAttachmentString(attributedString);
+    return [[restored stringByReplacingOccurrencesOfString:@"\u2060" withString:@""]
+        stringByReplacingOccurrencesOfString:@"\uFFFC" withString:@""];
 }
 
 
@@ -596,11 +627,81 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
 - (void)drawBackgroundForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
     _drawAtPoint = origin;
     [super drawBackgroundForGlyphRange:glyphsToShow atPoint:origin];
+    [self kr_drawInlineBoxChromeForGlyphRange:glyphsToShow atPoint:origin];
     // Slock chip chrome (task #439). Drawn in drawBackground (before glyphs) so the
     // fill sits behind the text; the border is inset from the glyphs by the leading/
     // trailing NBSP padding reserved on the shared side, so it never overlaps glyphs.
     [self kr_drawSlockChipChromeForGlyphRange:glyphsToShow atPoint:origin];
     _drawAtPoint = CGPointZero;
+}
+
+- (void)kr_drawInlineBoxChromeForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
+    NSTextStorage *textStorage = self.textStorage;
+    NSTextContainer *container = self.textContainers.firstObject;
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (textStorage.length == 0 || !container || !ctx) {
+        return;
+    }
+    NSRange charRange = [self characterRangeForGlyphRange:glyphsToShow actualGlyphRange:NULL];
+    [textStorage enumerateAttribute:KRInlineBoxStyleAttributeName
+                            inRange:charRange
+                            options:0
+                         usingBlock:^(id value, NSRange runRange, BOOL *stop) {
+        if (![value isKindOfClass:[NSDictionary class]]) return;
+        NSDictionary *style = (NSDictionary *)value;
+        NSRange runGlyphRange = [self glyphRangeForCharacterRange:runRange actualCharacterRange:NULL];
+        if (runGlyphRange.length == 0) return;
+        [self enumerateLineFragmentsForGlyphRange:runGlyphRange
+                                       usingBlock:^(CGRect lineRect, CGRect usedRect, NSTextContainer *lineContainer, NSRange lineGlyphRange, BOOL *lineStop) {
+            NSRange segment = NSIntersectionRange(lineGlyphRange, runGlyphRange);
+            if (segment.length == 0) return;
+            CGRect bounds = [self boundingRectForGlyphRange:segment inTextContainer:lineContainer];
+            CGFloat borderWidth = [style[@"borderWidth"] doubleValue];
+            CGFloat paddingTop = [style[@"paddingTop"] doubleValue];
+            CGFloat paddingBottom = [style[@"paddingBottom"] doubleValue];
+            // The edge attachments already reserve margin in TextKit's layout
+            // advance. Keep that advance inside the painted group fragment;
+            // trimming it here leaves transparent white notches immediately
+            // before and after an otherwise continuous bordered inline box.
+            CGFloat left = CGRectGetMinX(bounds) + origin.x;
+            CGFloat right = CGRectGetMaxX(bounds) + origin.x;
+            if (right <= left) return;
+            CGFloat boxHeight = [style[@"boxHeight"] doubleValue];
+            if (boxHeight <= 0) {
+                boxHeight = CGRectGetHeight(bounds) + paddingTop + paddingBottom + borderWidth * 2.0;
+            }
+            CGFloat centerY = CGRectGetMidY(bounds) + origin.y;
+            CGFloat top = centerY - boxHeight / 2.0;
+            CGFloat bottom = centerY + boxHeight / 2.0;
+            CGRect rect = CGRectMake(left, top, right - left, bottom - top);
+            UIColor *fill = style[@"backgroundColor"];
+            UIColor *border = style[@"borderColor"];
+            CGFloat radius = [style[@"cornerRadius"] doubleValue];
+            if ([fill isKindOfClass:[UIColor class]]) {
+                CGContextSetFillColorWithColor(ctx, fill.CGColor);
+                UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:radius];
+                [path fill];
+            }
+            if ([border isKindOfClass:[UIColor class]] && borderWidth > 0) {
+                CGContextSetStrokeColorWithColor(ctx, border.CGColor);
+                CGContextSetLineWidth(ctx, borderWidth);
+                CGRect strokeRect = CGRectInset(rect, borderWidth / 2.0, borderWidth / 2.0);
+                // TextKit clips background drawing to the current line fragment.
+                // When a whole group is pushed onto the next visual line, the
+                // nominal bottom edge can land exactly on that clip boundary and
+                // disappear. Keep the stroke center inside the drawable fragment;
+                // layout metrics and the fill rect remain unchanged.
+                CGFloat fragmentTop = CGRectGetMinY(lineRect) + origin.y;
+                CGFloat fragmentBottom = CGRectGetMaxY(lineRect) + origin.y;
+                CGFloat strokeTop = MAX(CGRectGetMinY(strokeRect), fragmentTop + borderWidth / 2.0);
+                CGFloat strokeBottom = MIN(CGRectGetMaxY(strokeRect), fragmentBottom - borderWidth / 2.0);
+                strokeRect.origin.y = strokeTop;
+                strokeRect.size.height = MAX(0, strokeBottom - strokeTop);
+                UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:strokeRect cornerRadius:MAX(0, radius - borderWidth / 2.0)];
+                [path stroke];
+            }
+        }];
+    }];
 }
 
 // TEMPORARY BRIDGE TO TASK #442 — ports core-render-android KRRichTextViewDrawer.kt

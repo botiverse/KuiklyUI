@@ -26,6 +26,7 @@
 #include <native_drawing/drawing_pixel_map.h>
 #include <native_drawing/drawing_point.h>
 #include <native_drawing/drawing_rect.h>
+#include <native_drawing/drawing_round_rect.h>
 #include <native_drawing/drawing_sampling_options.h>
 #include <native_drawing/drawing_shader_effect.h>
 #include "libohos_render/expand/components/base/KRCustomUserCallback.h"
@@ -35,6 +36,7 @@
 #include "libohos_render/foundation/thread/KRMainThread.h"
 #include "libohos_render/foundation/KRPoint.h"
 #include "libohos_render/export/IKRRenderViewExport.h"
+#include "libohos_render/utils/KRViewUtil.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,10 +59,6 @@ extern size_t OH_Drawing_GetEndFromRange(OH_Drawing_Range* range) __attribute__(
 
 namespace {
 
-constexpr float kSlockChipInnerPaddingRatio = 4.0f / 15.0f;
-constexpr float kSlockChipLineHeightRatio = 1.5f;
-constexpr float kSlockChipBorderWidthVp = 1.0f;
-
 struct KRSlockChromeFragment {
     float left = 0;
     float top = 0;
@@ -74,6 +72,18 @@ void KRDrawBrushRect(OH_Drawing_Canvas *canvas, float left, float top, float rig
     }
     OH_Drawing_Rect *rect = OH_Drawing_RectCreate(left, top, right, bottom);
     OH_Drawing_CanvasDrawRect(canvas, rect);
+    OH_Drawing_RectDestroy(rect);
+}
+
+void KRDrawBrushRoundRect(OH_Drawing_Canvas *canvas, float left, float top, float right, float bottom,
+                          float radius) {
+    if (!canvas || right <= left || bottom <= top) {
+        return;
+    }
+    OH_Drawing_Rect *rect = OH_Drawing_RectCreate(left, top, right, bottom);
+    OH_Drawing_RoundRect *roundRect = OH_Drawing_RoundRectCreate(rect, radius, radius);
+    OH_Drawing_CanvasDrawRoundRect(canvas, roundRect);
+    OH_Drawing_RoundRectDestroy(roundRect);
     OH_Drawing_RectDestroy(rect);
 }
 
@@ -119,7 +129,6 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
     if (!canvas || !typography || runs.empty()) {
         return;
     }
-    const float density = KRConfig::GetDpi();
     OH_Drawing_Brush *brush = OH_Drawing_BrushCreate();
     OH_Drawing_BrushSetAntiAlias(brush, drawFill);
 
@@ -131,22 +140,32 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
         // Native Drawing captures the brush state when it is attached to the
         // canvas. Set the per-run color first; mutating an already attached
         // brush leaves some HarmonyOS versions drawing the default black.
-        OH_Drawing_BrushSetColor(brush, drawFill ? run.fill_color : 0xFF000000);
+        OH_Drawing_BrushSetColor(brush, drawFill ? run.fill_color : run.border_color);
         OH_Drawing_CanvasAttachBrush(canvas, brush);
-        const float innerPadding = run.font_size_px * kSlockChipInnerPaddingRatio;
-        const float chipHeight = run.font_size_px * kSlockChipLineHeightRatio;
-        const float borderWidth = std::max(1.0f, density * kSlockChipBorderWidthVp);
+        const float chipHeight = run.box_height_px;
+        const float borderWidth = run.border_width_px;
         for (size_t i = 0; i < fragments.size(); ++i) {
             const auto &fragment = fragments[i];
             const bool isSpanStart = i == 0;
             const bool isSpanEnd = i + 1 == fragments.size();
-            const float left = fragment.left - (isSpanStart ? innerPadding : 0.0f);
-            const float right = fragment.right + (isSpanEnd ? innerPadding : 0.0f);
+            const float left = run.includes_reserved_edges
+                ? fragment.left + (isSpanStart ? run.margin_start_px : 0.0f)
+                : fragment.left - (isSpanStart ? run.padding_start_px + borderWidth : 0.0f);
+            const float right = run.includes_reserved_edges
+                ? fragment.right - (isSpanEnd ? run.margin_end_px : 0.0f)
+                : fragment.right + (isSpanEnd ? run.padding_end_px + borderWidth : 0.0f);
             const float centerY = (fragment.top + fragment.bottom) / 2.0f - drawOffsetY;
             const float top = centerY - chipHeight / 2.0f;
             const float bottom = centerY + chipHeight / 2.0f;
-            if (drawFill) {
-                KRDrawBrushRect(canvas, left, top, right, bottom);
+            if (drawFill && run.fill_color != 0) {
+                if (run.corner_radius_px > 0) {
+                    KRDrawBrushRoundRect(canvas, left, top, right, bottom, run.corner_radius_px);
+                } else {
+                    KRDrawBrushRect(canvas, left, top, right, bottom);
+                }
+                continue;
+            }
+            if (drawFill || borderWidth <= 0 || run.border_color == 0) {
                 continue;
             }
 
@@ -227,6 +246,9 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
     shadow_ = shadow;
 
     auto textShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow);
+    if (textShadow && !has_explicit_accessibility_) {
+        kuikly::util::UpdateNodeAccessibility(GetNode(), textShadow->GetSemanticTextContent());
+    }
     // 决策 6C：image span（由 PostProcessor("richtext") 拆段产生）只在 V1（老 typography）
     // OnForegroundDraw 路径下能被绘制——因为 V2 的 StyledString 是交给 ArkUI 节点直接
     // 渲染，SDK 当前没暴露插入图片绘制 hook 的入口。这个判定已收敛到
@@ -286,6 +308,7 @@ void KRRichTextView::DidRemoveFromParentView() {
     shadow_ = nullptr;
     paragraph_ = nullptr;
     use_styled_string_ = false;
+    has_explicit_accessibility_ = false;
     last_draw_frame_width_ = -1.0;
 }
 
@@ -507,6 +530,14 @@ void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &pr
         IKRRenderViewExport::ToSetProp(prop_key, prop_value, middleManCallback);
     } else if(prop_key == kPropNameLineBreakMargin) {
         line_break_margin_ = prop_value->toFloat();
+    } else if (prop_key == "accessibility") {
+        has_explicit_accessibility_ = !prop_value->toString().empty();
+        IKRRenderViewExport::ToSetProp(prop_key, prop_value, event_callback);
+        if (!has_explicit_accessibility_) {
+            if (auto richTextShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow_)) {
+                kuikly::util::UpdateNodeAccessibility(GetNode(), richTextShadow->GetSemanticTextContent());
+            }
+        }
     }else {
         IKRRenderViewExport::ToSetProp(prop_key, prop_value, event_callback);
     }

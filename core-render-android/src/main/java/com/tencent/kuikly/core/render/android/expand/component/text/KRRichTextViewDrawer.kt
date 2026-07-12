@@ -89,6 +89,13 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         isAntiAlias = false
     }
     private val slockMarkdownTagRect = RectF()
+    private val inlineBoxFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val inlineBoxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
+    private val inlineBoxRect = RectF()
 
     private val wordIterator by lazy(LazyThreadSafetyMode.NONE) {
         WordIterator(textLayout.text, 0, textLayout.text.length, Locale.getDefault())
@@ -112,11 +119,87 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
      * 将文本内容绘制到 [canvas]，对接到 [Layout.draw]。
      */
     fun draw(canvas: Canvas) {
+        drawInlineBoxChrome(canvas, drawFill = true, drawBorder = false)
         drawSlockInlineCodeChrome(canvas, drawFill = true, drawBorder = false)
         drawSlockMarkdownTagChrome(canvas, drawFill = true, drawBorder = false)
         textLayout.draw(canvas)
         drawSlockInlineCodeChrome(canvas, drawFill = false, drawBorder = true)
         drawSlockMarkdownTagChrome(canvas, drawFill = false, drawBorder = true)
+        drawInlineBoxChrome(canvas, drawFill = false, drawBorder = true)
+    }
+
+    private fun drawInlineBoxChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRInlineBoxSpan::class.java)
+        if (spans.isEmpty()) return
+
+        val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
+        val metrics = textLayout.paint.fontMetrics
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+            val style = span.style
+            val startLine = textLayout.getLineForOffset((start + 1).coerceAtMost(end - 1))
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val lineStart = textLayout.getLineStart(line)
+                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
+                val segmentStart = max(start, lineStart)
+                val segmentEnd = min(end, lineVisibleEnd)
+                if (segmentEnd <= segmentStart) continue
+                val startX = max(
+                    textLayout.getPrimaryHorizontal(segmentStart),
+                    textLayout.getSecondaryHorizontal(segmentStart),
+                )
+                // At a run boundary Android's primary caret may use downstream
+                // affinity and jump across the following span. The upstream
+                // caret is the actual visual end of this inline group.
+                val endX = min(
+                    textLayout.getPrimaryHorizontal(segmentEnd),
+                    textLayout.getSecondaryHorizontal(segmentEnd),
+                )
+                val segmentLeft = min(startX, endX)
+                val segmentRight = max(startX, endX)
+                val left = (
+                    segmentLeft + if (segmentStart == start) style.marginStart else 0f
+                    )
+                    .coerceAtLeast(layoutLeft)
+                val right = (
+                    segmentRight - if (segmentEnd == end) style.marginEnd else 0f
+                    )
+                    .coerceAtMost(layoutRight)
+                if (right <= left) continue
+
+                val baseline = textLayout.getLineBaseline(line).toFloat()
+                val top = baseline + metrics.ascent - style.paddingTop - style.borderWidth
+                val bottom = baseline + metrics.descent + style.paddingBottom + style.borderWidth
+                if (bottom <= top) continue
+                inlineBoxRect.set(left, top, right, bottom)
+                if (drawFill && style.backgroundColor != null) {
+                    inlineBoxFillPaint.color = style.backgroundColor
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        style.cornerRadius,
+                        style.cornerRadius,
+                        inlineBoxFillPaint
+                    )
+                }
+                if (drawBorder && style.borderColor != null && style.borderWidth > 0f) {
+                    inlineBoxBorderPaint.color = style.borderColor
+                    inlineBoxBorderPaint.strokeWidth = style.borderWidth
+                    val inset = style.borderWidth / 2f
+                    inlineBoxRect.inset(inset, inset)
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        max(0f, style.cornerRadius - inset),
+                        max(0f, style.cornerRadius - inset),
+                        inlineBoxBorderPaint
+                    )
+                }
+            }
+        }
     }
 
     private fun drawSlockMarkdownTagChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
@@ -454,7 +537,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     internal fun getSelectionText(): String? {
         return if (hasSelection) {
-            textLayout.text.substring(selectionStart, selectionEnd)
+            textLayout.text.inlineBoxSemanticSubstring(selectionStart, selectionEnd)
         } else {
             null
         }
@@ -462,7 +545,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     internal fun getPreSelectionText(): String? {
         return if (hasSelection && selectionStart > 0) {
-            textLayout.text.substring(0, selectionStart)
+            textLayout.text.inlineBoxSemanticSubstring(0, selectionStart)
         } else {
             null
         }
@@ -471,7 +554,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     internal fun getPostSelectionText(): String? {
         val length = textLayout.text.length
         return if (hasSelection && selectionEnd < length) {
-            textLayout.text.substring(selectionEnd, length)
+            textLayout.text.inlineBoxSemanticSubstring(selectionEnd, length)
         } else {
             null
         }
@@ -722,4 +805,37 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     }
 
+}
+
+private fun String.withoutInlineBoxLayoutCharacters(): String =
+    replace("\uFFFC", "").replace(INLINE_BOX_LAYOUT_JOINER.toString(), "")
+
+private fun CharSequence.inlineBoxSemanticSubstring(start: Int, end: Int): String {
+    if (start >= end) return ""
+    val spanned = this as? Spanned
+        ?: return substring(start, end).withoutInlineBoxLayoutCharacters()
+    val semanticSpans = spanned.getSpans(start, end, KRInlineBoxSemanticSpan::class.java)
+    if (semanticSpans.isEmpty()) return substring(start, end).withoutInlineBoxLayoutCharacters()
+
+    val result = StringBuilder()
+    var cursor = start
+    semanticSpans.sortedBy(spanned::getSpanStart).forEach { span ->
+        val spanStart = spanned.getSpanStart(span)
+        val spanEnd = spanned.getSpanEnd(span)
+        if (spanStart > cursor) {
+            result.append(substring(cursor, min(spanStart, end)).withoutInlineBoxLayoutCharacters())
+        }
+        val overlapStart = max(cursor, spanStart)
+        val overlapEnd = min(end, spanEnd)
+        if (overlapEnd > overlapStart) {
+            if (overlapStart == spanStart && overlapEnd == spanEnd && span.text.isNotEmpty()) {
+                result.append(span.text)
+            } else {
+                result.append(substring(overlapStart, overlapEnd).withoutInlineBoxLayoutCharacters())
+            }
+            cursor = overlapEnd
+        }
+    }
+    if (cursor < end) result.append(substring(cursor, end).withoutInlineBoxLayoutCharacters())
+    return result.toString()
 }

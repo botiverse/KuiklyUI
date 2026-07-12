@@ -71,11 +71,39 @@ namespace {
 
 constexpr char16_t kSlockNonBreakingSpace = u'\u00A0';
 constexpr char16_t kSlockZeroWidthBreak = u'\u200B';
+constexpr char16_t kInlineBoxWordJoiner = u'\u2060';
 constexpr char16_t kObjectReplacementCharacter = u'\uFFFC';
 constexpr float kSlockInnerPaddingRatio = 4.0f / 15.0f;
 constexpr float kSlockOuterMarginRatio = 2.0f / 15.0f;
+constexpr float kSlockChipBorderWidthVp = 1.0f;
 constexpr float kSlockTrailingMarginRatio = 1.0f / 15.0f;
 constexpr float kSlockChipLineHeightRatio = 1.5f;
+
+constexpr char kInlineBoxGroupIndexKey[] = "__kr_inline_box_group_index__";
+constexpr char kTopLevelSpanIndexKey[] = "__kr_top_level_span_index__";
+constexpr char kInlineBoxChildIndexKey[] = "__kr_inline_box_child_index__";
+constexpr char kInlineBoxPartKey[] = "__kr_inline_box_part__";
+constexpr char kInlineBoxPartLeading[] = "leading";
+constexpr char kInlineBoxPartGlue[] = "glue";
+constexpr char kInlineBoxPartChild[] = "child";
+constexpr char kInlineBoxPartTrailing[] = "trailing";
+
+struct KRInlineBoxGroupPlan {
+    int span_index = -1;
+    int layout_start = -1;
+    int layout_end = -1;
+    int semantic_start = -1;
+    std::u16string semantic_text;
+    uint32_t fill_color = 0;
+    uint32_t border_color = 0;
+    float border_width_px = 0;
+    float padding_start_px = 0;
+    float padding_end_px = 0;
+    float margin_start_px = 0;
+    float margin_end_px = 0;
+    float box_height_px = 0;
+    float corner_radius_px = 0;
+};
 
 std::u16string KRUtf8ToUtf16(const std::string &text) {
     std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> converter;
@@ -183,7 +211,7 @@ void KRRichTextShadow::SetProp(const std::string &prop_key, const KRAnyValue &pr
  */
 KRAnyValue KRRichTextShadow::Call(const std::string &method_name, const std::string &params) {
     if (kuikly::util::isEqual(method_name, "spanRect")) {  // 调用获取placeholder span位置方法
-        return SpanRect(NewKRRenderValue(params)->toInt());
+        return SpanRect(params);
     } else if(method_name == "isLineBreakMargin"){
         return NewKRRenderValue(did_exceed_max_lines_ && OH_Drawing_DestroyTextLines? "1" : "0");
     }
@@ -525,6 +553,124 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         }
     }
 
+    // Preserve an explicit RichText inline-box group as native text runs. The
+    // group contributes only fixed edge placeholders and layout-only word
+    // joiners; child text remains ordinary typography text and is therefore
+    // measured and wrapped by OH_Drawing itself.
+    std::vector<KRInlineBoxGroupPlan> inline_box_group_plans;
+    {
+        KRRenderValue::Array flattened;
+        const double group_dpi = KRConfig::GetDpi();
+        int top_level_index = 0;
+        auto erase_box_style = [](KRRenderValue::Map &map) {
+            map.erase("inlineBoxBackgroundColor");
+            map.erase("inlineBoxBorderColor");
+            map.erase("inlineBoxBorderWidth");
+            map.erase("inlineBoxPaddingStart");
+            map.erase("inlineBoxPaddingEnd");
+            map.erase("inlineBoxPaddingTop");
+            map.erase("inlineBoxPaddingBottom");
+            map.erase("inlineBoxMarginStart");
+            map.erase("inlineBoxMarginEnd");
+            map.erase("inlineBoxCornerRadius");
+            map.erase("inlineBoxChildren");
+            map.erase("inlineBoxSemanticText");
+        };
+        for (const auto &span : spans) {
+            auto group_map = span->toMap();
+            auto children = GetKRValue("inlineBoxChildren", group_map, group_map)->toArray();
+            if (children.empty()) {
+                group_map[kTopLevelSpanIndexKey] = NewKRRenderValue(top_level_index++);
+                flattened.push_back(KRRenderValue::Make(group_map));
+                continue;
+            }
+
+            const float border_vp = GetKRValue("inlineBoxBorderWidth", group_map, group_map)->toFloat();
+            const float padding_start_vp = GetKRValue("inlineBoxPaddingStart", group_map, group_map)->toFloat();
+            const float padding_end_vp = GetKRValue("inlineBoxPaddingEnd", group_map, group_map)->toFloat();
+            const float padding_top_vp = GetKRValue("inlineBoxPaddingTop", group_map, group_map)->toFloat();
+            const float padding_bottom_vp = GetKRValue("inlineBoxPaddingBottom", group_map, group_map)->toFloat();
+            const float margin_start_vp = GetKRValue("inlineBoxMarginStart", group_map, group_map)->toFloat();
+            const float margin_end_vp = GetKRValue("inlineBoxMarginEnd", group_map, group_map)->toFloat();
+            float content_height_vp = GetKRValue("fontSize", group_map, props_)->toFloat();
+            if (content_height_vp <= 0) content_height_vp = 15.0f;
+            for (const auto &child : children) {
+                const auto child_map = child->toMap();
+                const float child_font = GetKRValue("fontSize", child_map, props_)->toFloat();
+                const float child_placeholder = GetKRValue("placeholderHeight", child_map, child_map)->toFloat();
+                content_height_vp = std::max(content_height_vp, std::max(child_font, child_placeholder));
+            }
+            const float box_height_vp = content_height_vp + padding_top_vp + padding_bottom_vp + border_vp * 2.0f;
+
+            KRInlineBoxGroupPlan plan;
+            plan.span_index = top_level_index;
+            plan.semantic_text = KRUtf8ToUtf16(
+                GetKRValue("inlineBoxSemanticText", group_map, group_map)->toString());
+            const std::string fill = GetKRValue("inlineBoxBackgroundColor", group_map, group_map)->toString();
+            const std::string border = GetKRValue("inlineBoxBorderColor", group_map, group_map)->toString();
+            plan.fill_color = fill.empty() ? 0 : kuikly::util::ConvertToHexColor(fill);
+            plan.border_color = border.empty() ? 0 : kuikly::util::ConvertToHexColor(border);
+            plan.border_width_px = border_vp * group_dpi;
+            plan.padding_start_px = padding_start_vp * group_dpi;
+            plan.padding_end_px = padding_end_vp * group_dpi;
+            plan.margin_start_px = margin_start_vp * group_dpi;
+            plan.margin_end_px = margin_end_vp * group_dpi;
+            plan.box_height_px = box_height_vp * group_dpi;
+            plan.corner_radius_px =
+                GetKRValue("inlineBoxCornerRadius", group_map, group_map)->toFloat() * group_dpi;
+            inline_box_group_plans.push_back(plan);
+
+            auto make_part = [&](const char *part) {
+                auto map = group_map;
+                erase_box_style(map);
+                map[kTopLevelSpanIndexKey] = NewKRRenderValue(top_level_index);
+                map[kInlineBoxGroupIndexKey] = NewKRRenderValue(top_level_index);
+                map[kInlineBoxPartKey] = NewKRRenderValue(std::string(part));
+                return map;
+            };
+
+            auto leading = make_part(kInlineBoxPartLeading);
+            leading["value"] = NewKRRenderValue(std::string(""));
+            leading["text"] = NewKRRenderValue(std::string(""));
+            leading["placeholderWidth"] = NewKRRenderValue(
+                static_cast<double>(margin_start_vp + border_vp + padding_start_vp));
+            leading["placeholderHeight"] = NewKRRenderValue(static_cast<double>(box_height_vp));
+            flattened.push_back(KRRenderValue::Make(leading));
+
+            int child_index = 0;
+            for (const auto &child : children) {
+                auto glue = make_part(kInlineBoxPartGlue);
+                glue["value"] = NewKRRenderValue(KRUtf16ToUtf8(std::u16string(1, kInlineBoxWordJoiner)));
+                glue["text"] = glue["value"];
+                flattened.push_back(KRRenderValue::Make(glue));
+
+                auto child_map = child->toMap();
+                erase_box_style(child_map);
+                child_map[kTopLevelSpanIndexKey] = NewKRRenderValue(top_level_index);
+                child_map[kInlineBoxGroupIndexKey] = NewKRRenderValue(top_level_index);
+                child_map[kInlineBoxChildIndexKey] = NewKRRenderValue(child_index++);
+                child_map[kInlineBoxPartKey] = NewKRRenderValue(std::string(kInlineBoxPartChild));
+                flattened.push_back(KRRenderValue::Make(child_map));
+            }
+
+            auto trailing_glue = make_part(kInlineBoxPartGlue);
+            trailing_glue["value"] = NewKRRenderValue(KRUtf16ToUtf8(std::u16string(1, kInlineBoxWordJoiner)));
+            trailing_glue["text"] = trailing_glue["value"];
+            flattened.push_back(KRRenderValue::Make(trailing_glue));
+
+            auto trailing = make_part(kInlineBoxPartTrailing);
+            trailing["value"] = NewKRRenderValue(std::string(""));
+            trailing["text"] = NewKRRenderValue(std::string(""));
+            trailing["placeholderWidth"] = NewKRRenderValue(
+                static_cast<double>(padding_end_vp + border_vp + margin_end_vp));
+            trailing["placeholderHeight"] = NewKRRenderValue(static_cast<double>(box_height_vp));
+            flattened.push_back(KRRenderValue::Make(trailing));
+
+            ++top_level_index;
+        }
+        spans = std::move(flattened);
+    }
+
     auto numberOfLines = GetKRValue("numberOfLines", props_, props_)->toInt();
     const std::string lineBreakModeStr = GetKRValue("lineBreakMode", props_, props_)->toString();
     auto lineBreakMode = kuikly::util::ConvertToTextBreakMode(lineBreakModeStr);
@@ -536,7 +682,6 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
     OH_Drawing_TypographyStyle *typoStyle = nullptr;
     OH_Drawing_TypographyCreate *handler = nullptr;
     bool isFirst = true;
-    int spanIndex = 0;
     int placeholder_count = 0;
     OH_Drawing_TextAlign text_align = TEXT_ALIGN_LEFT;
     int charOffset = 0;
@@ -565,6 +710,26 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
     };
     for (auto span : spans) {
         auto spanMap = span->toMap();
+        const int spanIndex = GetKRValue(kTopLevelSpanIndexKey, spanMap, spanMap)->toInt();
+        const int inlineBoxGroupIndex = GetKRValue(kInlineBoxGroupIndexKey, spanMap, spanMap)->toInt();
+        const int inlineBoxChildIndex = GetKRValue(kInlineBoxChildIndexKey, spanMap, spanMap)->toInt();
+        const std::string inlineBoxPart = GetKRValue(kInlineBoxPartKey, spanMap, spanMap)->toString();
+        const bool isInlineBoxGroupPart = !inlineBoxPart.empty();
+        KRInlineBoxGroupPlan *inlineBoxGroupPlan = nullptr;
+        if (isInlineBoxGroupPart) {
+            auto plan_it = std::find_if(
+                inline_box_group_plans.begin(), inline_box_group_plans.end(),
+                [inlineBoxGroupIndex](const KRInlineBoxGroupPlan &plan) {
+                    return plan.span_index == inlineBoxGroupIndex;
+                });
+            if (plan_it != inline_box_group_plans.end()) {
+                inlineBoxGroupPlan = &(*plan_it);
+                if (inlineBoxPart == kInlineBoxPartLeading && inlineBoxGroupPlan->layout_start < 0) {
+                    inlineBoxGroupPlan->layout_start = charOffset;
+                    inlineBoxGroupPlan->semantic_start = static_cast<int>(semantic_text_content.size());
+                }
+            }
+        }
         auto fontSize = (GetKRValue("fontSize", spanMap, props_)->toFloat() ?: 15.0) * dpi * fontSizeScale;
         auto text = GetKRValue("value", spanMap, spanMap)->toString();
         if (text.length() == 0) {
@@ -604,7 +769,33 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         const std::string slockChromeKind = slockInlineCode ? "inlineCode" : slockTagChrome;
         const uint32_t slockFillColor = KRSlockChromeFillColor(slockChromeKind);
         const bool isSlockChip = slockFillColor != 0;
-        if (isSlockChip) {
+        const std::string inlineBoxBackgroundColorStr =
+            GetKRValue("inlineBoxBackgroundColor", spanMap, spanMap)->toString();
+        const std::string inlineBoxBorderColorStr =
+            GetKRValue("inlineBoxBorderColor", spanMap, spanMap)->toString();
+        const float inlineBoxBorderWidth =
+            GetKRValue("inlineBoxBorderWidth", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingStart =
+            GetKRValue("inlineBoxPaddingStart", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingEnd =
+            GetKRValue("inlineBoxPaddingEnd", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingTop =
+            GetKRValue("inlineBoxPaddingTop", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxPaddingBottom =
+            GetKRValue("inlineBoxPaddingBottom", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxMarginStart =
+            GetKRValue("inlineBoxMarginStart", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxMarginEnd =
+            GetKRValue("inlineBoxMarginEnd", spanMap, spanMap)->toFloat() * dpi;
+        const float inlineBoxCornerRadius =
+            GetKRValue("inlineBoxCornerRadius", spanMap, spanMap)->toFloat() * dpi;
+        const bool isInlineBox = !isInlineBoxGroupPart && (inlineBoxBackgroundColorStr.length() ||
+            inlineBoxBorderColorStr.length() || inlineBoxBorderWidth > 0 ||
+            inlineBoxPaddingStart > 0 || inlineBoxPaddingEnd > 0 ||
+            inlineBoxPaddingTop > 0 || inlineBoxPaddingBottom > 0 ||
+            inlineBoxMarginStart > 0 || inlineBoxMarginEnd > 0 || inlineBoxCornerRadius > 0);
+        const bool hasBoxChrome = isSlockChip || isInlineBox;
+        if (hasBoxChrome) {
             textDecoration = TEXT_DECORATION_NONE;
         }
         
@@ -616,7 +807,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         OH_Drawing_Brush *textBackgroundBrush = nullptr;
         // 设置文字大小、字重等属性设置到文本样式对象中
         OH_Drawing_SetTextStyleColor(txtStyle, color);
-        if (!isSlockChip && backgroundColorStr.length() && backgroundColor != 0x00000000) {
+        if (!hasBoxChrome && backgroundColorStr.length() && backgroundColor != 0x00000000) {
             textBackgroundBrush = OH_Drawing_BrushCreate();
             OH_Drawing_BrushSetColor(textBackgroundBrush, backgroundColor);
             OH_Drawing_SetTextStyleBackgroundBrush(txtStyle, textBackgroundBrush);
@@ -776,7 +967,12 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
                 TEXT_BASELINE_ALPHABETIC,    0,
             };
             OH_Drawing_TypographyHandlerAddPlaceholder(handler, &inlineView);
-            placeholder_index_map_[spanIndex] = placeholder_count;
+            if (!isInlineBoxGroupPart) {
+                placeholder_index_map_[std::to_string(spanIndex)] = placeholder_count;
+            } else if (inlineBoxPart == kInlineBoxPartChild) {
+                placeholder_index_map_[std::to_string(spanIndex) + " " + std::to_string(inlineBoxChildIndex)] =
+                    placeholder_count;
+            }
             // 仅当此 placeholder 是由 PostProcessor("richtext") 展开产生的内置 image span
             // 时，登记到 image_draw_records_ 以便 view 层在 OnForegroundDraw 中绘制图片。
             // 业务自己声明的 ImageSpan（无 kInternalImageSrcKey 字段）继续走"父节点 ImageView"
@@ -792,7 +988,29 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             }
             placeholder_count++;
             charOffset += 1;
-            append_placeholder_mapping({});
+            if (inlineBoxPart == kInlineBoxPartTrailing && inlineBoxGroupPlan) {
+                append_placeholder_mapping(inlineBoxGroupPlan->semantic_text);
+                inlineBoxGroupPlan->layout_end = charOffset;
+                span_offsets_.emplace_back(
+                    std::tuple(spanIndex, inlineBoxGroupPlan->layout_start, inlineBoxGroupPlan->layout_end));
+                context_thread_slock_chrome_runs_.push_back(
+                    KRSlockChromeRun{
+                        inlineBoxGroupPlan->layout_start,
+                        inlineBoxGroupPlan->layout_end,
+                        inlineBoxGroupPlan->fill_color,
+                        inlineBoxGroupPlan->border_color,
+                        inlineBoxGroupPlan->border_width_px,
+                        inlineBoxGroupPlan->padding_start_px,
+                        inlineBoxGroupPlan->padding_end_px,
+                        inlineBoxGroupPlan->margin_start_px,
+                        inlineBoxGroupPlan->margin_end_px,
+                        inlineBoxGroupPlan->box_height_px,
+                        inlineBoxGroupPlan->corner_radius_px,
+                        true,
+                    });
+            } else {
+                append_placeholder_mapping({});
+            }
         } else if (slockInlineCodeTrailingMargin) {
             // Android's KRSlockInlineCodeTrailingMarginSpan contract: the source
             // space remains semantic text, while layout uses a 1/15 transparent
@@ -810,18 +1028,41 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             charOffset += 1;
             append_placeholder_mapping(KRUtf8ToUtf16(text));
             span_offsets_.emplace_back(std::tuple(spanIndex, spanStart, charOffset));
-        } else if (isSlockChip) {
-            const float edgeAdvance =
-                fontSize * (kSlockInnerPaddingRatio + kSlockOuterMarginRatio);
-            OH_Drawing_PlaceholderSpan edgePlaceholder = {
-                edgeAdvance,
-                fontSize * kSlockChipLineHeightRatio,
+        } else if (hasBoxChrome) {
+            const float borderWidth = isInlineBox
+                ? inlineBoxBorderWidth
+                : std::max(1.0f, static_cast<float>(dpi) * kSlockChipBorderWidthVp);
+            const float paddingStart = isInlineBox
+                ? inlineBoxPaddingStart
+                : fontSize * kSlockInnerPaddingRatio;
+            const float paddingEnd = isInlineBox
+                ? inlineBoxPaddingEnd
+                : fontSize * kSlockInnerPaddingRatio;
+            const float marginStart = isInlineBox
+                ? inlineBoxMarginStart
+                : fontSize * kSlockOuterMarginRatio;
+            const float marginEnd = isInlineBox
+                ? inlineBoxMarginEnd
+                : fontSize * kSlockOuterMarginRatio;
+            const float boxHeight = isInlineBox
+                ? fontSize + inlineBoxPaddingTop + inlineBoxPaddingBottom + borderWidth * 2.0f
+                : fontSize * kSlockChipLineHeightRatio;
+            OH_Drawing_PlaceholderSpan leadingEdgePlaceholder = {
+                marginStart + borderWidth + paddingStart,
+                boxHeight,
+                ALIGNMENT_CENTER_OF_ROW_BOX,
+                TEXT_BASELINE_ALPHABETIC,
+                0,
+            };
+            OH_Drawing_PlaceholderSpan trailingEdgePlaceholder = {
+                paddingEnd + borderWidth + marginEnd,
+                boxHeight,
                 ALIGNMENT_CENTER_OF_ROW_BOX,
                 TEXT_BASELINE_ALPHABETIC,
                 0,
             };
             const int spanStart = charOffset;
-            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &edgePlaceholder);
+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &leadingEdgePlaceholder);
             placeholder_count++;
             charOffset += 1;
             append_placeholder_mapping({});
@@ -847,10 +1088,31 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             const int chromeEnd = charOffset;
             if (chromeEnd > chromeStart) {
                 context_thread_slock_chrome_runs_.push_back(
-                    KRSlockChromeRun{chromeStart, chromeEnd, slockFillColor, static_cast<float>(fontSize)});
+                    KRSlockChromeRun{
+                        chromeStart,
+                        chromeEnd,
+                        isInlineBox
+                            ? (inlineBoxBackgroundColorStr.length()
+                                ? kuikly::util::ConvertToHexColor(inlineBoxBackgroundColorStr)
+                                : 0)
+                            : slockFillColor,
+                        isInlineBox
+                            ? (inlineBoxBorderColorStr.length()
+                                ? kuikly::util::ConvertToHexColor(inlineBoxBorderColorStr)
+                                : 0)
+                            : 0xFF000000,
+                        borderWidth,
+                        paddingStart,
+                        paddingEnd,
+                        marginStart,
+                        marginEnd,
+                        boxHeight,
+                        inlineBoxCornerRadius,
+                        false,
+                    });
             }
 
-            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &edgePlaceholder);
+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &trailingEdgePlaceholder);
             placeholder_count++;
             charOffset += 1;
             append_placeholder_mapping({});
@@ -859,9 +1121,15 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             OH_Drawing_TypographyHandlerAddText(handler, text.c_str());  // 添加文本
             const std::u16string text16 = KRUtf8ToUtf16(text);
             const int codePointCount = static_cast<int>(text16.size());
-            span_offsets_.emplace_back(std::tuple(spanIndex, charOffset, charOffset + codePointCount));
+            if (!isInlineBoxGroupPart) {
+                span_offsets_.emplace_back(std::tuple(spanIndex, charOffset, charOffset + codePointCount));
+            }
             charOffset += codePointCount;
-            append_mapped_text(text16, text16, nullptr);
+            if (isInlineBoxGroupPart) {
+                append_mapped_text(text16, {}, nullptr);
+            } else {
+                append_mapped_text(text16, text16, nullptr);
+            }
         }
         OH_Drawing_DestroyTextStyle(txtStyle);
         if (textForegroundPen) {
@@ -876,7 +1144,6 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             OH_Drawing_BrushDestroy(textBackgroundBrush);
             textBackgroundBrush = nullptr;
         }
-        spanIndex++;
     }
     // 根据handler对象生成文本排版布局typography
     context_thread_typography_ = KRMakeTypographyHandle(OH_Drawing_CreateTypography(handler));
@@ -979,7 +1246,8 @@ void KRRichTextShadow::TriggerImagePrefetchIfNeed() {
 /**
  * 调用获取Span位置方法
  */
-KRAnyValue KRRichTextShadow::SpanRect(int spanIndex) {
+KRAnyValue KRRichTextShadow::SpanRect(const std::string &spanPath) {
+    const int spanIndex = NewKRRenderValue(spanPath)->toInt();
     if(auto paragraph = GetParagraph()){
         auto [paragraphX, paragraphY, paragraphW, paragraphH] = paragraph->SpanRect(spanIndex);
         char buffer[50] = {0};
@@ -988,8 +1256,8 @@ KRAnyValue KRRichTextShadow::SpanRect(int spanIndex) {
         return NewKRRenderValue(buffer);
     }
 
-    if (placeholder_index_map_.find(spanIndex) != placeholder_index_map_.end()) {
-        auto placeholderIndex = placeholder_index_map_[spanIndex];
+    if (placeholder_index_map_.find(spanPath) != placeholder_index_map_.end()) {
+        auto placeholderIndex = placeholder_index_map_[spanPath];
         // 在调用栈内拷贝一份强引用，避免其它线程同时 ReleaseLastTypography 释放。
         KRTypographyHandle typo = context_thread_typography_;
         OH_Drawing_Typography *typo_raw = typo ? typo.get() : nullptr;
