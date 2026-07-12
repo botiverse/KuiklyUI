@@ -673,6 +673,16 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             CGFloat centerY = CGRectGetMidY(bounds) + origin.y;
             CGFloat top = centerY - boxHeight / 2.0;
             CGFloat bottom = centerY + boxHeight / 2.0;
+            // TextKit clips background drawing to the current line fragment. Clamp
+            // the painted box before drawing either layer so the fill and border
+            // share one vertical edge. Clamping only the stroke leaves a visible
+            // fill strip below the bottom border when the nominal box is taller
+            // than the fragment.
+            CGFloat fragmentTop = CGRectGetMinY(lineRect) + origin.y;
+            CGFloat fragmentBottom = CGRectGetMaxY(lineRect) + origin.y;
+            top = MAX(top, fragmentTop);
+            bottom = MIN(bottom, fragmentBottom);
+            if (bottom <= top) return;
             CGRect rect = CGRectMake(left, top, right - left, bottom - top);
             UIColor *fill = style[@"backgroundColor"];
             UIColor *border = style[@"borderColor"];
@@ -686,17 +696,6 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
                 CGContextSetStrokeColorWithColor(ctx, border.CGColor);
                 CGContextSetLineWidth(ctx, borderWidth);
                 CGRect strokeRect = CGRectInset(rect, borderWidth / 2.0, borderWidth / 2.0);
-                // TextKit clips background drawing to the current line fragment.
-                // When a whole group is pushed onto the next visual line, the
-                // nominal bottom edge can land exactly on that clip boundary and
-                // disappear. Keep the stroke center inside the drawable fragment;
-                // layout metrics and the fill rect remain unchanged.
-                CGFloat fragmentTop = CGRectGetMinY(lineRect) + origin.y;
-                CGFloat fragmentBottom = CGRectGetMaxY(lineRect) + origin.y;
-                CGFloat strokeTop = MAX(CGRectGetMinY(strokeRect), fragmentTop + borderWidth / 2.0);
-                CGFloat strokeBottom = MIN(CGRectGetMaxY(strokeRect), fragmentBottom - borderWidth / 2.0);
-                strokeRect.origin.y = strokeTop;
-                strokeRect.size.height = MAX(0, strokeBottom - strokeTop);
                 UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:strokeRect cornerRadius:MAX(0, radius - borderWidth / 2.0)];
                 [path stroke];
             }
