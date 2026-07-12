@@ -385,7 +385,7 @@ internal fun CoreTextField(
                                     intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
                                     intentDecision == null
                                 ) {
-                                    focusRequester.focus()
+                                    focusRequester.focusIfAttached()
                                 }
                                 return@inputFocus
                             }
@@ -404,7 +404,7 @@ internal fun CoreTextField(
                                     // first responder only after FocusOwner commits the request.
                                     // requestFocus() returns Unit, so it cannot close captured /
                                     // disabled / lifecycle rejection races.
-                                    if (!focusRequester.hasAttachedNodes() || !focusRequester.focus()) {
+                                    if (!focusRequester.focusIfAttached()) {
                                         kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
                                     }
                                 }
@@ -654,6 +654,9 @@ internal fun CoreTextField(
         }
     }
 }
+
+internal fun FocusRequester.focusIfAttached(): Boolean =
+    hasAttachedNodes() && focus()
 
 internal class TextInputSyncRevisionTracker {
     private var latestIssuedRevision: Int = 0
