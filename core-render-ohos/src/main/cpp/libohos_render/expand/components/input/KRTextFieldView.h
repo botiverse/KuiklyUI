@@ -80,7 +80,7 @@ class KRTextFieldView : public IKRRenderViewExport {
     virtual void UpdateInputNodeKeyboardType(const std::string &propValue);
     virtual void UpdateInputNodeEnterKeyType(const std::string &propValue);
     virtual void UpdateInputNodeMaxLength(int maxLength);
-    virtual void UpdateInputNodeFocusStatus(int status);
+    virtual bool UpdateInputNodeFocusStatus(int status);
     virtual uint32_t GetInputNodeSelectionStartPosition();
     virtual void UpdateInputNodeSelectionStartPosition(uint32_t index);
     /**

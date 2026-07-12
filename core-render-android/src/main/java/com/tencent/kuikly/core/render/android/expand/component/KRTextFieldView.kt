@@ -631,7 +631,12 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             showKeyboard()
             return
         }
-        requestFocus()
+        if (!requestFocus()) {
+            // A failed/no-op command must not label a later real user callback as programmatic.
+            pendingFocusRequestId = null
+            pendingFocus = false
+            return
+        }
         post {
             if (hasWindowFocus() && hasFocus()) {
                 showKeyboard()
@@ -666,7 +671,13 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         pendingBlurRequestId = params?.toLongOrNull()
         pendingFocusRequestId = null
         pendingFocus = false
+        if (!hasFocus()) {
+            pendingBlurRequestId = null
+        }
         clearFocus()
+        if (hasFocus()) {
+            pendingBlurRequestId = null
+        }
         post {
             if (rootView.findFocus() == null) {
                 val imm = context.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager

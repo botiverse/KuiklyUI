@@ -120,6 +120,31 @@ class InputFocusTargetReducerTest {
     }
 
     @Test
+    fun rejectedNativeUserFocusDoesNotBecomeObservedAuthority() {
+        val reducer = InputFocusTargetReducer<View>()
+        val approved = View("approved")
+        val rejected = View("rejected")
+
+        reducer.start(approved)
+        val approvedRequest =
+            assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        reducer.onNativeFocus(approved, approvedRequest.generation)
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
+            reducer.onNativeFocus(rejected, requestId = null),
+        )
+        reducer.rejectNativeFocus(rejected)
+
+        assertNull(reducer.observedView)
+        assertSame(approved, reducer.desiredView)
+        assertSame(
+            approved,
+            assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile()).view,
+        )
+    }
+
+    @Test
     fun nativeUserBlurOnlyClearsComposeWhenItStillOwnsDesiredFocus() {
         val reducer = InputFocusTargetReducer<View>()
         val first = View("first")
@@ -155,5 +180,34 @@ class InputFocusTargetReducerTest {
         assertNull(reducer.desiredView)
         assertNull(reducer.observedView)
         assertNull(reducer.reconcile())
+    }
+
+    @Test
+    fun unregisterCancelsFocusQueuedForDetachedView() {
+        val reducer = InputFocusTargetReducer<View>()
+        val detached = View("detached")
+
+        reducer.start(detached)
+        reducer.reconcile()
+        val commands = reducer.unregister(detached)
+
+        assertTrue(commands.single() is InputFocusTargetReducer.Command.CancelPendingFocus)
+        assertNull(reducer.desiredView)
+        assertNull(reducer.observedView)
+        assertNull(reducer.reconcile())
+    }
+
+    @Test
+    fun hideShowStyleBlurKeepsDesiredTargetForRefocus() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("editor")
+
+        reducer.start(view)
+        val focus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        reducer.onNativeFocus(view, focus.generation)
+        reducer.onNativeBlur(view, requestId = reducer.generation)
+
+        assertSame(view, reducer.desiredView)
+        assertSame(view, assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile()).view)
     }
 }

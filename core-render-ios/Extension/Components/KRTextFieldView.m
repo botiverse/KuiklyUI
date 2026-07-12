@@ -99,6 +99,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     NSNumber *_css_maxTextLength;
     NSNumber *_pendingFocusRequestId;
     NSNumber *_pendingBlurRequestId;
+    NSUInteger _focusRequestEpoch;
     /** suppress native selection callback during programmatic selection updates */
     BOOL _ignoreSelectionChange;
     /** suppress intermediate textInputStateChange during programmatic state sync */
@@ -299,24 +300,38 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 - (void)css_focus:(NSDictionary *)args  {
     NSString *rawRequestId = args[KRC_PARAM_KEY];
     NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    NSUInteger requestEpoch = ++_focusRequestEpoch;
     _pendingFocusRequestId = requestId;
     _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (requestId != self->_pendingFocusRequestId && ![requestId isEqual:self->_pendingFocusRequestId]) {
+        // The epoch is the cancellation token. A nullable request id cannot serve this purpose:
+        // legacy focus(nil) followed by blur/cancel would otherwise compare nil == nil and revive
+        // a stale first responder on the next main-queue drain.
+        if (requestEpoch != self->_focusRequestEpoch) {
             return;
         }
-        [self becomeFirstResponder];
+        if (self.isFirstResponder) {
+            self->_pendingFocusRequestId = nil;
+            return;
+        }
+        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
+            self->_pendingFocusRequestId = nil;
+        }
     });
 }
 
 - (void)css_blur:(NSDictionary *)args  {
+    ++_focusRequestEpoch;
     NSString *rawRequestId = args[KRC_PARAM_KEY];
     _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
     _pendingFocusRequestId = nil;
-    [self resignFirstResponder];
+    if (!self.isFirstResponder || ![self resignFirstResponder]) {
+        _pendingBlurRequestId = nil;
+    }
 }
 
 - (void)css_cancelPendingFocus:(NSDictionary *)args {
+    ++_focusRequestEpoch;
     _pendingFocusRequestId = nil;
 }
 

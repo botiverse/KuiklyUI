@@ -375,17 +375,22 @@ internal fun CoreTextField(
                         getViewAttr().autofocus(false)
                         getViewAttr().enablePinyinCallback(true)
                         getViewEvent().inputFocus { params ->
-                            when (
-                                kuiklyKeyboardController?.onNativeFocus(
-                                    autoHeightTextAreaView,
-                                    params.focusRequestId,
-                                )
-                            ) {
+                            val nativeFocusDecision = kuiklyKeyboardController?.onNativeFocus(
+                                autoHeightTextAreaView,
+                                params.focusRequestId,
+                            )
+                            if (!enabled || readOnly) {
+                                kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
+                                return@inputFocus
+                            }
+                            when (nativeFocusDecision) {
                                 InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
                                 null -> {
-                                    if (focusRequester.hasAttachedNodes()) {
-                                        focusRequester.requestFocus()
-                                    } else {
+                                    // Native focus is only an intent. Keep the native editor as
+                                    // first responder only after FocusOwner commits the request.
+                                    // requestFocus() returns Unit, so it cannot close captured /
+                                    // disabled / lifecycle rejection races.
+                                    if (!focusRequester.hasAttachedNodes() || !focusRequester.focus()) {
                                         kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
                                     }
                                 }

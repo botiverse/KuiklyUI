@@ -138,8 +138,8 @@ void KRTextFieldView::UpdateInputNodeEnterKeyType(const std::string& propValue){
 void KRTextFieldView::UpdateInputNodeMaxLength(int maxLength){
     kuikly::util::UpdateInputNodeMaxLength(GetNode(), maxLength);  // 直接限制
 }
-void KRTextFieldView::UpdateInputNodeFocusStatus(int status){
-    kuikly::util::UpdateInputNodeFocusStatus(GetNode(), status);
+bool KRTextFieldView::UpdateInputNodeFocusStatus(int status){
+    return kuikly::util::UpdateInputNodeFocusStatus(GetNode(), status);
 }
 uint32_t KRTextFieldView::GetInputNodeSelectionStartPosition(){
     return kuikly::util::GetInputNodeSelectionStartPosition(GetNode());
@@ -374,7 +374,9 @@ void KRTextFieldView::CallMethod(const std::string &method, const KRAnyValue &pa
 void KRTextFieldView::Focus(int64_t request_id) {
     pending_focus_request_id_ = request_id;
     pending_blur_request_id_ = 0;
-    UpdateInputNodeFocusStatus(1);
+    if (!UpdateInputNodeFocusStatus(1)) {
+        pending_focus_request_id_ = 0;
+    }
 }
 
 /**
@@ -383,7 +385,9 @@ void KRTextFieldView::Focus(int64_t request_id) {
 void KRTextFieldView::Blur(int64_t request_id) {
     pending_blur_request_id_ = request_id;
     pending_focus_request_id_ = 0;
-    UpdateInputNodeFocusStatus(0);
+    if (!UpdateInputNodeFocusStatus(0)) {
+        pending_blur_request_id_ = 0;
+    }
 }
 
 /**

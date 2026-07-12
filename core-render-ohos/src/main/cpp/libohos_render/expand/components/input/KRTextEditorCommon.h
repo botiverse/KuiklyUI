@@ -775,10 +775,11 @@ inline void UpdateSingleLine(ArkUI_NodeHandle node, bool single_line) {
 }
 
 // Focus / Blur：使用通用 NODE_FOCUS_STATUS。
-inline void UpdateFocusStatus(ArkUI_NodeHandle node, bool focus) {
+inline bool UpdateFocusStatus(ArkUI_NodeHandle node, bool focus) {
     ArkUI_NumberValue value = {.i32 = focus ? 1 : 0};
     ArkUI_AttributeItem item = {&value, 1};
-    kuikly::util::GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item);
+    return kuikly::util::GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item) ==
+           ARKUI_ERROR_CODE_NO_ERROR;
 }
 
 // focusable

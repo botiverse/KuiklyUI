@@ -509,7 +509,9 @@ void KRTextEditorFieldView::Focus(int64_t request_id) {
 #if KUIKLY_TEXT_EDITOR_AVAILABLE
     state_.pending_focus_request_id_ = request_id;
     state_.pending_blur_request_id_ = 0;
-    kuikly::text_editor::UpdateFocusStatus(GetNode(), true);
+    if (!kuikly::text_editor::UpdateFocusStatus(GetNode(), true)) {
+        state_.pending_focus_request_id_ = 0;
+    }
 #endif
 }
 
@@ -521,7 +523,9 @@ void KRTextEditorFieldView::Blur(int64_t request_id) {
     if (state_.controller_) {
         OH_ArkUI_TextEditorStyledStringController_StopEditing(state_.controller_);
     } else {
-        kuikly::text_editor::UpdateFocusStatus(GetNode(), false);
+        if (!kuikly::text_editor::UpdateFocusStatus(GetNode(), false)) {
+            state_.pending_blur_request_id_ = 0;
+        }
     }
 #endif
 }
