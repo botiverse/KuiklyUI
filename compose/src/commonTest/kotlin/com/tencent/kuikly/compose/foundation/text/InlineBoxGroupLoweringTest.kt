@@ -71,6 +71,44 @@ class InlineBoxGroupLoweringTest {
     }
 
     @Test
+    fun outerBodyStyleDoesNotOverrideInlineBoxLinkTypography() {
+        val box = InlineBoxSpanStyle(
+            backgroundColor = Color.Yellow,
+            borderColor = Color.Black,
+            borderWidth = 1.dp,
+        )
+        val builder = AnnotatedString.Builder()
+        builder.withStyle(SpanStyle(fontWeight = FontWeight.Normal)) {
+            append("before ")
+            withLink(
+                LinkAnnotation.Url(
+                    url = "https://example.test/channel",
+                    styles = TextLinkStyles(
+                        style = SpanStyle(
+                            fontWeight = FontWeight.Bold,
+                            inlineBoxStyle = box,
+                        ),
+                    ),
+                ),
+            ) {
+                append("#channel")
+            }
+            append(" after")
+        }
+
+        val attr = RichTextAttr()
+        attr.applyAnnotatedString(
+            annoText = builder.toAnnotatedString(),
+            density = Density(1f),
+        )
+
+        val group = assertIs<InlineBoxGroupSpan>(attr.getSpans()[1])
+        val child = assertIs<TextSpan>(group.childrenForLayout().single())
+        assertEquals("#channel", child.getText())
+        assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
+    }
+
+    @Test
     fun linkStyleRangeLowersToOneGroupWithStyledChildren() {
         val box = InlineBoxSpanStyle(
             backgroundColor = Color.Yellow,
