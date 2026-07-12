@@ -18,6 +18,7 @@ import com.tencent.kuikly.compose.ui.text.withLink
 import com.tencent.kuikly.compose.ui.text.withStyle
 import com.tencent.kuikly.compose.ui.unit.Density
 import com.tencent.kuikly.compose.ui.unit.dp
+import com.tencent.kuikly.core.base.Attr
 import com.tencent.kuikly.core.views.InlineBoxGroupSpan
 import com.tencent.kuikly.core.views.InlineBoxSpanStyle as CoreInlineBoxSpanStyle
 import com.tencent.kuikly.core.views.PlaceholderSpan
@@ -46,6 +47,7 @@ class InlineBoxGroupLoweringTest {
                 url = "https://example.test/channel",
                 styles = TextLinkStyles(
                     style = SpanStyle(
+                        background = Color.Yellow,
                         fontWeight = FontWeight.Bold,
                         inlineBoxStyle = box,
                     ),
@@ -65,6 +67,7 @@ class InlineBoxGroupLoweringTest {
         val child = assertIs<TextSpan>(group.childrenForLayout().single())
         assertEquals("#channel", child.getText())
         assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
+        assertEquals(null, child.spanPropsMap()[Attr.StyleConst.BACKGROUND_COLOR])
     }
 
     @Test
