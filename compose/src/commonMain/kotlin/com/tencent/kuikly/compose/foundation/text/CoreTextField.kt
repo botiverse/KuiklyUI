@@ -375,6 +375,20 @@ internal fun CoreTextField(
                         getViewAttr().autofocus(false)
                         getViewAttr().enablePinyinCallback(true)
                         getViewEvent().inputFocus { params ->
+                            if (params.focusIntentOnly) {
+                                if (!enabled || readOnly) {
+                                    return@inputFocus
+                                }
+                                val intentDecision =
+                                    kuiklyKeyboardController?.onNativeFocusIntent(autoHeightTextAreaView)
+                                if (
+                                    intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
+                                    intentDecision == null
+                                ) {
+                                    focusRequester.focusIfAttached()
+                                }
+                                return@inputFocus
+                            }
                             val nativeFocusDecision = kuiklyKeyboardController?.onNativeFocus(
                                 autoHeightTextAreaView,
                                 params.focusRequestId,
@@ -390,7 +404,7 @@ internal fun CoreTextField(
                                     // first responder only after FocusOwner commits the request.
                                     // requestFocus() returns Unit, so it cannot close captured /
                                     // disabled / lifecycle rejection races.
-                                    if (!focusRequester.hasAttachedNodes() || !focusRequester.focus()) {
+                                    if (!focusRequester.focusIfAttached()) {
                                         kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
                                     }
                                 }
@@ -640,6 +654,9 @@ internal fun CoreTextField(
         }
     }
 }
+
+internal fun FocusRequester.focusIfAttached(): Boolean =
+    hasAttachedNodes() && focus()
 
 internal class TextInputSyncRevisionTracker {
     private var latestIssuedRevision: Int = 0

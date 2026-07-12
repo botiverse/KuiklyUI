@@ -724,7 +724,13 @@ open class TextAreaEvent : Event() {
             it as JSONObject
             val text = it.optString("text")
             val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
-            handler(InputParams(text, focusRequestId = focusRequestId))
+            handler(
+                InputParams(
+                    text = text,
+                    focusRequestId = focusRequestId,
+                    focusIntentOnly = it.optBoolean("focusIntentOnly"),
+                ),
+            )
         }
     }
     /**

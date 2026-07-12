@@ -84,15 +84,24 @@ void KRRenderNativeContextHandlerManager::ScheduleDeallocRenderValues(
     }
 }
 
+static inline std::shared_ptr<KRRenderValue> MakeFromCValue(const KRRenderCValue &cValue) {
+    if (cValue.type == KRRenderCValue::NULL_VALUE) {
+        return KRRenderValue::MakeNull();  // 复用静态单例，避免堆分配
+    }
+    return KRRenderValue::Make(cValue);
+}
+
 KRRenderCValue KRRenderNativeContextHandlerManager::DispatchCallNative(
     const std::string &instanceId, int methodId, const KRRenderCValue &arg0, const KRRenderCValue &arg1,
     const KRRenderCValue &arg2, const KRRenderCValue &arg3, const KRRenderCValue &arg4, const KRRenderCValue &arg5) {
-    auto cv0 = KRRenderValue::Make(arg0);
-    auto cv1 = KRRenderValue::Make(arg1);
-    auto cv2 = KRRenderValue::Make(arg2);
-    auto cv3 = KRRenderValue::Make(arg3);
-    auto cv4 = KRRenderValue::Make(arg4);
-    auto cv5 = KRRenderValue::Make(arg5);
+    // arg0 is a reserved slot. Keep the task #26 off-context marshal contract,
+    // but use the upstream null singleton and NULL fast path for every value.
+    auto cv0 = KRRenderValue::MakeNull();
+    auto cv1 = MakeFromCValue(arg1);
+    auto cv2 = MakeFromCValue(arg2);
+    auto cv3 = MakeFromCValue(arg3);
+    auto cv4 = MakeFromCValue(arg4);
+    auto cv5 = MakeFromCValue(arg5);
     auto method = static_cast<KuiklyRenderNativeMethod>(methodId);
     if (!KRContextScheduler::IsCurrentOnContextThread()) {
         if (KRNativeMethodRequiresContextThread(method, cv5)) {
@@ -103,16 +112,14 @@ KRRenderCValue KRRenderNativeContextHandlerManager::DispatchCallNative(
         KRContextScheduler::ScheduleTask(0, [this, instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5]() mutable {
             DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
         });
-        KRRenderCValue null_return_value;
-        null_return_value.type = KRRenderCValue::NULL_VALUE;
-        return null_return_value;
+        return KRRenderCValue{};
     }
 
     auto return_value = DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
-    if (return_value == nullptr) {
-        KRRenderCValue null_return_value;
-        null_return_value.type = KRRenderCValue::NULL_VALUE;
-        return null_return_value;
+    if (return_value == nullptr || return_value->isNull()) {
+        // Value-initialize the aggregate so union value and size never leak
+        // uninitialized stack bytes across the napi C ABI.
+        return KRRenderCValue{};
     }
     ScheduleDeallocRenderValues(return_value);
     return return_value->toCValue();

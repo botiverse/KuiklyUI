@@ -153,6 +153,30 @@ class InputFocusTargetReducerTest {
     }
 
     @Test
+    fun programmaticFocusIntentWaitsForGenerationFocusBeforeBecomingObserved() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("autofocus-intent")
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
+            reducer.onNativeFocusIntent(view),
+        )
+        assertNull(reducer.observedView)
+        assertNull(reducer.desiredView)
+
+        reducer.start(view)
+        val focus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        assertSame(view, focus.view)
+        assertNull(reducer.observedView)
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+            reducer.onNativeFocus(view, focus.generation),
+        )
+        assertSame(view, reducer.observedView)
+    }
+
+    @Test
     fun rejectedNativeUserFocusDoesNotBecomeObservedAuthority() {
         val reducer = InputFocusTargetReducer<View>()
         val approved = View("approved")

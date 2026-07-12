@@ -132,6 +132,20 @@ internal class InputFocusTargetReducer<T : Any> {
         return NativeFocusDecision.RequestComposeFocus
     }
 
+    /**
+     * Handles a native request to acquire Compose focus before native focus has landed.
+     *
+     * Unlike [onNativeFocus], this must not update [observedView]. Compose FocusOwner approval
+     * calls start(), then reconcile() emits the generation-scoped native focus command. Only the
+     * later native focus callback may confirm observed state.
+     */
+    internal fun onNativeFocusIntent(view: T): NativeFocusDecision =
+        if (desiredView === view) {
+            NativeFocusDecision.Confirmed
+        } else {
+            NativeFocusDecision.RequestComposeFocus
+        }
+
     internal fun onNativeBlur(view: T, requestId: Long?): NativeBlurDecision {
         val shouldClearComposeFocus = requestId == null && desiredView === view
         if (observedView === view) observedView = null

@@ -104,6 +104,11 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
         return decision
     }
 
+    internal fun onNativeFocusIntent(
+        view: AutoHeightTextAreaView,
+    ): InputFocusTargetReducer.NativeFocusDecision =
+        focusReducer.onNativeFocusIntent(view)
+
     internal fun onNativeBlur(
         view: AutoHeightTextAreaView,
         requestId: Long?,
