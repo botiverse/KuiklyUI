@@ -474,11 +474,23 @@ internal fun RichTextAttr.applyAnnotatedString(
 
                 val linkAnnotation = linkAnnotations
                     .firstOrNull { range -> !(end <= range.start || start >= range.end) }
+                val overlappingSpanStyles = annoText.spanStyles
+                    .filter { range -> !(end <= range.start || start >= range.end) }
 
                 if (inlineBoxRange != null) {
-                    // Geometry and background belong to the outer group. Children
-                    // keep only link typography/foreground/decoration, then nested
-                    // span ranges can override those defaults normally.
+                    // Paragraph/body spans commonly cover the whole link range. Apply
+                    // those inherited defaults first so the link's typography remains
+                    // authoritative, while strictly inner spans can still override it.
+                    overlappingSpanStyles
+                        .filter { range ->
+                            range.start <= inlineBoxRange.start && range.end >= inlineBoxRange.end
+                        }
+                        .forEach { range ->
+                            applySpanStyle(range.item, density, includeInlineBox = false)
+                        }
+
+                    // Geometry and background belong to the outer group. Children keep
+                    // only link typography/foreground/decoration.
                     linkAnnotation?.item?.styles?.style?.let { linkStyle ->
                         applySpanStyle(
                             linkStyle.copy(
@@ -488,18 +500,19 @@ internal fun RichTextAttr.applyAnnotatedString(
                             density,
                         )
                     }
-                }
 
-                // Apply SpanStyle
-                annoText.spanStyles
-                    .filter { range -> !(end <= range.start || start >= range.end) }
-                    .forEach { range ->
-                        applySpanStyle(
-                            range.item,
-                            density,
-                            includeInlineBox = inlineBoxRange == null,
-                        )
+                    overlappingSpanStyles
+                        .filter { range ->
+                            range.start > inlineBoxRange.start || range.end < inlineBoxRange.end
+                        }
+                        .forEach { range ->
+                            applySpanStyle(range.item, density, includeInlineBox = false)
+                        }
+                } else {
+                    overlappingSpanStyles.forEach { range ->
+                        applySpanStyle(range.item, density)
                     }
+                }
 
                 if (slockInlineCodeAnnotations.any { range -> start >= range.start && end <= range.end }) {
                     slockInlineCode()
