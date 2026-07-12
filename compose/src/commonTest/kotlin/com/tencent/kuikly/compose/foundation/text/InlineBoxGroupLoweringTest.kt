@@ -13,6 +13,7 @@ import com.tencent.kuikly.compose.ui.text.InlineBoxSpanStyle
 import com.tencent.kuikly.compose.ui.text.LinkAnnotation
 import com.tencent.kuikly.compose.ui.text.SpanStyle
 import com.tencent.kuikly.compose.ui.text.TextLinkStyles
+import com.tencent.kuikly.compose.ui.text.font.FontFamily
 import com.tencent.kuikly.compose.ui.text.font.FontWeight
 import com.tencent.kuikly.compose.ui.text.withLink
 import com.tencent.kuikly.compose.ui.text.withStyle
@@ -78,13 +79,19 @@ class InlineBoxGroupLoweringTest {
             borderWidth = 1.dp,
         )
         val builder = AnnotatedString.Builder()
-        builder.withStyle(SpanStyle(fontWeight = FontWeight.Normal)) {
+        builder.withStyle(
+            SpanStyle(
+                fontFamily = FontFamily.SansSerif,
+                fontWeight = FontWeight.Normal,
+            )
+        ) {
             append("before ")
             withLink(
                 LinkAnnotation.Url(
                     url = "https://example.test/channel",
                     styles = TextLinkStyles(
                         style = SpanStyle(
+                            fontFamily = FontFamily.Serif,
                             fontWeight = FontWeight.Bold,
                             inlineBoxStyle = box,
                         ),
@@ -105,6 +112,7 @@ class InlineBoxGroupLoweringTest {
         val group = assertIs<InlineBoxGroupSpan>(attr.getSpans()[1])
         val child = assertIs<TextSpan>(group.childrenForLayout().single())
         assertEquals("#channel", child.getText())
+        assertEquals("serif", child.spanPropsMap()[TextConst.FONT_FAMILY])
         assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
     }
 
