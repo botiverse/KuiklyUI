@@ -520,11 +520,13 @@ internal fun RichTextAttr.applyAnnotatedString(
                 if (slockInlineCodeTrailingMarginAnnotations.any { range -> start >= range.start && end <= range.end }) {
                     slockInlineCodeTrailingMargin()
                 }
-                slockMarkdownTagChromeAnnotations
-                    .firstOrNull { range -> start >= range.start && end <= range.end }
-                    ?.item
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { kind -> slockMarkdownTagChrome(kind) }
+                if (inlineBoxRange == null) {
+                    slockMarkdownTagChromeAnnotations
+                        .firstOrNull { range -> start >= range.start && end <= range.end }
+                        ?.item
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { kind -> slockMarkdownTagChrome(kind) }
+                }
 
                 // Apply ParagraphStyle
                 annoText.paragraphStyles
