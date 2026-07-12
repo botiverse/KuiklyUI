@@ -464,9 +464,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     NSInteger selectionStart = MAX(0, MIN(requestedSelectionStart, (NSInteger)rawText.length));
     NSInteger selectionEnd = MAX(0, MIN(requestedSelectionEnd, (NSInteger)rawText.length));
 
-    if (![self isFirstResponder] && rawText.length > 0 && [self.css_autoFocusOnTextInputState boolValue]) {
-        [self becomeFirstResponder];
-    }
+    BOOL shouldRequestComposeFocus =
+        ![self isFirstResponder] && rawText.length > 0 && [self.css_autoFocusOnTextInputState boolValue];
     _ignoreTextDidChanged = YES;
     NSString *currentRawText = [self p_outputText];
     BOOL textChanged = ![currentRawText isEqualToString:rawText];
@@ -509,6 +508,18 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
             @"compositionEnd": @(-1),
             @"syncRevision": @(_textInputSyncRevision),
             @"length": @([self p_calculateLengthForText:outputText])
+        });
+    }
+    if (shouldRequestComposeFocus && self.css_inputFocus) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.isFirstResponder || ![self.css_autoFocusOnTextInputState boolValue] || !self.css_inputFocus) {
+                return;
+            }
+            // Programmatic auto-focus is an intent, not native authority. Route
+            // it through the same request-id/generation arbiter as a user focus
+            // event so Compose FocusOwner can accept or reject it before the
+            // editor becomes first responder.
+            self.css_inputFocus(@{ @"text" : [self p_outputText] ?: @"" });
         });
     }
 }
