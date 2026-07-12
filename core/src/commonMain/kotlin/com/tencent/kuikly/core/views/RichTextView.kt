@@ -566,13 +566,6 @@ open class TextSpan : TextAttr(), ISpan {
         return this
     }
 
-    fun slockMarkdownTagChrome(kind: String): TextSpan {
-        if (kind.isNotBlank()) {
-            setProp(TextConst.SLOCK_MARKDOWN_TAG_CHROME, kind)
-        }
-        return this
-    }
-
     /** Attach generic inline box decoration to this existing text span. */
     fun inlineBoxStyle(style: InlineBoxSpanStyle): TextSpan {
         style.backgroundColor?.let { setProp(TextConst.INLINE_BOX_BACKGROUND_COLOR, it.toString()) }

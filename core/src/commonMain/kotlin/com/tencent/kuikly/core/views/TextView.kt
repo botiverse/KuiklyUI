@@ -573,7 +573,6 @@ object TextConst {
     const val TEXT_USE_DP_FONT_SIZE_DIM = "useDpFontSizeDim"
     const val SLOCK_INLINE_CODE = "slockInlineCode"
     const val SLOCK_INLINE_CODE_TRAILING_MARGIN = "slockInlineCodeTrailingMargin"
-    const val SLOCK_MARKDOWN_TAG_CHROME = "slockMarkdownTagChrome"
     const val INLINE_BOX_BACKGROUND_COLOR = "inlineBoxBackgroundColor"
     const val INLINE_BOX_BORDER_COLOR = "inlineBoxBorderColor"
     const val INLINE_BOX_BORDER_WIDTH = "inlineBoxBorderWidth"

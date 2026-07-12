@@ -73,11 +73,11 @@ constexpr char16_t kSlockNonBreakingSpace = u'\u00A0';
 constexpr char16_t kSlockZeroWidthBreak = u'\u200B';
 constexpr char16_t kInlineBoxWordJoiner = u'\u2060';
 constexpr char16_t kObjectReplacementCharacter = u'\uFFFC';
-constexpr float kSlockInnerPaddingRatio = 4.0f / 15.0f;
-constexpr float kSlockOuterMarginRatio = 2.0f / 15.0f;
-constexpr float kSlockChipBorderWidthVp = 1.0f;
-constexpr float kSlockTrailingMarginRatio = 1.0f / 15.0f;
-constexpr float kSlockChipLineHeightRatio = 1.5f;
+constexpr float kSlockInlineCodeInnerPaddingRatio = 4.0f / 15.0f;
+constexpr float kSlockInlineCodeOuterMarginRatio = 2.0f / 15.0f;
+constexpr float kSlockInlineCodeBorderWidthVp = 1.0f;
+constexpr float kSlockInlineCodeTrailingMarginRatio = 1.0f / 15.0f;
+constexpr float kSlockInlineCodeLineHeightRatio = 1.5f;
 
 constexpr char kInlineBoxGroupIndexKey[] = "__kr_inline_box_group_index__";
 constexpr char kTopLevelSpanIndexKey[] = "__kr_top_level_span_index__";
@@ -148,23 +148,8 @@ KRSlockInlineCodeTextPlan KRBuildSlockInlineCodeTextPlan(const std::string &text
     return result;
 }
 
-uint32_t KRSlockChromeFillColor(const std::string &kind) {
-    if (kind == "inlineCode") {
-        return 0x66FFD440;
-    }
-    if (kind == "channel") {
-        return 0x4DFE7DA8;
-    }
-    if (kind == "thread") {
-        return 0x4D27CCF3;
-    }
-    if (kind == "task") {
-        return 0x66FFD440;
-    }
-    if (kind == "selfMention" || kind == "active") {
-        return 0xFFFFD440;
-    }
-    return 0;
+uint32_t KRSlockInlineCodeFillColor() {
+    return 0x66FFD440;
 }
 
 }  // namespace
@@ -764,11 +749,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         const bool slockInlineCode = GetKRValue("slockInlineCode", spanMap, spanMap)->toBool();
         const bool slockInlineCodeTrailingMargin =
             GetKRValue("slockInlineCodeTrailingMargin", spanMap, spanMap)->toBool();
-        const std::string slockTagChrome =
-            GetKRValue("slockMarkdownTagChrome", spanMap, spanMap)->toString();
-        const std::string slockChromeKind = slockInlineCode ? "inlineCode" : slockTagChrome;
-        const uint32_t slockFillColor = KRSlockChromeFillColor(slockChromeKind);
-        const bool isSlockChip = slockFillColor != 0;
+        const uint32_t slockInlineCodeFillColor = KRSlockInlineCodeFillColor();
         const std::string inlineBoxBackgroundColorStr =
             GetKRValue("inlineBoxBackgroundColor", spanMap, spanMap)->toString();
         const std::string inlineBoxBorderColorStr =
@@ -794,7 +775,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             inlineBoxPaddingStart > 0 || inlineBoxPaddingEnd > 0 ||
             inlineBoxPaddingTop > 0 || inlineBoxPaddingBottom > 0 ||
             inlineBoxMarginStart > 0 || inlineBoxMarginEnd > 0 || inlineBoxCornerRadius > 0);
-        const bool hasBoxChrome = isSlockChip || isInlineBox;
+        const bool hasBoxChrome = slockInlineCode || isInlineBox;
         if (hasBoxChrome) {
             textDecoration = TEXT_DECORATION_NONE;
         }
@@ -1016,8 +997,8 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             // space remains semantic text, while layout uses a 1/15 transparent
             // advance instead of painting a visible whitespace glyph.
             OH_Drawing_PlaceholderSpan trailingMargin = {
-                fontSize * kSlockTrailingMarginRatio,
-                fontSize * kSlockChipLineHeightRatio,
+                fontSize * kSlockInlineCodeTrailingMarginRatio,
+                fontSize * kSlockInlineCodeLineHeightRatio,
                 ALIGNMENT_CENTER_OF_ROW_BOX,
                 TEXT_BASELINE_ALPHABETIC,
                 0,
@@ -1031,22 +1012,22 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
         } else if (hasBoxChrome) {
             const float borderWidth = isInlineBox
                 ? inlineBoxBorderWidth
-                : std::max(1.0f, static_cast<float>(dpi) * kSlockChipBorderWidthVp);
+                : std::max(1.0f, static_cast<float>(dpi) * kSlockInlineCodeBorderWidthVp);
             const float paddingStart = isInlineBox
                 ? inlineBoxPaddingStart
-                : fontSize * kSlockInnerPaddingRatio;
+                : fontSize * kSlockInlineCodeInnerPaddingRatio;
             const float paddingEnd = isInlineBox
                 ? inlineBoxPaddingEnd
-                : fontSize * kSlockInnerPaddingRatio;
+                : fontSize * kSlockInlineCodeInnerPaddingRatio;
             const float marginStart = isInlineBox
                 ? inlineBoxMarginStart
-                : fontSize * kSlockOuterMarginRatio;
+                : fontSize * kSlockInlineCodeOuterMarginRatio;
             const float marginEnd = isInlineBox
                 ? inlineBoxMarginEnd
-                : fontSize * kSlockOuterMarginRatio;
+                : fontSize * kSlockInlineCodeOuterMarginRatio;
             const float boxHeight = isInlineBox
                 ? fontSize + inlineBoxPaddingTop + inlineBoxPaddingBottom + borderWidth * 2.0f
-                : fontSize * kSlockChipLineHeightRatio;
+                : fontSize * kSlockInlineCodeLineHeightRatio;
             OH_Drawing_PlaceholderSpan leadingEdgePlaceholder = {
                 marginStart + borderWidth + paddingStart,
                 boxHeight,
@@ -1095,7 +1076,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
                             ? (inlineBoxBackgroundColorStr.length()
                                 ? kuikly::util::ConvertToHexColor(inlineBoxBackgroundColorStr)
                                 : 0)
-                            : slockFillColor,
+                            : slockInlineCodeFillColor,
                         isInlineBox
                             ? (inlineBoxBorderColorStr.length()
                                 ? kuikly::util::ConvertToHexColor(inlineBoxBorderColorStr)

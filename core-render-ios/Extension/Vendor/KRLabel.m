@@ -28,47 +28,14 @@ NSString *const KRSlockChromeAttributeName = @"KRSlockChromeAttributeName";
 NSString *const KRInlineBoxStyleAttributeName = @"KRInlineBoxStyleAttributeName";
 NSString *const KRInlineBoxSemanticAttributeName = @"KRInlineBoxSemanticAttributeName";
 
-#pragma mark - Slock rich-text chip chrome (task #439)
-
-// TEMPORARY BRIDGE TO TASK #442. These constants mirror the Android drawer
-// (core-render-android KRRichTextViewDrawer.kt) and the shared token source
-// SlockRichTextChromeStyleTokens.* / SLOCK_RICHTEXT_INLINE_CODE_* (mobile PR #435,
-// commit 5ffc5a044). #442 will serialize the resolved token fields into the span
-// prop so both drawers read prop data and these baked constants are deleted
-// (acceptance: fork grep finds no SLOCK constants). Do NOT let these become a new
-// long-term source of truth.
-// Fill colors: SlockRichTextChromeStyleTokens.InlineCode.chipFill etc. (ARGB).
 static const uint32_t kKRSlockInlineCodeFillARGB   = 0x66FFD440; // react bg-soft-signal/40 = #FFD440 @ 40% (was 0x66FFD84D, the Android outlier — SlockMarkdown.kt:1485-90)
-static const uint32_t kKRSlockChannelFillARGB      = 0x4DFE7DA8; // Channel.chipFill (pink @ 30%)
-static const uint32_t kKRSlockThreadFillARGB       = 0x4D27CCF3; // Thread.chipFill (cyan @ 30%)
-static const uint32_t kKRSlockTaskFillARGB         = 0x66FFD440; // Task.chipFill (yellow @ 40%)
-static const uint32_t kKRSlockSelfMentionFillARGB  = 0xFFFFD440; // SelfMention.chipFill (opaque yellow)
-// Geometry ratios × textSize: SLOCK_RICHTEXT_INLINE_CODE_EDGE_PADDING / _CHAR_WRAP_BREAK et al.
-static const CGFloat kKRSlockHorizontalPaddingRatio = 4.0 / 15.0; // React MSG_REF_CHIP px-1 (≈4px @ 15pt)
-static const CGFloat kKRSlockLineHeightRatio        = 1.5;        // React MSG_REF_CHIP leading-[1.5]
 static const CGFloat kKRSlockBorderWidthPt          = 1.0;       // 1dp black border (border-black)
 
-static UIColor *KRSlockChromeFillColor(NSString *chrome) {
-    uint32_t argb;
-    if ([chrome isEqualToString:@"inlineCode"]) {
-        argb = kKRSlockInlineCodeFillARGB;
-    } else if ([chrome isEqualToString:@"channel"]) {
-        argb = kKRSlockChannelFillARGB;
-    } else if ([chrome isEqualToString:@"thread"]) {
-        argb = kKRSlockThreadFillARGB;
-    } else if ([chrome isEqualToString:@"task"]) {
-        argb = kKRSlockTaskFillARGB;
-    } else if ([chrome isEqualToString:@"selfMention"] || [chrome isEqualToString:@"active"]) {
-        argb = kKRSlockSelfMentionFillARGB;
-    } else {
-        // ordinaryMention (and any @other/@agent) renders as an underline via the
-        // existing text SpanStyle, NOT a chip — no fill/border here.
-        return nil;
-    }
-    CGFloat a = ((argb >> 24) & 0xFF) / 255.0;
-    CGFloat r = ((argb >> 16) & 0xFF) / 255.0;
-    CGFloat g = ((argb >> 8) & 0xFF) / 255.0;
-    CGFloat b = (argb & 0xFF) / 255.0;
+static UIColor *KRSlockInlineCodeFillColor(void) {
+    CGFloat a = ((kKRSlockInlineCodeFillARGB >> 24) & 0xFF) / 255.0;
+    CGFloat r = ((kKRSlockInlineCodeFillARGB >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((kKRSlockInlineCodeFillARGB >> 8) & 0xFF) / 255.0;
+    CGFloat b = (kKRSlockInlineCodeFillARGB & 0xFF) / 255.0;
     return [UIColor colorWithRed:r green:g blue:b alpha:a];
 }
 
@@ -628,10 +595,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
     _drawAtPoint = origin;
     [super drawBackgroundForGlyphRange:glyphsToShow atPoint:origin];
     [self kr_drawInlineBoxChromeForGlyphRange:glyphsToShow atPoint:origin];
-    // Slock chip chrome (task #439). Drawn in drawBackground (before glyphs) so the
-    // fill sits behind the text; the border is inset from the glyphs by the leading/
-    // trailing NBSP padding reserved on the shared side, so it never overlaps glyphs.
-    [self kr_drawSlockChipChromeForGlyphRange:glyphsToShow atPoint:origin];
+    [self kr_drawSlockInlineCodeChromeForGlyphRange:glyphsToShow atPoint:origin];
     _drawAtPoint = CGPointZero;
 }
 
@@ -703,11 +667,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
     }];
 }
 
-// TEMPORARY BRIDGE TO TASK #442 — ports core-render-android KRRichTextViewDrawer.kt
-// drawSlockInlineCodeChrome/drawSlockMarkdownTagChrome geometry to TextKit. #442 moves
-// the resolved token values into span props so this reads prop data instead of the
-// baked kKRSlock* constants above.
-- (void)kr_drawSlockChipChromeForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
+- (void)kr_drawSlockInlineCodeChromeForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
     NSTextStorage *textStorage = self.textStorage;
     if (textStorage.length == 0) {
         return;
@@ -728,29 +688,17 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
                             inRange:charRange
                             options:0
                          usingBlock:^(id value, NSRange runRange, BOOL *stop) {
-        if (![value isKindOfClass:[NSString class]] || [(NSString *)value length] == 0) {
+        if (![value isKindOfClass:[NSString class]] || ![(NSString *)value isEqualToString:@"inlineCode"]) {
             return;
         }
-        UIColor *fillColor = KRSlockChromeFillColor((NSString *)value);
-        if (!fillColor) {
-            return; // underline-only kinds draw no chip
-        }
+        UIColor *fillColor = KRSlockInlineCodeFillColor();
         NSRange runGlyphRange = [self glyphRangeForCharacterRange:runRange actualCharacterRange:NULL];
         if (runGlyphRange.length == 0) {
             return;
         }
         NSUInteger runGlyphEnd = NSMaxRange(runGlyphRange);
-        // Per line fragment the run spans: vertical from FONT METRICS (baseline ±
-        // ascender/descender + vPadding, tight to the glyph box like Android/React) —
-        // NOT the line-fragment rect (which includes line leading → chip too tall/high,
-        // task #439 bug ①). Horizontal from boundingRectForGlyphRange (tight to the
-        // glyphs on THIS line → no wrapped-segment right overhang).
         [self enumerateLineFragmentsForGlyphRange:runGlyphRange
                                        usingBlock:^(CGRect lineRect, CGRect usedRect, NSTextContainer *lineContainer, NSRange lineGlyphRange, BOOL *lineStop) {
-            // enumerateLineFragmentsForGlyphRange gives the WHOLE line fragment's glyph
-            // range, not the run's glyphs on that line — intersect with the run so the
-            // chip fill bounds only THIS token's glyphs (task #439 bug: without this the
-            // fill spanned the entire line instead of a discrete per-token chip).
             NSRange segmentGlyphRange = NSIntersectionRange(lineGlyphRange, runGlyphRange);
             if (segmentGlyphRange.length == 0) {
                 return;
@@ -761,16 +709,9 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
                 ? [textStorage attribute:NSFontAttributeName atIndex:lineCharRange.location effectiveRange:NULL]
                 : nil;
             CGFloat textSize = font ? font.pointSize : 15.0;
-            CGFloat ascender = font ? font.ascender : textSize * 0.75;   // > 0, above baseline
-            CGFloat descender = font ? font.descender : -textSize * 0.25; // < 0, below baseline
-            CGFloat hPadding = textSize * kKRSlockHorizontalPaddingRatio; // React px-1 ≈ 4px each side
-            CGFloat chipHeight = textSize * kKRSlockLineHeightRatio;      // React leading-[1.5]
-            CGPoint loc = [self locationForGlyphAtIndex:segmentGlyphRange.location];
-            CGFloat baseline = lineRect.origin.y + loc.y + origin.y;
             BOOL isRunStart = (segmentGlyphRange.location == runGlyphRange.location);
             BOOL isRunEnd = (NSMaxRange(segmentGlyphRange) >= runGlyphEnd);
-            BOOL isInlineCode = [(NSString *)value isEqualToString:@"inlineCode"];
-            if (isInlineCode && lineCharRange.length > 0) {
+            if (lineCharRange.length > 0) {
                 id firstAtom = [textStorage attribute:NSAttachmentAttributeName
                                                atIndex:lineCharRange.location
                                         effectiveRange:NULL];
@@ -782,50 +723,19 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
                 isRunEnd = [lastAtom respondsToSelector:@selector(kr_slockInlineCodeTrailingEdge)] &&
                     [(id<KRSlockInlineCodeAtomProtocol>)lastAtom kr_slockInlineCodeTrailingEdge];
             }
-            CGFloat left;
-            CGFloat right;
-            if (isInlineCode) {
-                // Atom bounds already include 4/15 inner padding + 2/15 outer
-                // margin at the global span edges. Paint the final line-fragment
-                // chain only after TextKit wrapping, trimming the transparent
-                // outer margin while keeping the inner padding inside chrome.
-                CGFloat outerMargin = textSize * (2.0 / 15.0);
-                left = CGRectGetMinX(gb) + origin.x + (isRunStart ? outerMargin : 0.0);
-                right = CGRectGetMaxX(gb) + origin.x - (isRunEnd ? outerMargin : 0.0);
-            } else {
-                // Legacy non-atomic chrome fallback.
-                CGFloat glyphLeft = lineRect.origin.x + loc.x + origin.x;
-                CGFloat glyphRight = CGRectGetMaxX(gb) + origin.x;
-                CGFloat boxReserve = hPadding;
-                left = isRunStart ? (glyphLeft - boxReserve) : glyphLeft;
-                right = isRunEnd ? (glyphRight + boxReserve) : glyphRight;
-            }
+            CGFloat outerMargin = textSize * (2.0 / 15.0);
+            CGFloat left = CGRectGetMinX(gb) + origin.x + (isRunStart ? outerMargin : 0.0);
+            CGFloat right = CGRectGetMaxX(gb) + origin.x - (isRunEnd ? outerMargin : 0.0);
             if (right <= left) {
                 return;
             }
-            CGFloat top;
-            CGFloat bottom;
-            if (isInlineCode) {
-                // The atom attachment already owns the exact 1.5x box height and
-                // centers its glyph image inside that box. Reuse TextKit's final
-                // attachment bounds for chrome so measurement, glyph baseline,
-                // fill and border all share one vertical coordinate system.
-                top = CGRectGetMinY(gb) + origin.y;
-                bottom = CGRectGetMaxY(gb) + origin.y;
-            } else {
-                // Legacy glyph-flow chrome: center a 1.5x box on font metrics.
-                CGFloat centerY = baseline - (ascender + descender) / 2.0;
-                top = centerY - chipHeight / 2.0;
-                bottom = centerY + chipHeight / 2.0;
-            }
+            CGFloat top = CGRectGetMinY(gb) + origin.y;
+            CGFloat bottom = CGRectGetMaxY(gb) + origin.y;
             if (bottom <= top) {
                 return;
             }
-            // CoreGraphics fills (portable across iOS + [macOS]; UIRectFill is iOS-only).
             CGContextSetFillColorWithColor(ctx, fillColor.CGColor);
             CGContextFillRect(ctx, CGRectMake(left, top, right - left, bottom - top));
-            // Black 1dp border, square corners, four crisp edge rects
-            // (SlockRichTextChromeStyleTokens border; KRRichTextViewDrawer.drawSlock*Border).
             CGFloat bw = kKRSlockBorderWidthPt;
             CGFloat bl = floor(left);
             CGFloat bt = floor(top);
@@ -834,14 +744,10 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             CGContextSetFillColorWithColor(ctx, [UIColor blackColor].CGColor);
             CGContextFillRect(ctx, CGRectMake(bl, bt, br - bl, bw));
             CGContextFillRect(ctx, CGRectMake(bl, bb - bw, br - bl, bw));
-            // A wrapping inline-code chain has only two semantic side edges:
-            // the global span start and end. Line-wrap boundaries are internal
-            // atom joins; drawing vertical borders there was the old experiment's
-            // clipping bug (continuation first glyph sat under a pre-drawn edge).
-            if (!isInlineCode || isRunStart) {
+            if (isRunStart) {
                 CGContextFillRect(ctx, CGRectMake(bl, bt, bw, bb - bt));
             }
-            if (!isInlineCode || isRunEnd) {
+            if (isRunEnd) {
                 CGContextFillRect(ctx, CGRectMake(br - bw, bt, bw, bb - bt));
             }
         }];
