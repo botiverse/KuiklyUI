@@ -32,6 +32,42 @@ import kotlin.test.assertIs
 class InlineBoxGroupLoweringTest {
 
     @Test
+    fun inlineBoxLinkStyleStillAppliesChildTypography() {
+        val box = InlineBoxSpanStyle(
+            backgroundColor = Color.Yellow,
+            borderColor = Color.Black,
+            borderWidth = 1.dp,
+            paddingStart = 4.dp,
+            paddingEnd = 4.dp,
+        )
+        val builder = AnnotatedString.Builder()
+        builder.withLink(
+            LinkAnnotation.Url(
+                url = "https://example.test/channel",
+                styles = TextLinkStyles(
+                    style = SpanStyle(
+                        fontWeight = FontWeight.Bold,
+                        inlineBoxStyle = box,
+                    ),
+                ),
+            ),
+        ) {
+            append("#channel")
+        }
+
+        val attr = RichTextAttr()
+        attr.applyAnnotatedString(
+            annoText = builder.toAnnotatedString(),
+            density = Density(1f),
+        )
+
+        val group = assertIs<InlineBoxGroupSpan>(attr.getSpans().single())
+        val child = assertIs<TextSpan>(group.childrenForLayout().single())
+        assertEquals("#channel", child.getText())
+        assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
+    }
+
+    @Test
     fun linkStyleRangeLowersToOneGroupWithStyledChildren() {
         val box = InlineBoxSpanStyle(
             backgroundColor = Color.Yellow,
