@@ -174,7 +174,7 @@ class KRTextFieldView : public IKRRenderViewExport {
     void GetTextInputStateInternal(const KRRenderCallback &callback);
 
     /**
-     * 在 OnTextDidChanged 末尾按需触发，参考 Android 时机一致。
+     * 在 OnTextDidChanged 中按需触发，且必须早于 legacy textDidChange，与 Android 顺序一致。
      * 处于 SetTextInputStateInternal 主动写入期间会被抑制。
      */
     void NotifyTextInputStateChange();
