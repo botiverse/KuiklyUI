@@ -475,16 +475,19 @@ internal fun RichTextAttr.applyAnnotatedString(
                 val linkAnnotation = linkAnnotations
                     .firstOrNull { range -> !(end <= range.start || start >= range.end) }
 
-                // Apply the link's base style before nested span ranges. Inline-box
-                // geometry belongs to the group, while typography/color/decoration
-                // still belongs to each child. Nested span styles retain their normal
-                // precedence over the link defaults.
-                linkAnnotation?.item?.styles?.style?.let { linkStyle ->
-                    applySpanStyle(
-                        linkStyle,
-                        density,
-                        includeInlineBox = inlineBoxRange == null,
-                    )
+                if (inlineBoxRange != null) {
+                    // Geometry and background belong to the outer group. Children
+                    // keep only link typography/foreground/decoration, then nested
+                    // span ranges can override those defaults normally.
+                    linkAnnotation?.item?.styles?.style?.let { linkStyle ->
+                        applySpanStyle(
+                            linkStyle.copy(
+                                background = Color.Unspecified,
+                                inlineBoxStyle = null,
+                            ),
+                            density,
+                        )
+                    }
                 }
 
                 // Apply SpanStyle
@@ -522,6 +525,11 @@ internal fun RichTextAttr.applyAnnotatedString(
                     }
 
                 linkAnnotation?.let { range ->
+                    if (inlineBoxRange == null) {
+                        val spanStyle = range.item.styles?.style ?: SpanStyle()
+                        applySpanStyle(spanStyle, density)
+                    }
+
                     // Add click event handler
                     click { _ ->
                         range.item.linkInteractionListener?.onClick(range.item)
