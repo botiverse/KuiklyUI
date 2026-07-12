@@ -97,6 +97,8 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     BOOL _setNeedUpdatePlaceholder;
     /** maxTextLength backing store */
     NSNumber *_css_maxTextLength;
+    NSNumber *_pendingFocusRequestId;
+    NSNumber *_pendingBlurRequestId;
     /** suppress native selection callback during programmatic selection updates */
     BOOL _ignoreSelectionChange;
     /** suppress intermediate textInputStateChange during programmatic state sync */
@@ -295,13 +297,27 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 #pragma mark - css method
 
 - (void)css_focus:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = requestId;
+    _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (requestId != self->_pendingFocusRequestId && ![requestId isEqual:self->_pendingFocusRequestId]) {
+            return;
+        }
         [self becomeFirstResponder];
     });
 }
 
 - (void)css_blur:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = nil;
     [self resignFirstResponder];
+}
+
+- (void)css_cancelPendingFocus:(NSDictionary *)args {
+    _pendingFocusRequestId = nil;
 }
 
 - (void)css_setText:(NSDictionary *)args {
@@ -501,14 +517,24 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {  // 聚焦
     if (self.css_inputFocus) {
-        self.css_inputFocus(@{@"text": textField.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
+        if (_pendingFocusRequestId) {
+            payload[@"focusRequestId"] = _pendingFocusRequestId;
+        }
+        self.css_inputFocus(payload);
     }
+    _pendingFocusRequestId = nil;
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {  // 失焦
     if (self.css_inputBlur) {
-        self.css_inputBlur(@{@"text": textField.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
+        if (_pendingBlurRequestId) {
+            payload[@"focusRequestId"] = _pendingBlurRequestId;
+        }
+        self.css_inputBlur(payload);
     }
+    _pendingBlurRequestId = nil;
 }
 
 - (void)textFieldDidChangeSelection:(UITextField *)textField {

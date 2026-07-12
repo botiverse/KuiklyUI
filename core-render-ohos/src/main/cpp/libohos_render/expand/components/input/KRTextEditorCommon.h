@@ -282,6 +282,7 @@ static constexpr const char *kTextInputState = "textInputState";
 
 static constexpr const char kMethodFocus[] = "focus";
 static constexpr const char kMethodBlur[] = "blur";
+static constexpr const char kMethodCancelPendingFocus[] = "cancelPendingFocus";
 static constexpr const char kMethodSetText[] = "setText";
 static constexpr const char kMethodGetCursorIndex[] = "getCursorIndex";
 static constexpr const char kMethodSetCursorIndex[] = "setCursorIndex";
@@ -346,6 +347,8 @@ struct KRTextEditorState {
     // 抑制 textDidChange / textInputStateChange / selectionChange 三个回调，
     // 避免业务层 set->callback->set 形成回环。
     bool is_setting_text_input_state_ = false;
+    int64_t pending_focus_request_id_ = 0;
+    int64_t pending_blur_request_id_ = 0;
 
     KRRenderCallback text_did_change_callback_;
     KRRenderCallback input_focus_callback_;

@@ -421,9 +421,11 @@ void KRTextEditorFieldView::CallMethod(const std::string &method, const KRAnyVal
 #else
     using namespace kuikly::text_editor;
     if (kuikly::util::isEqual(method, kMethodFocus)) {
-        Focus();
+        Focus(params ? params->toLong() : 0);
     } else if (kuikly::util::isEqual(method, kMethodBlur)) {
-        Blur();
+        Blur(params ? params->toLong() : 0);
+    } else if (kuikly::util::isEqual(method, kMethodCancelPendingFocus)) {
+        state_.pending_focus_request_id_ = 0;
     } else if (kuikly::util::isEqual(method, kMethodSetText)) {
         SetContentText(params->toString());
     } else if (kuikly::util::isEqual(method, kMethodGetCursorIndex)) {
@@ -503,14 +505,18 @@ void KRTextEditorFieldView::SetSelectionStartPosition(uint32_t index) {
 #endif
 }
 
-void KRTextEditorFieldView::Focus() {
+void KRTextEditorFieldView::Focus(int64_t request_id) {
 #if KUIKLY_TEXT_EDITOR_AVAILABLE
+    state_.pending_focus_request_id_ = request_id;
+    state_.pending_blur_request_id_ = 0;
     kuikly::text_editor::UpdateFocusStatus(GetNode(), true);
 #endif
 }
 
-void KRTextEditorFieldView::Blur() {
+void KRTextEditorFieldView::Blur(int64_t request_id) {
 #if KUIKLY_TEXT_EDITOR_AVAILABLE
+    state_.pending_blur_request_id_ = request_id;
+    state_.pending_focus_request_id_ = 0;
     // 优先走 controller 的 StopEditing（更精准收键盘），再 fallback 到 FocusStatus
     if (state_.controller_) {
         OH_ArkUI_TextEditorStyledStringController_StopEditing(state_.controller_);
@@ -613,8 +619,12 @@ void KRTextEditorFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
         KRRenderValueMap map;
         // 上抛 raw 而非 flat（与 textDidChange 一致），避免业务拿到带占位空格的字符串。
         map["text"] = NewKRRenderValue(state_.cached_text_);
+        if (state_.pending_focus_request_id_ > 0) {
+            map["focusRequestId"] = NewKRRenderValue(state_.pending_focus_request_id_);
+        }
         state_.input_focus_callback_(NewKRRenderValue(map));
     }
+    state_.pending_focus_request_id_ = 0;
 }
 
 void KRTextEditorFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
@@ -622,8 +632,12 @@ void KRTextEditorFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
     if (state_.input_blur_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(state_.cached_text_);
+        if (state_.pending_blur_request_id_ > 0) {
+            map["focusRequestId"] = NewKRRenderValue(state_.pending_blur_request_id_);
+        }
         state_.input_blur_callback_(NewKRRenderValue(map));
     }
+    state_.pending_blur_request_id_ = 0;
 }
 
 void KRTextEditorFieldView::OnInputReturn(ArkUI_NodeEvent *event) {

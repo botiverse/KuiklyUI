@@ -18,6 +18,7 @@ package com.tencent.kuikly.compose.foundation.text
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ComposeNode
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.currentComposer
 import androidx.compose.runtime.currentCompositeKeyHash
 import androidx.compose.runtime.getValue
@@ -53,6 +54,8 @@ import com.tencent.kuikly.compose.ui.platform.LocalDensity
 import com.tencent.kuikly.compose.ui.platform.LocalFocusManager
 import com.tencent.kuikly.compose.ui.platform.LocalLayoutDirection
 import com.tencent.kuikly.compose.ui.platform.LocalSoftwareKeyboardController
+import com.tencent.kuikly.compose.ui.platform.InputFocusTargetReducer
+import com.tencent.kuikly.compose.ui.platform.KuiklySoftwareKeyboardController
 import com.tencent.kuikly.compose.ui.platform.SoftwareKeyboardController
 import com.tencent.kuikly.compose.ui.text.AnnotatedString
 import com.tencent.kuikly.compose.ui.text.MultiParagraph
@@ -189,7 +192,13 @@ internal fun CoreTextField(
         singleLineNew = keyboardOptions?.keyboardType == KeyboardType.Password
     }
 
-    val autoHeightTextAreaView by remember { mutableStateOf(AutoHeightTextAreaView(singleLineNew)) }
+    val autoHeightTextAreaView = remember(singleLineNew) { AutoHeightTextAreaView(singleLineNew) }
+    val kuiklyKeyboardController = keyboardController as? KuiklySoftwareKeyboardController
+    DisposableEffect(autoHeightTextAreaView, kuiklyKeyboardController) {
+        onDispose {
+            kuiklyKeyboardController?.unregisterInput(autoHeightTextAreaView)
+        }
+    }
 
     var lineHeight by remember { mutableStateOf(0f) }
     var oldSize by remember { mutableStateOf(IntSize.Zero) }
@@ -302,6 +311,11 @@ internal fun CoreTextField(
 
     val focusRequester = remember { FocusRequester() }
     var hasFocus by remember { mutableStateOf(false) }
+    val state = remember(keyboardController) {
+        LegacyTextFieldState(
+            keyboardController = keyboardController
+        )
+    }
     // Focus
     val focusModifier = Modifier.textFieldFocusModifier(
         enabled = enabled,
@@ -312,26 +326,13 @@ internal fun CoreTextField(
             return@textFieldFocusModifier
         }
         hasFocus = it.isFocused
+        state.hasFocus = it.isFocused
 
         if (it.isFocused && enabled && !readOnly) {
             requireOwner().softwareKeyboardController.startInput(autoHeightTextAreaView)
         } else {
             requireOwner().softwareKeyboardController.stopInput(autoHeightTextAreaView)
         }
-    }
-
-    val state = remember(keyboardController) {
-        LegacyTextFieldState(
-//            TextDelegate(
-//                text = visualText,
-//                style = textStyle,
-//                softWrap = softWrap,
-//                density = density,
-//                fontFamilyResolver = fontFamilyResolver
-//            ),
-//            recomposeScope = scope,
-            keyboardController = keyboardController
-        )
     }
 
     fun dispatchLimitChange(length: Int?, forceNotify: Boolean = false) {
@@ -373,8 +374,34 @@ internal fun CoreTextField(
                     KNode(textView) {
                         getViewAttr().autofocus(false)
                         getViewAttr().enablePinyinCallback(true)
-                        getViewEvent().inputFocus {
-                            focusRequester.requestFocus()
+                        getViewEvent().inputFocus { params ->
+                            when (
+                                kuiklyKeyboardController?.onNativeFocus(
+                                    autoHeightTextAreaView,
+                                    params.focusRequestId,
+                                )
+                            ) {
+                                InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
+                                null -> {
+                                    if (focusRequester.hasAttachedNodes()) {
+                                        focusRequester.requestFocus()
+                                    } else {
+                                        kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
+                                    }
+                                }
+                                InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+                                InputFocusTargetReducer.NativeFocusDecision.IgnoreStale -> Unit
+                            }
+                        }
+                        getViewEvent().inputBlur { params ->
+                            if (
+                                kuiklyKeyboardController?.onNativeBlur(
+                                    autoHeightTextAreaView,
+                                    params.focusRequestId,
+                                ) == InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear
+                            ) {
+                                focusManager.clearFocus()
+                            }
                         }
 
                     }
@@ -387,13 +414,6 @@ internal fun CoreTextField(
                     set(propsAndEvents) {
                         // 从父亲抽取 TextField 相关的Modifier
                         this.modifier = propsAndEvents
-                    }
-                    set(hasFocus) {
-                        withTextAreaView {
-                            if (hasFocus) {
-                                focus()
-                            }
-                        }
                     }
                     set(editable) {
                         withTextAreaView {

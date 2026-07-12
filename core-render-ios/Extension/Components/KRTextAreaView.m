@@ -113,6 +113,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 @implementation KRTextAreaView {
     NSString *_text;
     BOOL _didAddKeyboardNotification;
+    NSNumber *_pendingFocusRequestId;
+    NSNumber *_pendingBlurRequestId;
     NSInteger _textInputSyncRevision;
     NSMutableDictionary *_props;
     BOOL _ignoreTextDidChanged;
@@ -357,13 +359,27 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 #pragma mark - css method
 
 - (void)css_focus:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = requestId;
+    _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (requestId != self->_pendingFocusRequestId && ![requestId isEqual:self->_pendingFocusRequestId]) {
+            return;
+        }
         [self becomeFirstResponder];
     });
 }
 
 - (void)css_blur:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = nil;
     [self resignFirstResponder];
+}
+
+- (void)css_cancelPendingFocus:(NSDictionary *)args {
+    _pendingFocusRequestId = nil;
 }
 
 - (void)css_getCursorIndex:(NSDictionary *)args {
@@ -1014,15 +1030,25 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 - (void)textViewDidBeginEditing:(UITextView *)textView { // 获焦
     if (self.css_inputFocus) {
-        self.css_inputFocus(@{@"text": textView.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
+        if (_pendingFocusRequestId) {
+            payload[@"focusRequestId"] = _pendingFocusRequestId;
+        }
+        self.css_inputFocus(payload);
     }
+    _pendingFocusRequestId = nil;
 }
 
 
 - (void)textViewDidEndEditing:(UITextView *)textView{ // 失焦
     if (self.css_inputBlur) {
-        self.css_inputBlur(@{@"text": textView.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
+        if (_pendingBlurRequestId) {
+            payload[@"focusRequestId"] = _pendingBlurRequestId;
+        }
+        self.css_inputBlur(payload);
     }
+    _pendingBlurRequestId = nil;
 }
 
 #pragma mark - notication

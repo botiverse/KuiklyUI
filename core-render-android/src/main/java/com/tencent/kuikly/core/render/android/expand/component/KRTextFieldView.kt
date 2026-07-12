@@ -143,6 +143,8 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
      * 如果这两者没处于 focus 时，收到显示键盘的请求, lazy 住，等两者都 focus 时，才显示键盘
      */
     private var pendingFocus = false
+    private var pendingFocusRequestId: Long? = null
+    private var pendingBlurRequestId: Long? = null
 
     private var currentKeyboardHeight = 0
     private var lengthLimitType: Int = -1
@@ -268,8 +270,9 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
     override fun call(method: String, params: String?, callback: KuiklyRenderCallback?): Any? {
         return when (method) {
             METHOD_SET_TEXT -> setInputText(params)
-            METHOD_FOCUS -> setFocus()
-            METHOD_BLUR -> setBlur()
+            METHOD_FOCUS -> setFocus(params)
+            METHOD_BLUR -> setBlur(params)
+            METHOD_CANCEL_PENDING_FOCUS -> cancelPendingFocus()
             METHOD_GET_CURSOR_INDEX -> getCursorIndex(callback)
             METHOD_SET_CURSOR_INDEX -> setCursorIndex(params)
             METHOD_SET_TEXT_INPUT_STATE -> setTextInputState(params)
@@ -618,9 +621,16 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         return true
     }
 
-    private fun setFocus() {
+    private fun setFocus(params: String? = null) {
+        pendingFocusRequestId = params?.toLongOrNull()
+        pendingBlurRequestId = null
         isFocusable = true
         isFocusableInTouchMode = true
+        if (hasFocus()) {
+            pendingFocusRequestId = null
+            showKeyboard()
+            return
+        }
         requestFocus()
         post {
             if (hasWindowFocus() && hasFocus()) {
@@ -652,12 +662,22 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
 
-    private fun setBlur() {
+    private fun setBlur(params: String? = null) {
+        pendingBlurRequestId = params?.toLongOrNull()
+        pendingFocusRequestId = null
+        pendingFocus = false
         clearFocus()
         post {
-            val imm = context.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.hideSoftInputFromWindow(windowToken, 0)
+            if (rootView.findFocus() == null) {
+                val imm = context.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(windowToken, 0)
+            }
         }
+    }
+
+    private fun cancelPendingFocus() {
+        pendingFocusRequestId = null
+        pendingFocus = false
     }
 
     private fun getCursorIndex(callback: KuiklyRenderCallback?) {
@@ -796,9 +816,11 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
         setOnFocusChangeListener { _, focus ->
             if (focus) {
-                inputFocusCallback?.invoke(createCallbackParamMap())
+                inputFocusCallback?.invoke(createFocusCallbackParamMap(pendingFocusRequestId))
+                pendingFocusRequestId = null
             } else {
-                inputBlurCallback?.invoke(createCallbackParamMap())
+                inputBlurCallback?.invoke(createFocusCallbackParamMap(pendingBlurRequestId))
+                pendingBlurRequestId = null
             }
         }
         return true
@@ -856,6 +878,12 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         val result = mutableMapOf<String, Any>(KEY_TEXT to rawText.toString())
         length?.let { result[KEY_LENGTH] = it }
         return textInputSyncRevisionState.snapshot(result)
+    }
+
+    private fun createFocusCallbackParamMap(requestId: Long?): Map<String, Any> {
+        val result = createCallbackParamMap().toMutableMap()
+        requestId?.let { result[KEY_FOCUS_REQUEST_ID] = it }
+        return result
     }
 
     private fun createTextInputStateParamMap(): Map<String, Any> {
@@ -1078,6 +1106,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val METHOD_SET_TEXT = "setText"
         private const val METHOD_FOCUS = "focus"
         private const val METHOD_BLUR = "blur"
+        private const val METHOD_CANCEL_PENDING_FOCUS = "cancelPendingFocus"
         private const val METHOD_GET_CURSOR_INDEX = "getCursorIndex"
         private const val METHOD_SET_CURSOR_INDEX = "setCursorIndex"
         private const val METHOD_SET_TEXT_INPUT_STATE = "setTextInputState"
@@ -1093,6 +1122,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val KEY_SELECTION_START = "selectionStart"
         private const val KEY_SELECTION_END = "selectionEnd"
         private const val KEY_COMPOSITION_START = "compositionStart"
+        private const val KEY_FOCUS_REQUEST_ID = "focusRequestId"
         private const val KEY_COMPOSITION_END = "compositionEnd"
         private const val KEY_LENGTH = "length"
         private const val KEY_SYNC_REVISION = "syncRevision"

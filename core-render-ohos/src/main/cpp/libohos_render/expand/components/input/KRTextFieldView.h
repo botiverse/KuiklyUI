@@ -121,16 +121,18 @@ class KRTextFieldView : public IKRRenderViewExport {
     KRRenderCallback selection_change_callback_;          // 选区变化callback（与 Android KRTextFieldView.selectionChangeCallback 对齐）
     bool auto_hide_KeyBoard_on_ImeAction_ = false;        // 在触发各种IME 按钮时是否回收键盘，默认是不回收
     bool is_setting_text_input_state_ = false;            // 通过 setTextInputState 主动写入期间，抑制 textInputStateChange 回流防止业务死循环
+    int64_t pending_focus_request_id_ = 0;
+    int64_t pending_blur_request_id_ = 0;
 
     /**
      * 输入框获焦（弹起键盘）
      */
-    void Focus();
+    void Focus(int64_t request_id = 0);
 
     /**
      * 输入框失焦（收起键盘）
      */
-    void Blur();
+    void Blur(int64_t request_id = 0);
 
     /**
      * 获取光标位置
