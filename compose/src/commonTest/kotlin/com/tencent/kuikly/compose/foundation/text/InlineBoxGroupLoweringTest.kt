@@ -43,7 +43,6 @@ class InlineBoxGroupLoweringTest {
             paddingEnd = 4.dp,
         )
         val builder = AnnotatedString.Builder()
-        builder.pushStringAnnotation("raft.build.markdown.tagChrome", "channel")
         builder.withLink(
             LinkAnnotation.Url(
                 url = "https://example.test/channel",
@@ -58,7 +57,6 @@ class InlineBoxGroupLoweringTest {
         ) {
             append("#channel")
         }
-        builder.pop()
 
         val attr = RichTextAttr()
         attr.applyAnnotatedString(
@@ -71,7 +69,6 @@ class InlineBoxGroupLoweringTest {
         assertEquals("#channel", child.getText())
         assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
         assertEquals(null, child.spanPropsMap()[Attr.StyleConst.BACKGROUND_COLOR])
-        assertEquals(null, child.spanPropsMap()[TextConst.SLOCK_MARKDOWN_TAG_CHROME])
     }
 
     @Test

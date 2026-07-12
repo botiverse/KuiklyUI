@@ -47,15 +47,6 @@ private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
 private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
 private const val SLOCK_INLINE_CODE_BORDER_WIDTH_DP = 1f
 private const val SLOCK_INLINE_CODE_BORDER_MIN_WIDTH = 2f
-private const val SLOCK_MARKDOWN_TAG_KIND_CHANNEL = "channel"
-private const val SLOCK_MARKDOWN_TAG_KIND_THREAD = "thread"
-private const val SLOCK_MARKDOWN_TAG_KIND_TASK = "task"
-private const val SLOCK_MARKDOWN_TAG_KIND_SELF_MENTION = "selfMention"
-private const val SLOCK_MARKDOWN_TAG_KIND_ACTIVE = "active"
-private const val SLOCK_MARKDOWN_TAG_CHANNEL_FILL_COLOR = 0x4DFE7DA8
-private const val SLOCK_MARKDOWN_TAG_THREAD_FILL_COLOR = 0x4D27CCF3
-private const val SLOCK_MARKDOWN_TAG_TASK_FILL_COLOR = 0x66FFD440
-private const val SLOCK_MARKDOWN_TAG_SELF_MENTION_FILL_COLOR = 0xFFFFD440.toInt()
 
 /**
  * 富文本绘制器，封装 [Layout]，用于富文本视图的测量与绘制。
@@ -80,15 +71,6 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         isAntiAlias = false
     }
     private val slockInlineCodeRect = RectF()
-    private val slockMarkdownTagFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-    private val slockMarkdownTagBorderPaint = Paint().apply {
-        style = Paint.Style.FILL
-        color = SLOCK_INLINE_CODE_BORDER_COLOR
-        isAntiAlias = false
-    }
-    private val slockMarkdownTagRect = RectF()
     private val inlineBoxFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
@@ -121,10 +103,8 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     fun draw(canvas: Canvas) {
         drawInlineBoxChrome(canvas, drawFill = true, drawBorder = false)
         drawSlockInlineCodeChrome(canvas, drawFill = true, drawBorder = false)
-        drawSlockMarkdownTagChrome(canvas, drawFill = true, drawBorder = false)
         textLayout.draw(canvas)
         drawSlockInlineCodeChrome(canvas, drawFill = false, drawBorder = true)
-        drawSlockMarkdownTagChrome(canvas, drawFill = false, drawBorder = true)
         drawInlineBoxChrome(canvas, drawFill = false, drawBorder = true)
     }
 
@@ -197,84 +177,6 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                         max(0f, style.cornerRadius - inset),
                         inlineBoxBorderPaint
                     )
-                }
-            }
-        }
-    }
-
-    private fun drawSlockMarkdownTagChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
-        val spanned = textLayout.text as? Spanned ?: return
-        val spans = spanned.getSpans(0, spanned.length, KRSlockMarkdownTagSpan::class.java)
-        if (spans.isEmpty()) return
-
-        val paint = textLayout.paint
-        val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
-        val horizontalMargin = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO
-        val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
-        val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
-        val fontMetrics = paint.fontMetrics
-        val layoutLeft = 0f
-        val layoutRight = textLayout.width.toFloat()
-
-        spans.forEach { span ->
-            if (!span.kind.isSlockMarkdownTagChipChrome()) return@forEach
-            val start = spanned.getSpanStart(span)
-            val end = spanned.getSpanEnd(span)
-            if (start < 0 || end <= start) return@forEach
-
-            if (drawFill) {
-                slockMarkdownTagFillPaint.color = span.kind.slockMarkdownTagFillColor()
-            }
-            val startLine = textLayout.getLineForOffset(start)
-            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
-            for (line in startLine..endLine) {
-                val lineStart = textLayout.getLineStart(line)
-                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
-                val segmentStart = max(start, lineStart)
-                val segmentEnd = min(end, lineVisibleEnd)
-                if (segmentEnd <= segmentStart) continue
-
-                val startX =
-                    if (segmentStart <= lineStart) {
-                        layoutLeft
-                    } else {
-                        textLayout.getPrimaryHorizontal(segmentStart)
-                    }
-                val endX =
-                    if (segmentEnd >= lineVisibleEnd) {
-                        textLayout.getLineRight(line)
-                    } else {
-                        textLayout.getPrimaryHorizontal(segmentEnd)
-                    }
-                val segmentLeft = min(startX, endX)
-                val segmentRight = max(startX, endX)
-                val left = if (segmentStart == start) {
-                    segmentLeft + horizontalMargin
-                } else {
-                    segmentLeft - horizontalPadding
-                }.coerceAtLeast(layoutLeft)
-                val right = if (segmentEnd == end) {
-                    segmentRight - horizontalMargin
-                } else {
-                    segmentRight + horizontalPadding
-                }.coerceAtMost(layoutRight)
-                if (right <= left) continue
-
-                val baseline = textLayout.getLineBaseline(line).toFloat()
-                val textTop = baseline + fontMetrics.ascent - verticalPadding
-                val textBottom = baseline + fontMetrics.descent + verticalPadding
-                val height = max(textBottom - textTop, minHeight)
-                val centerY = (textTop + textBottom) / 2f
-                val top = centerY - height / 2f
-                val bottom = centerY + height / 2f
-                if (bottom <= top) continue
-
-                slockMarkdownTagRect.set(left, top, right, bottom)
-                if (drawFill) {
-                    canvas.drawRect(slockMarkdownTagRect, slockMarkdownTagFillPaint)
-                }
-                if (drawBorder) {
-                    canvas.drawSlockMarkdownTagBorder(left, top, right, bottom)
                 }
             }
         }
@@ -381,28 +283,6 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         drawRect(borderLeft, borderTop, borderLeft + borderWidth, borderBottom, slockInlineCodeBorderPaint)
         drawRect(borderRight - borderWidth, borderTop, borderRight, borderBottom, slockInlineCodeBorderPaint)
     }
-
-    private fun Canvas.drawSlockMarkdownTagBorder(left: Float, top: Float, right: Float, bottom: Float) {
-        val borderWidth = slockChipBorderWidthPx
-        val borderLeft = floor(left)
-        val borderTop = floor(top)
-        val borderRight = ceil(right)
-        val borderBottom = ceil(bottom)
-        drawRect(borderLeft, borderTop, borderRight, borderTop + borderWidth, slockMarkdownTagBorderPaint)
-        drawRect(borderLeft, borderBottom - borderWidth, borderRight, borderBottom, slockMarkdownTagBorderPaint)
-        drawRect(borderLeft, borderTop, borderLeft + borderWidth, borderBottom, slockMarkdownTagBorderPaint)
-        drawRect(borderRight - borderWidth, borderTop, borderRight, borderBottom, slockMarkdownTagBorderPaint)
-    }
-
-    private fun String.slockMarkdownTagFillColor(): Int =
-        when (this) {
-            SLOCK_MARKDOWN_TAG_KIND_CHANNEL -> SLOCK_MARKDOWN_TAG_CHANNEL_FILL_COLOR
-            SLOCK_MARKDOWN_TAG_KIND_THREAD -> SLOCK_MARKDOWN_TAG_THREAD_FILL_COLOR
-            SLOCK_MARKDOWN_TAG_KIND_SELF_MENTION -> SLOCK_MARKDOWN_TAG_SELF_MENTION_FILL_COLOR
-            SLOCK_MARKDOWN_TAG_KIND_ACTIVE -> SLOCK_MARKDOWN_TAG_SELF_MENTION_FILL_COLOR
-            SLOCK_MARKDOWN_TAG_KIND_TASK -> SLOCK_MARKDOWN_TAG_TASK_FILL_COLOR
-            else -> SLOCK_MARKDOWN_TAG_TASK_FILL_COLOR
-        }
 
     private fun Layout.slockInlineCodeVisibleEnd(line: Int): Int {
         val lineStart = getLineStart(line)
