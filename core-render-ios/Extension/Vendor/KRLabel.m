@@ -670,18 +670,18 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             if (boxHeight <= 0) {
                 boxHeight = CGRectGetHeight(bounds) + paddingTop + paddingBottom + borderWidth * 2.0;
             }
-            CGFloat centerY = CGRectGetMidY(bounds) + origin.y;
-            CGFloat top = centerY - boxHeight / 2.0;
-            CGFloat bottom = centerY + boxHeight / 2.0;
-            // TextKit clips background drawing to the current line fragment. Clamp
-            // the painted box before drawing either layer so the fill and border
-            // share one vertical edge. Clamping only the stroke leaves a visible
-            // fill strip below the bottom border when the nominal box is taller
-            // than the fragment.
             CGFloat fragmentTop = CGRectGetMinY(lineRect) + origin.y;
             CGFloat fragmentBottom = CGRectGetMaxY(lineRect) + origin.y;
-            top = MAX(top, fragmentTop);
-            bottom = MIN(bottom, fragmentBottom);
+            CGFloat fragmentHeight = fragmentBottom - fragmentTop;
+            // Keep the intended box height whenever the line can contain it, but
+            // center the whole fill+border rect inside TextKit's drawable fragment.
+            // This preserves the chip height instead of trimming only its colored
+            // tail, while ensuring the border fully encloses the fill. Extremely
+            // short fragments fall back to their available height.
+            CGFloat paintedHeight = MIN(boxHeight, fragmentHeight);
+            CGFloat centerY = (fragmentTop + fragmentBottom) / 2.0;
+            CGFloat top = centerY - paintedHeight / 2.0;
+            CGFloat bottom = centerY + paintedHeight / 2.0;
             if (bottom <= top) return;
             CGRect rect = CGRectMake(left, top, right - left, bottom - top);
             UIColor *fill = style[@"backgroundColor"];
