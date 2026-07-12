@@ -140,12 +140,27 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     private fun execute(command: InputFocusTargetReducer.Command<AutoHeightTextAreaView>?) {
         when (command) {
             is InputFocusTargetReducer.Command.Focus ->
-                command.view.focus(command.generation)
+                executeFocus(command)
             is InputFocusTargetReducer.Command.Blur ->
                 command.view.blur(command.generation)
             is InputFocusTargetReducer.Command.CancelPendingFocus ->
                 command.view.cancelPendingFocus(command.generation)
             null -> Unit
         }
+    }
+
+    private fun executeFocus(
+        command: InputFocusTargetReducer.Command.Focus<AutoHeightTextAreaView>,
+    ) {
+        command.view.focus(command.generation)
+        setTimeout(command.view.pagerId, FocusCompletionTimeoutMs) {
+            if (focusReducer.onFocusRequestTimeout(command.view, command.generation)) {
+                scheduleReconcile(command.view)
+            }
+        }
+    }
+
+    private companion object {
+        const val FocusCompletionTimeoutMs = 120
     }
 }

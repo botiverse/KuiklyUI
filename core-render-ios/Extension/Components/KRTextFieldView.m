@@ -531,6 +531,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {  // 聚焦
+    _pendingBlurRequestId = nil;
     if (self.css_inputFocus) {
         NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
         if (_pendingFocusRequestId) {
@@ -542,6 +543,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {  // 失焦
+    _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
         NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
         if (_pendingBlurRequestId) {

@@ -520,12 +520,16 @@ void KRTextEditorFieldView::Blur(int64_t request_id) {
     state_.pending_blur_request_id_ = request_id;
     state_.pending_focus_request_id_ = 0;
     // 优先走 controller 的 StopEditing（更精准收键盘），再 fallback 到 FocusStatus
-    if (state_.controller_) {
-        OH_ArkUI_TextEditorStyledStringController_StopEditing(state_.controller_);
-    } else {
-        if (!kuikly::text_editor::UpdateFocusStatus(GetNode(), false)) {
-            state_.pending_blur_request_id_ = 0;
-        }
+    bool requested = false;
+    if (state_.controller_ && OH_ArkUI_TextEditorStyledStringController_StopEditing) {
+        requested = OH_ArkUI_TextEditorStyledStringController_StopEditing(state_.controller_) ==
+                    ARKUI_ERROR_CODE_NO_ERROR;
+    }
+    if (!requested) {
+        requested = kuikly::text_editor::UpdateFocusStatus(GetNode(), false);
+    }
+    if (!requested) {
+        state_.pending_blur_request_id_ = 0;
     }
 #endif
 }
@@ -619,6 +623,7 @@ void KRTextEditorFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
 
 void KRTextEditorFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
     (void)event;
+    state_.pending_blur_request_id_ = 0;
     if (state_.input_focus_callback_) {
         KRRenderValueMap map;
         // 上抛 raw 而非 flat（与 textDidChange 一致），避免业务拿到带占位空格的字符串。
@@ -633,6 +638,7 @@ void KRTextEditorFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
 
 void KRTextEditorFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
     (void)event;
+    state_.pending_focus_request_id_ = 0;
     if (state_.input_blur_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(state_.cached_text_);

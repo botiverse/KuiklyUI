@@ -1043,6 +1043,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 }
 
 - (void)textViewDidBeginEditing:(UITextView *)textView { // 获焦
+    _pendingBlurRequestId = nil;
     if (self.css_inputFocus) {
         NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
         if (_pendingFocusRequestId) {
@@ -1055,6 +1056,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 
 - (void)textViewDidEndEditing:(UITextView *)textView{ // 失焦
+    _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
         NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
         if (_pendingBlurRequestId) {

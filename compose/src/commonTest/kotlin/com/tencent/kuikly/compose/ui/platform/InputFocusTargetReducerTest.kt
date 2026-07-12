@@ -99,6 +99,39 @@ class InputFocusTargetReducerTest {
     }
 
     @Test
+    fun nativeFocusFailureCanRetrySameDesiredViewAfterLifecycleRecovers() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("not-ready-then-ready")
+
+        reducer.start(view)
+        val failedRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+
+        assertTrue(reducer.onFocusRequestTimeout(view, failedRequest.generation))
+        val retry = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        assertSame(view, retry.view)
+        assertEquals(failedRequest.generation, retry.generation)
+
+        reducer.onNativeFocus(view, retry.generation)
+        assertSame(view, reducer.observedView)
+        assertNull(reducer.reconcile())
+    }
+
+    @Test
+    fun nativeFocusFailureRetryIsBoundedWithinOneGeneration() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("permanently-unavailable")
+
+        reducer.start(view)
+        repeat(2) {
+            val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+            assertTrue(reducer.onFocusRequestTimeout(view, request.generation))
+        }
+        val lastRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        assertEquals(false, reducer.onFocusRequestTimeout(view, lastRequest.generation))
+        assertNull(reducer.reconcile())
+    }
+
+    @Test
     fun nativeUserFocusRequiresComposeApproval() {
         val reducer = InputFocusTargetReducer<View>()
         val first = View("first")
@@ -209,5 +242,27 @@ class InputFocusTargetReducerTest {
 
         assertSame(view, reducer.desiredView)
         assertSame(view, assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile()).view)
+    }
+
+    @Test
+    fun blurWithoutProgrammaticCallbackStillLetsLaterUserBlurClearCompose() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("editor")
+
+        reducer.start(view)
+        val firstFocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        reducer.onNativeFocus(view, firstFocus.generation)
+        reducer.stop(view)
+        assertIs<InputFocusTargetReducer.Command.Blur<View>>(reducer.reconcile())
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
+            reducer.onNativeFocus(view, requestId = null),
+        )
+        reducer.start(view)
+        assertEquals(
+            InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear,
+            reducer.onNativeBlur(view, requestId = null),
+        )
     }
 }

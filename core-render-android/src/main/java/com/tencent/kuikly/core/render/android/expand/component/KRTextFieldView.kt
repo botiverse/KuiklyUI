@@ -827,9 +827,12 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
         setOnFocusChangeListener { _, focus ->
             if (focus) {
+                pendingBlurRequestId = null
                 inputFocusCallback?.invoke(createFocusCallbackParamMap(pendingFocusRequestId))
                 pendingFocusRequestId = null
             } else {
+                pendingFocusRequestId = null
+                pendingFocus = false
                 inputBlurCallback?.invoke(createFocusCallbackParamMap(pendingBlurRequestId))
                 pendingBlurRequestId = null
             }

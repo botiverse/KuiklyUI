@@ -613,6 +613,7 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
  * 获焦回调
  */
 void KRTextFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
+    pending_blur_request_id_ = 0;
     if (input_focus_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(GetContentText());
@@ -627,6 +628,7 @@ void KRTextFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
  * 失焦回调
  */
 void KRTextFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
+    pending_focus_request_id_ = 0;
     if (input_blur_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(GetContentText());

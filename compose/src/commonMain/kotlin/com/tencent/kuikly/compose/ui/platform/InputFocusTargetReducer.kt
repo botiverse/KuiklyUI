@@ -64,12 +64,14 @@ internal class InputFocusTargetReducer<T : Any> {
 
     private var pendingFocusView: T? = null
     private var pendingFocusGeneration: Long? = null
+    private var focusAttemptCount = 0
     private var pendingBlurView: T? = null
 
     internal fun start(view: T): List<Command<T>> {
         if (desiredView === view) return emptyList()
         generation += 1
         desiredView = view
+        focusAttemptCount = 0
         return cancelSupersededPendingFocus(view)
     }
 
@@ -77,6 +79,7 @@ internal class InputFocusTargetReducer<T : Any> {
         if (desiredView !== view) return emptyList()
         generation += 1
         desiredView = null
+        focusAttemptCount = 0
         return cancelSupersededPendingFocus(null)
     }
 
@@ -90,8 +93,10 @@ internal class InputFocusTargetReducer<T : Any> {
         }
         if (observedView === target) return null
         if (pendingFocusView === target && pendingFocusGeneration == generation) return null
+        if (focusAttemptCount >= MaxFocusAttemptsPerGeneration) return null
         pendingFocusView = target
         pendingFocusGeneration = generation
+        focusAttemptCount += 1
         pendingBlurView = null
         return Command.Focus(target, generation)
     }
@@ -110,6 +115,7 @@ internal class InputFocusTargetReducer<T : Any> {
             }
             pendingFocusView = null
             pendingFocusGeneration = null
+            focusAttemptCount = 0
             return NativeFocusDecision.Confirmed
         }
 
@@ -118,6 +124,7 @@ internal class InputFocusTargetReducer<T : Any> {
         if (desiredView === view) {
             pendingFocusView = null
             pendingFocusGeneration = null
+            focusAttemptCount = 0
             return NativeFocusDecision.Confirmed
         }
         return NativeFocusDecision.RequestComposeFocus
@@ -143,6 +150,7 @@ internal class InputFocusTargetReducer<T : Any> {
         if (desiredView === view) {
             generation += 1
             desiredView = null
+            focusAttemptCount = 0
         }
         if (pendingFocusView === view) {
             commands += Command.CancelPendingFocus(view, generation)
@@ -158,11 +166,34 @@ internal class InputFocusTargetReducer<T : Any> {
         if (observedView === view) observedView = null
     }
 
+    /**
+     * Releases a programmatic focus request that produced no native completion callback.
+     *
+     * Native renderers can reject a request because their node/window is not ready. The bridge
+     * command itself has no completion callback, so use a bounded generation-scoped timeout to
+     * retry without turning a permanently unavailable editor into an unbounded focus storm.
+     */
+    internal fun onFocusRequestTimeout(view: T, requestGeneration: Long): Boolean {
+        val matchesPendingRequest =
+            pendingFocusView === view && pendingFocusGeneration == requestGeneration
+        if (!matchesPendingRequest) return false
+        pendingFocusView = null
+        pendingFocusGeneration = null
+        return desiredView === view &&
+            observedView !== view &&
+            generation == requestGeneration &&
+            focusAttemptCount < MaxFocusAttemptsPerGeneration
+    }
+
     private fun cancelSupersededPendingFocus(nextView: T?): List<Command<T>> {
         val pending = pendingFocusView ?: return emptyList()
         if (pending === nextView) return emptyList()
         pendingFocusView = null
         pendingFocusGeneration = null
         return listOf(Command.CancelPendingFocus(pending, generation))
+    }
+
+    private companion object {
+        const val MaxFocusAttemptsPerGeneration = 3
     }
 }
