@@ -519,7 +519,10 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
             // it through the same request-id/generation arbiter as a user focus
             // event so Compose FocusOwner can accept or reject it before the
             // editor becomes first responder.
-            self.css_inputFocus(@{ @"text" : [self p_outputText] ?: @"" });
+            self.css_inputFocus(@{
+                @"text" : [self p_outputText] ?: @"",
+                @"focusIntentOnly" : @YES
+            });
         });
     }
 }

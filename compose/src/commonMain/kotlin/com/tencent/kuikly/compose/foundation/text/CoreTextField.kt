@@ -375,6 +375,20 @@ internal fun CoreTextField(
                         getViewAttr().autofocus(false)
                         getViewAttr().enablePinyinCallback(true)
                         getViewEvent().inputFocus { params ->
+                            if (params.focusIntentOnly) {
+                                if (!enabled || readOnly) {
+                                    return@inputFocus
+                                }
+                                val intentDecision =
+                                    kuiklyKeyboardController?.onNativeFocusIntent(autoHeightTextAreaView)
+                                if (
+                                    intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
+                                    intentDecision == null
+                                ) {
+                                    focusRequester.focus()
+                                }
+                                return@inputFocus
+                            }
                             val nativeFocusDecision = kuiklyKeyboardController?.onNativeFocus(
                                 autoHeightTextAreaView,
                                 params.focusRequestId,

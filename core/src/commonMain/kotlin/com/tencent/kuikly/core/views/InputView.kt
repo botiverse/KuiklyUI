@@ -397,6 +397,7 @@ data class InputParams(
     val length: Int? = null,
     val syncRevision: Int? = null,
     val focusRequestId: Long? = null,
+    val focusIntentOnly: Boolean = false,
 )
 
 data class KeyboardParams(
@@ -461,7 +462,13 @@ class InputEvent : Event() {
             it as JSONObject
             val text = it.optString("text")
             val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
-            handler(InputParams(text, focusRequestId = focusRequestId))
+            handler(
+                InputParams(
+                    text = text,
+                    focusRequestId = focusRequestId,
+                    focusIntentOnly = it.optBoolean("focusIntentOnly"),
+                ),
+            )
         }
     }
 
