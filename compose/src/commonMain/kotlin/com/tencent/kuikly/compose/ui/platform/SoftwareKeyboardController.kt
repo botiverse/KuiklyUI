@@ -95,7 +95,11 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     ): InputFocusTargetReducer.NativeFocusDecision {
         val decision = focusReducer.onNativeFocus(view, requestId)
         if (decision == InputFocusTargetReducer.NativeFocusDecision.IgnoreStale) {
-            scheduleReconcile(view)
+            // The callback proves that native focus actually landed, even though the request no
+            // longer belongs to the current generation. Do not publish the detached/old editor as
+            // observed state; explicitly reject it so native first-responder state cannot survive
+            // after common ownership moved on.
+            rejectNativeFocus(view)
         }
         return decision
     }
