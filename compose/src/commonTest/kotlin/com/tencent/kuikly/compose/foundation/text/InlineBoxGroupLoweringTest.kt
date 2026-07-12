@@ -18,6 +18,7 @@ import com.tencent.kuikly.compose.ui.text.withLink
 import com.tencent.kuikly.compose.ui.text.withStyle
 import com.tencent.kuikly.compose.ui.unit.Density
 import com.tencent.kuikly.compose.ui.unit.dp
+import com.tencent.kuikly.core.base.Attr
 import com.tencent.kuikly.core.views.InlineBoxGroupSpan
 import com.tencent.kuikly.core.views.InlineBoxSpanStyle as CoreInlineBoxSpanStyle
 import com.tencent.kuikly.core.views.PlaceholderSpan
@@ -82,6 +83,41 @@ class InlineBoxGroupLoweringTest {
 
         val props = group.spanPropsMap()
         assertEquals("#proj msg", props[InlineBoxGroupSpan.PROP_KEY_SEMANTIC_TEXT])
+    }
+
+    @Test
+    fun inlineBoxLinkKeepsTypographyWithoutRepeatingOuterChromeOnChild() {
+        val box = InlineBoxSpanStyle(
+            backgroundColor = Color.Yellow,
+            borderColor = Color.Black,
+            borderWidth = 1.dp,
+        )
+        val text = AnnotatedString.Builder().apply {
+            withLink(
+                LinkAnnotation.Url(
+                    url = "https://example.test/channel",
+                    styles = TextLinkStyles(
+                        style = SpanStyle(
+                            color = Color.Red,
+                            background = Color.Yellow,
+                            fontWeight = FontWeight.Bold,
+                            inlineBoxStyle = box,
+                        ),
+                    ),
+                )
+            ) {
+                append("#channel")
+            }
+        }.toAnnotatedString()
+
+        val attr = RichTextAttr()
+        attr.applyAnnotatedString(text, density = Density(1f))
+
+        val group = assertIs<InlineBoxGroupSpan>(attr.getSpans().single())
+        val child = assertIs<TextSpan>(group.childrenForLayout().single())
+        assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
+        assertEquals(Color.Red.toKuiklyColor().toString(), child.spanPropsMap()[TextConst.TEXT_COLOR])
+        assertEquals(null, child.spanPropsMap()[Attr.StyleConst.BACKGROUND_COLOR])
     }
 
     @Test

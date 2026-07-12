@@ -472,6 +472,24 @@ internal fun RichTextAttr.applyAnnotatedString(
                 this.pagerId = this@applyAnnotatedString.pagerId
                 text(annoText.text.substring(start, end))
 
+                val linkAnnotation = linkAnnotations
+                    .firstOrNull { range -> !(end <= range.start || start >= range.end) }
+
+                if (inlineBoxRange != null) {
+                    val linkStyle = linkAnnotation?.item?.styles?.style ?: SpanStyle()
+                    // Apply the outer link style first so more specific child
+                    // span styles can still override it. The group owns its
+                    // fill and box geometry; children inherit typography,
+                    // color, and decoration only.
+                    applySpanStyle(
+                        linkStyle.copy(
+                            background = Color.Unspecified,
+                            inlineBoxStyle = null,
+                        ),
+                        density,
+                    )
+                }
+
                 // Apply SpanStyle
                 annoText.spanStyles
                     .filter { range -> !(end <= range.start || start >= range.end) }
@@ -507,9 +525,6 @@ internal fun RichTextAttr.applyAnnotatedString(
                     }
 
                 // Handle LinkAnnotation for current range
-                val linkAnnotation = linkAnnotations
-                    .firstOrNull { range -> !(end <= range.start || start >= range.end) }
-
                 // Apply LinkAnnotation styles if found
                 linkAnnotation?.let { range ->
                     if (inlineBoxRange == null) {
