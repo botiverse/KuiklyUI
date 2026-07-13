@@ -78,6 +78,9 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         style = Paint.Style.STROKE
     }
     private val inlineBoxRect = RectF()
+    private val inlineBoxSelectionPath = Path()
+    private val inlineBoxLineClipPath = Path()
+    private val inlineBoxSelectionBounds = RectF()
 
     private val wordIterator by lazy(LazyThreadSafetyMode.NONE) {
         WordIterator(textLayout.text, 0, textLayout.text.length, Locale.getDefault())
@@ -121,6 +124,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
             val end = spanned.getSpanEnd(span)
             if (start < 0 || end <= start) return@forEach
             val style = span.style
+            val atomicSpan =
+                spanned.getSpans(start, end, KRInlineBoxAtomicTextSpan::class.java)
+                    .firstOrNull { atomicSpan ->
+                        spanned.getSpanStart(atomicSpan) == start &&
+                            spanned.getSpanEnd(atomicSpan) == end
+                    }
             val startLine = textLayout.getLineForOffset((start + 1).coerceAtMost(end - 1))
             val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
             for (line in startLine..endLine) {
@@ -129,19 +138,31 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 val segmentStart = max(start, lineStart)
                 val segmentEnd = min(end, lineVisibleEnd)
                 if (segmentEnd <= segmentStart) continue
-                val startX = max(
-                    textLayout.getPrimaryHorizontal(segmentStart),
-                    textLayout.getSecondaryHorizontal(segmentStart),
-                )
-                // At a run boundary Android's primary caret may use downstream
-                // affinity and jump across the following span. The upstream
-                // caret is the actual visual end of this inline group.
-                val endX = min(
-                    textLayout.getPrimaryHorizontal(segmentEnd),
-                    textLayout.getSecondaryHorizontal(segmentEnd),
-                )
-                val segmentLeft = min(startX, endX)
-                val segmentRight = max(startX, endX)
+                val atomicBounds =
+                    atomicSpan?.let { atomicInlineBoxBounds(start, end, line, it) }
+                val segmentLeft: Float
+                val segmentRight: Float
+                if (atomicBounds != null) {
+                    // ReplacementSpan caret affinity can still resolve to adjacent
+                    // text. The selection path keeps the visual anchor, while the
+                    // span's measured width avoids line-end selection expansion.
+                    segmentLeft = atomicBounds.left
+                    segmentRight = atomicBounds.right
+                } else {
+                    val startX = max(
+                        textLayout.getPrimaryHorizontal(segmentStart),
+                        textLayout.getSecondaryHorizontal(segmentStart),
+                    )
+                    // At a run boundary Android's primary caret may use downstream
+                    // affinity and jump across the following span. The upstream
+                    // caret is the actual visual end of this inline group.
+                    val endX = min(
+                        textLayout.getPrimaryHorizontal(segmentEnd),
+                        textLayout.getSecondaryHorizontal(segmentEnd),
+                    )
+                    segmentLeft = min(startX, endX)
+                    segmentRight = max(startX, endX)
+                }
                 val left = (
                     segmentLeft + if (segmentStart == start) style.marginStart else 0f
                     )
@@ -180,6 +201,39 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 }
             }
         }
+    }
+
+    private fun atomicInlineBoxBounds(
+        start: Int,
+        end: Int,
+        line: Int,
+        atomicSpan: KRInlineBoxAtomicTextSpan,
+    ): RectF? {
+        val measuredWidth = atomicSpan.measuredWidth.toFloat()
+        if (measuredWidth <= 0f) return null
+        inlineBoxSelectionPath.reset()
+        textLayout.getSelectionPath(start, end, inlineBoxSelectionPath)
+        inlineBoxLineClipPath.reset()
+        inlineBoxLineClipPath.addRect(
+            0f,
+            textLayout.getLineTop(line).toFloat(),
+            textLayout.width.toFloat(),
+            textLayout.getLineBottom(line).toFloat(),
+            Path.Direction.CW,
+        )
+        if (!inlineBoxSelectionPath.op(inlineBoxLineClipPath, Path.Op.INTERSECT)) {
+            return null
+        }
+        inlineBoxSelectionPath.computeBounds(inlineBoxSelectionBounds, true)
+        if (inlineBoxSelectionBounds.isEmpty) return null
+        if (textLayout.getParagraphDirection(line) >= 0) {
+            inlineBoxSelectionBounds.right =
+                min(textLayout.width.toFloat(), inlineBoxSelectionBounds.left + measuredWidth)
+        } else {
+            inlineBoxSelectionBounds.left =
+                max(0f, inlineBoxSelectionBounds.right - measuredWidth)
+        }
+        return inlineBoxSelectionBounds
     }
 
     private fun drawSlockInlineCodeChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {

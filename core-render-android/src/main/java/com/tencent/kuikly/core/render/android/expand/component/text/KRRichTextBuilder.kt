@@ -745,6 +745,9 @@ private fun SpannableStringBuilder.applyInlineBoxAtomicTextSpan(
 internal class KRInlineBoxAtomicTextSpan(
     private val style: KRInlineBoxSpanStyle,
 ) : ReplacementSpan() {
+    internal var measuredWidth: Int = 0
+        private set
+
     override fun getSize(
         paint: Paint,
         text: CharSequence?,
@@ -752,7 +755,10 @@ internal class KRInlineBoxAtomicTextSpan(
         end: Int,
         fm: Paint.FontMetricsInt?
     ): Int {
-        if (text == null || start >= end) return 0
+        if (text == null || start >= end) {
+            measuredWidth = 0
+            return 0
+        }
         fm?.let {
             it.ascent -= ceil(style.paddingTop).toInt()
             it.top -= ceil(style.paddingTop).toInt()
@@ -761,7 +767,9 @@ internal class KRInlineBoxAtomicTextSpan(
         }
         val edgeStart = style.marginStart + style.borderWidth + style.paddingStart
         val edgeEnd = style.paddingEnd + style.borderWidth + style.marginEnd
-        return ceil((paint.measureText(text, start, end) + edgeStart + edgeEnd).toDouble()).toInt()
+        measuredWidth =
+            ceil((paint.measureText(text, start, end) + edgeStart + edgeEnd).toDouble()).toInt()
+        return measuredWidth
     }
 
     override fun draw(
