@@ -30,19 +30,6 @@ static const CGFloat kKRSlockInlineCodeHorizontalMarginRatio = 2.0 / 15.0;
 static const CGFloat kKRSlockInlineCodeLineHeightRatio = 1.5;
 static const NSUInteger kKRSlockInlineCodeAtomizeThreshold = 16;
 
-static BOOL KRIsNumericReferenceInlineBox(NSString *semanticText) {
-    if (semanticText.length < 2 || [semanticText characterAtIndex:0] != '#') {
-        return NO;
-    }
-    for (NSUInteger index = 1; index < semanticText.length; index++) {
-        unichar character = [semanticText characterAtIndex:index];
-        if (character < '0' || character > '9') {
-            return NO;
-        }
-    }
-    return YES;
-}
-
 @interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
 
 @property (nonatomic, copy) NSString *originalText;
@@ -742,16 +729,7 @@ static BOOL KRIsNumericReferenceInlineBox(NSString *semanticText) {
     NSArray<NSMutableDictionary *> *children = span[@"inlineBoxChildren"];
     if (children.count == 0) return [NSMutableAttributedString new];
     NSString *semantic = span[@"inlineBoxSemanticText"];
-    BOOL anchorNumericReference =
-        [semantic isKindOfClass:[NSString class]] && KRIsNumericReferenceInlineBox(semantic);
     NSMutableDictionary<NSString *, id> *style = [self p_inlineBoxStyleFromSpan:span];
-    if (anchorNumericReference) {
-        // React's MSG_REF_CHIP has px-1 padding but no horizontal margin.
-        // Keep generic inline-box spacing unchanged and align only exact #digits refs.
-        style[@"numericReferenceAnchoredChrome"] = @YES;
-        style[@"marginStart"] = @0.0;
-        style[@"marginEnd"] = @0.0;
-    }
     NSMutableDictionary *base = [(_props ?: @{}) mutableCopy];
     UIFont *baseFont = [KRConvertUtil UIFont:base] ?: [UIFont systemFontOfSize:15.0];
     CGFloat maxContentHeight = baseFont.lineHeight;
