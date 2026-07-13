@@ -66,6 +66,7 @@ constexpr char kEventTextLengthBeyondLimit[] = "textLengthBeyondLimit";
 constexpr char kEventKeyboardHeightChange[] = "keyboardHeightChange";  // 键盘高度变化
 constexpr char kEventTextInputStateChange[] = "textInputStateChange"; // 与 Kotlin InputView/TextAreaView TEXT_INPUT_STATE_CHANGE 一致
 constexpr char kEventSelectionChange[] = "selectionChange"; // 与 Kotlin InputView.kt:426 / TextAreaView.kt:685 一致
+constexpr size_t kMaxPendingCompleteTextInputStates = 64;
 
 // textInputState JSON 协议字段名，跨端一致（参考 core/views/TextInputState.kt）
 constexpr char kKeyText[] = "text";
@@ -471,8 +472,13 @@ void KRTextFieldView::SetTextInputStateInternal(const std::string &json) {
     int selection_end = get_int(kKeySelectionEnd, selection_start);
     selection_end = std::max(selection_start, std::min(selection_end, u16_len));
 
+    bool text_changed = GetContentText() != text;
+
+    ClearPendingCompleteTextInputStates();
     is_setting_text_input_state_ = true;
-    SetContentText(text);
+    if (text_changed) {
+        SetContentText(text);
+    }
 
     // ⚠️ ArkUI NODE_TEXT_INPUT_TEXT/NODE_TEXT_AREA_TEXT 的 setAttribute 会在内部异步触发
     // onChange，并把光标重置到文本末尾。如果在这里同步调用 UpdateInputNodeSelectionRange，
@@ -481,7 +487,7 @@ void KRTextFieldView::SetTextInputStateInternal(const std::string &json) {
     // 与 KRTextEditorFieldView 中 RunOnMainThreadForNextLoop 的策略一致，也与 LimitInputContentTextInMaxLength
     // 中已有的「先改文本后异步设光标」pattern 一致。
     // 同时 is_setting_text_input_state_ flag 也延迟到此处清除，以覆盖 SetContentText 异步触发
-    // OnTextDidChanged 的整个时窗，避免业务把"末尾光标"的脏 textInputStateChange 写回来形成回环。
+    // OnTextDidChanged 的整个时窗，避免受控写入通过 complete 或 legacy 事件再次回流。
     KRMainThread::RunOnMainThreadForNextLoop(
         [weakSelf = weak_from_this(), selection_start, selection_end]() {
             if (auto strongSelf = std::dynamic_pointer_cast<KRTextFieldView>(weakSelf.lock())) {
@@ -501,7 +507,7 @@ void KRTextFieldView::SetTextInputStateInternal(const std::string &json) {
  *   - 始终回 {text, selectionStart, selectionEnd, compositionStart=-1, compositionEnd=-1}；
  *   - 仅当 length_limit_type_ != -1 时附带 length。
  */
-KRRenderValueMap KRTextFieldView::CreateTextInputStateMap() {
+KRTextFieldView::TextInputStateSnapshot KRTextFieldView::CreateTextInputStateSnapshot() {
     auto text = GetContentText();
     auto range = GetInputNodeTextSelectionRange();
     int u16_len = GetUTF16Length(text);
@@ -510,17 +516,56 @@ KRRenderValueMap KRTextFieldView::CreateTextInputStateMap() {
     selection_start = std::max(0, selection_start);
     selection_end = std::max(selection_start, selection_end);
 
+    TextInputStateSnapshot state;
+    state.text = std::move(text);
+    state.selection_start = selection_start;
+    state.selection_end = selection_end;
+    return state;
+}
+
+KRRenderValueMap KRTextFieldView::CreateTextInputStateMap(const TextInputStateSnapshot &state) {
     KRRenderValueMap map;
-    map[kKeyText] = NewKRRenderValue(text);
-    map[kKeySelectionStart] = NewKRRenderValue(selection_start);
-    map[kKeySelectionEnd] = NewKRRenderValue(selection_end);
+    map[kKeyText] = NewKRRenderValue(state.text);
+    map[kKeySelectionStart] = NewKRRenderValue(state.selection_start);
+    map[kKeySelectionEnd] = NewKRRenderValue(state.selection_end);
     map[kKeyCompositionStart] = NewKRRenderValue(kNoComposition);
     map[kKeyCompositionEnd] = NewKRRenderValue(kNoComposition);
     if (length_limit_type_ != -1) {
-        int length = CalculateTextLength(text);
+        int length = CalculateTextLength(state.text);
         map[kKeyLength] = NewKRRenderValue(length);
     }
     return map;
+}
+
+KRRenderValueMap KRTextFieldView::CreateTextInputStateMap() {
+    return CreateTextInputStateMap(CreateTextInputStateSnapshot());
+}
+
+void KRTextFieldView::RecordCompleteTextInputState(const TextInputStateSnapshot &state) {
+    pending_complete_text_input_states_.push_back(state);
+    if (pending_complete_text_input_states_.size() > kMaxPendingCompleteTextInputStates) {
+        pending_complete_text_input_states_.pop_front();
+    }
+}
+
+bool KRTextFieldView::ConsumeCompleteTextInputState(const TextInputStateSnapshot &state) {
+    auto matching_state = std::find_if(
+        pending_complete_text_input_states_.begin(), pending_complete_text_input_states_.end(),
+        [&state](const TextInputStateSnapshot &pending_state) {
+            return state.HasSameEditingState(pending_state);
+        });
+    if (matching_state == pending_complete_text_input_states_.end()) {
+        pending_complete_text_input_states_.clear();
+        return false;
+    }
+
+    pending_complete_text_input_states_.erase(
+        pending_complete_text_input_states_.begin(), matching_state + 1);
+    return true;
+}
+
+void KRTextFieldView::ClearPendingCompleteTextInputStates() {
+    pending_complete_text_input_states_.clear();
 }
 
 /**
@@ -543,7 +588,9 @@ void KRTextFieldView::NotifyTextInputStateChange() {
     if (!text_input_state_change_callback_) {
         return;
     }
-    text_input_state_change_callback_(NewKRRenderValue(CreateTextInputStateMap()));
+    auto state = CreateTextInputStateSnapshot();
+    RecordCompleteTextInputState(state);
+    text_input_state_change_callback_(NewKRRenderValue(CreateTextInputStateMap(state)));
 }
 
 /**
@@ -559,7 +606,11 @@ void KRTextFieldView::NotifySelectionChange() {
     if (!selection_change_callback_) {
         return;
     }
-    selection_change_callback_(NewKRRenderValue(CreateTextInputStateMap()));
+    auto state = CreateTextInputStateSnapshot();
+    if (ConsumeCompleteTextInputState(state)) {
+        return;
+    }
+    selection_change_callback_(NewKRRenderValue(CreateTextInputStateMap(state)));
 }
 
 /**
@@ -602,6 +653,9 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
         LimitInputContentTextInMaxLength();
         drag_entered_ = false;
     }
+    if (is_setting_text_input_state_) {
+        return;
+    }
     // Android afterTextChanged 先发带 selection 的完整 state，再发 legacy textDidChange。
     // Compose 依赖这个顺序跳过不含 selection 的 fallback；如果反过来，
     // 新文本会先被配上 (0, 0) 选区回灌 native，导致光标跳到最前面。
@@ -624,6 +678,7 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
  */
 void KRTextFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
     pending_blur_request_id_ = 0;
+    ClearPendingCompleteTextInputStates();
     if (input_focus_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(GetContentText());
@@ -639,6 +694,7 @@ void KRTextFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
  */
 void KRTextFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
     pending_focus_request_id_ = 0;
+    ClearPendingCompleteTextInputStates();
     if (input_blur_callback_) {
         KRRenderValueMap map;
         map["text"] = NewKRRenderValue(GetContentText());

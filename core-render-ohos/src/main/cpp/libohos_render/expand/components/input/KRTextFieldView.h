@@ -19,6 +19,7 @@
 #include "libohos_render/export/IKRRenderViewExport.h"
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <utility>
 
 class KRTextFieldView : public IKRRenderViewExport {
@@ -116,6 +117,17 @@ class KRTextFieldView : public IKRRenderViewExport {
     int GetUTF16Length(const std::string &text);
 
  private:
+    struct TextInputStateSnapshot {
+        std::string text;
+        int32_t selection_start = 0;
+        int32_t selection_end = 0;
+
+        bool HasSameEditingState(const TextInputStateSnapshot &other) const {
+            return text == other.text && selection_start == other.selection_start &&
+                   selection_end == other.selection_end;
+        }
+    };
+
     float font_size_ = 15;  // default 15
     ArkUI_FontWeight font_weight_ = ARKUI_FONT_WEIGHT_NORMAL;
     bool focusable_ = true;
@@ -132,7 +144,8 @@ class KRTextFieldView : public IKRRenderViewExport {
     KRRenderCallback text_input_state_change_callback_;   // 文本输入状态变化callback（与 Android textInputStateChange 对齐）
     KRRenderCallback selection_change_callback_;          // 选区变化callback（与 Android KRTextFieldView.selectionChangeCallback 对齐）
     bool auto_hide_KeyBoard_on_ImeAction_ = false;        // 在触发各种IME 按钮时是否回收键盘，默认是不回收
-    bool is_setting_text_input_state_ = false;            // 通过 setTextInputState 主动写入期间，抑制 textInputStateChange 回流防止业务死循环
+    bool is_setting_text_input_state_ = false;            // 通过 setTextInputState 主动写入期间，抑制原生编辑回调防止业务死循环
+    std::deque<TextInputStateSnapshot> pending_complete_text_input_states_; // 待配对的 complete -> selection 回调
     int64_t pending_focus_request_id_ = 0;
     int64_t pending_blur_request_id_ = 0;
 
@@ -166,8 +179,8 @@ class KRTextFieldView : public IKRRenderViewExport {
      * selection 通过 UpdateInputNodeSelectionRange 写入真实 [start, end] 区间
      * （TextInput / TextArea 均支持），不再退化为折叠光标。
      *
-     * 主动写入期间通过 is_setting_text_input_state_ 抑制 textInputStateChange 回调，
-     * 避免业务把状态写回来形成死循环。
+     * 主动写入期间通过 is_setting_text_input_state_ 抑制 textInputStateChange
+     * 与 legacy textDidChange 回调，避免业务把状态写回来形成死循环。
      */
     void SetTextInputStateInternal(const std::string &json);
 
@@ -177,6 +190,16 @@ class KRTextFieldView : public IKRRenderViewExport {
      *   - 仅当 length_limit_type_ != -1 时附带 length 字段。
      */
     KRRenderValueMap CreateTextInputStateMap();
+
+    TextInputStateSnapshot CreateTextInputStateSnapshot();
+
+    KRRenderValueMap CreateTextInputStateMap(const TextInputStateSnapshot &state);
+
+    void RecordCompleteTextInputState(const TextInputStateSnapshot &state);
+
+    bool ConsumeCompleteTextInputState(const TextInputStateSnapshot &state);
+
+    void ClearPendingCompleteTextInputStates();
 
     /**
      * getTextInputState 方法路径：把当前 state 通过 callback 回吐给业务。
@@ -191,14 +214,15 @@ class KRTextFieldView : public IKRRenderViewExport {
 
     /**
      * 选区变化事件回调，跨端语义对齐 Android KRTextFieldView.onSelectionChanged。
-     * 主动写入期间通过 is_setting_text_input_state_ 抑制。
+     * 主动写入期间通过 is_setting_text_input_state_ 抑制；若与刚发布的完整编辑态完全
+     * 相同，则属于同一次文本编辑的重复 ArkUI selection 通知，直接吞掉。
      */
     void NotifySelectionChange();
 
     /**
      * 处理 ArkUI 原生选区变化事件（NODE_TEXT_INPUT_ON_TEXT_SELECTION_CHANGE /
-     * NODE_TEXT_AREA_ON_TEXT_SELECTION_CHANGE）。事件中携带 [start, end]，我们同时触发
-     * selectionChange 与 textInputStateChange（后者会以最新选区重新拼装 state map）。
+     * NODE_TEXT_AREA_ON_TEXT_SELECTION_CHANGE）。事件中携带 [start, end]，我们通过
+     * selectionChange 上报最新完整 state；与刚发布 complete state 等价的通知会被去重。
      */
     void OnTextSelectionChange(ArkUI_NodeEvent *event);
 
