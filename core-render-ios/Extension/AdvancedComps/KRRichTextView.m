@@ -742,11 +742,15 @@ static BOOL KRIsNumericReferenceInlineBox(NSString *semanticText) {
     NSArray<NSMutableDictionary *> *children = span[@"inlineBoxChildren"];
     if (children.count == 0) return [NSMutableAttributedString new];
     NSString *semantic = span[@"inlineBoxSemanticText"];
-    BOOL tightenNumericReference =
+    BOOL anchorNumericReference =
         [semantic isKindOfClass:[NSString class]] && KRIsNumericReferenceInlineBox(semantic);
     NSMutableDictionary<NSString *, id> *style = [self p_inlineBoxStyleFromSpan:span];
-    if (tightenNumericReference) {
-        style[@"numericReferenceOutsideMargins"] = @YES;
+    if (anchorNumericReference) {
+        // React's MSG_REF_CHIP has px-1 padding but no horizontal margin.
+        // Keep generic inline-box spacing unchanged and align only exact #digits refs.
+        style[@"numericReferenceAnchoredChrome"] = @YES;
+        style[@"marginStart"] = @0.0;
+        style[@"marginEnd"] = @0.0;
     }
     NSMutableDictionary *base = [(_props ?: @{}) mutableCopy];
     UIFont *baseFont = [KRConvertUtil UIFont:base] ?: [UIFont systemFontOfSize:15.0];

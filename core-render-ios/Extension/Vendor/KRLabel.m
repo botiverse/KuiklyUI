@@ -625,7 +625,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             CGFloat paddingBottom = [style[@"paddingBottom"] doubleValue];
             CGFloat left = CGRectGetMinX(bounds) + origin.x;
             CGFloat right = CGRectGetMaxX(bounds) + origin.x;
-            if ([style[@"numericReferenceOutsideMargins"] boolValue] && runRange.length >= 2) {
+            if ([style[@"numericReferenceAnchoredChrome"] boolValue] && runRange.length >= 2) {
                 NSUInteger leadingCharacterIndex = runRange.location;
                 NSUInteger trailingCharacterIndex = NSMaxRange(runRange) - 1;
                 NSTextAttachment *leadingAttachment = [textStorage attribute:NSAttachmentAttributeName
@@ -644,7 +644,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
                 if (segmentOwnsEdges) {
                     // Underline decoration inflates boundingRectForGlyphRange past
                     // the trailing attachment. Anchor numeric chip chrome to the
-                    // actual edge attachments and keep CSS-like margins outside.
+                    // actual edge attachments instead.
                     CGFloat marginStart = [style[@"marginStart"] doubleValue];
                     CGFloat marginEnd = [style[@"marginEnd"] doubleValue];
                     CGPoint leadingLocation = [self locationForGlyphAtIndex:leadingGlyphRange.location];
