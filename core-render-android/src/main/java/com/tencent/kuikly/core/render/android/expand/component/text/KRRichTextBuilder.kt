@@ -312,6 +312,46 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 if (childProps.text.isNotEmpty()) add(childIndex to childProps)
             }
         }
+        val atomicChild = children.singleOrNull()
+        if (
+            shouldAppendInlineBoxGroupAtomically(
+                childCount = children.size,
+                onlyChildIsText = atomicChild?.second is TextSpanProps,
+                onlyChildAdjustsNewline = (atomicChild?.second as? TextSpanProps)?.adjustNewline == true,
+            )
+        ) {
+            val (childIndex, childProps) = checkNotNull(atomicChild)
+            val groupStart = length
+            appendSpan(
+                spanProps = childProps,
+                index = index,
+                childIndex = childIndex,
+                spanTextRanges = spanTextRanges,
+                layoutSizeGetter = layoutSizeGetter,
+            )
+            val groupEnd = length
+            if (groupEnd > groupStart) {
+                // A one-run inline box is an inline-block. Keeping it as one
+                // ReplacementSpan makes Android move the whole token to the next
+                // line instead of splitting the invisible group edges away from
+                // its text and painting chrome over adjacent content.
+                applyInlineBoxAtomicTextSpan(groupStart, groupEnd, groupProps.style)
+                setSpan(
+                    KRInlineBoxSpan(groupProps.style),
+                    groupStart,
+                    groupEnd,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+                setSpan(
+                    KRInlineBoxSemanticSpan(groupProps.semanticText),
+                    groupStart,
+                    groupEnd,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+                spanTextRanges.add(SpanTextRange(index, null, groupStart, groupEnd))
+            }
+            return
+        }
         val groupStart = length
         append(
             INLINE_BOX_LAYOUT_EDGE.toString(),
@@ -361,6 +401,12 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
     }
 
 }
+
+internal fun shouldAppendInlineBoxGroupAtomically(
+    childCount: Int,
+    onlyChildIsText: Boolean,
+    onlyChildAdjustsNewline: Boolean,
+): Boolean = childCount == 1 && onlyChildIsText && !onlyChildAdjustsNewline
 
 abstract class SpanProps(spanValue: JSONObject) {
     protected val _text: String = spanValue.optString(KRTextProps.PROP_KEY_TEXT, "")
@@ -696,7 +742,7 @@ private fun SpannableStringBuilder.applyInlineBoxAtomicTextSpan(
     }
 }
 
-private class KRInlineBoxAtomicTextSpan(
+internal class KRInlineBoxAtomicTextSpan(
     private val style: KRInlineBoxSpanStyle,
 ) : ReplacementSpan() {
     override fun getSize(
@@ -734,6 +780,35 @@ private class KRInlineBoxAtomicTextSpan(
             canvas.drawText(text, start, end, textX, y.toFloat(), paint)
         }
     }
+}
+
+internal data class KRInlineBoxAtomicHitRange(
+    val line: Int,
+    val left: Float,
+    val right: Float,
+    val spanIndex: Int,
+)
+
+internal fun resolveKRInlineBoxAtomicHit(
+    touchedLine: Int,
+    touchX: Float,
+    ranges: List<KRInlineBoxAtomicHitRange>,
+): Int? =
+    ranges.firstOrNull { range ->
+        range.line == touchedLine &&
+            touchX >= minOf(range.left, range.right) &&
+            touchX <= maxOf(range.left, range.right)
+    }?.spanIndex
+
+internal fun resolveKRInlineBoxBoundaryHit(
+    touchedLine: Int,
+    touchX: Float,
+    ranges: List<KRInlineBoxAtomicHitRange>,
+    fallbackSpanIndices: List<Int>,
+): Int? {
+    resolveKRInlineBoxAtomicHit(touchedLine, touchX, ranges)?.let { return it }
+    val atomicOwnerIndices = ranges.mapTo(mutableSetOf(), KRInlineBoxAtomicHitRange::spanIndex)
+    return fallbackSpanIndices.firstOrNull { it !in atomicOwnerIndices }
 }
 
 private fun SpannableStringBuilder.applySlockInlineCodeAtomicTextSpans(start: Int, end: Int) {
