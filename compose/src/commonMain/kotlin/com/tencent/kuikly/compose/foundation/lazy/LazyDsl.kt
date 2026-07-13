@@ -322,6 +322,9 @@ inline fun <T> LazyListScope.itemsIndexed(
  * @param flingBehavior logic describing fling behavior.
  * @param userScrollEnabled whether the scrolling via the user gestures or accessibility actions
  * is allowed. You can still scroll programmatically using the state even when it is disabled.
+ * @param forceClearIgnoreOffset whether a mismatched native offset callback should clear the
+ * pending programmatic-offset guard. Enable this when dynamic list changes can make the native
+ * callback differ from the requested offset.
  * @param content a block which describes the content. Inside this block you can use methods like
  * [LazyListScope.item] to add a single item or [LazyListScope.items] to add a list of items.
  */
@@ -336,6 +339,7 @@ fun LazyRow(
     beyondBoundsItemCount: Int = 3,
 //    flingBehavior: FlingBehavior = ScrollableDefaults.flingBehavior(),
     userScrollEnabled: Boolean = true,
+    forceClearIgnoreOffset: Boolean = false,
     content: LazyListScope.() -> Unit
 ) {
     LazyList(
@@ -349,6 +353,7 @@ fun LazyRow(
 //        flingBehavior = flingBehavior,
         reverseLayout = false,
         userScrollEnabled = userScrollEnabled,
+        forceClearIgnoreOffset = forceClearIgnoreOffset,
         content = content
     )
 }
@@ -379,6 +384,9 @@ fun LazyRow(
  * @param flingBehavior logic describing fling behavior.
  * @param userScrollEnabled whether the scrolling via the user gestures or accessibility actions
  * is allowed. You can still scroll programmatically using the state even when it is disabled
+ * @param forceClearIgnoreOffset whether a mismatched native offset callback should clear the
+ * pending programmatic-offset guard. Lazy columns enable this by default so a stale guard cannot
+ * keep swallowing user-driven scroll callbacks after dynamic list changes.
  * @param content a block which describes the content. Inside this block you can use methods like
  * [LazyListScope.item] to add a single item or [LazyListScope.items] to add a list of items.
  */
@@ -393,6 +401,7 @@ fun LazyColumn(
     beyondBoundsItemCount: Int = 3,
 //    flingBehavior: FlingBehavior = ScrollableDefaults.flingBehavior(),
     userScrollEnabled: Boolean = true,
+    forceClearIgnoreOffset: Boolean = true,
     content: LazyListScope.() -> Unit
 ) {
     LazyList(
@@ -406,6 +415,7 @@ fun LazyColumn(
         beyondBoundsItemCount = beyondBoundsItemCount,
         reverseLayout = false,
         userScrollEnabled = userScrollEnabled,
+        forceClearIgnoreOffset = forceClearIgnoreOffset,
         content = content
     )
 }
