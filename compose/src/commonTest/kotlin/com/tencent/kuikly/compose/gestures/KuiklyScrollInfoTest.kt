@@ -23,9 +23,8 @@ import kotlin.test.assertTrue
 
 class KuiklyScrollInfoTest {
     @Test
-    fun forceClearAllowsUserScrollAfterMismatchedProgrammaticCallback() {
+    fun mismatchedProgrammaticCallbackClearsGuardAndProceeds() {
         val info = KuiklyScrollInfo().apply {
-            forceClearIgnoreOffset = true
             ignoreScrollOffset = IntOffset(x = 0, y = 120)
         }
 
@@ -35,26 +34,12 @@ class KuiklyScrollInfoTest {
     }
 
     @Test
-    fun forceClearStillSkipsTheMatchingProgrammaticCallback() {
+    fun matchingProgrammaticCallbackClearsGuardAndIsSkipped() {
         val info = KuiklyScrollInfo().apply {
-            forceClearIgnoreOffset = true
             ignoreScrollOffset = IntOffset(x = 0, y = 120)
         }
 
         assertTrue(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 120f, epsilon = 0.5))
         assertNull(info.ignoreScrollOffset)
-    }
-
-    @Test
-    fun legacyModeRetainsGuardUntilMatchingCallbackArrives() {
-        val info = KuiklyScrollInfo().apply {
-            forceClearIgnoreOffset = false
-            ignoreScrollOffset = IntOffset(x = 0, y = 120)
-        }
-
-        assertTrue(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 118f, epsilon = 0.5))
-        assertTrue(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 120f, epsilon = 0.5))
-        assertNull(info.ignoreScrollOffset)
-        assertFalse(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 220f, epsilon = 0.5))
     }
 }

@@ -46,16 +46,6 @@ class KuiklyScrollInfo {
      */
     var ignoreScrollOffset: IntOffset? = null
 
-    /**
-     * Clears a stale programmatic-offset guard on the first mismatched native callback.
-     *
-     * Native scroll views can clamp or coalesce a requested offset while list content is changing.
-     * Keeping the unmatched guard would make every later user-driven callback look programmatic.
-     * Both current guard writers issue non-animated offset requests, so a mismatched callback is
-     * the native view's accepted position rather than an animation intermediate and must proceed.
-     */
-    var forceClearIgnoreOffset: Boolean = false
-
     internal fun consumeIgnoredScrollOffset(
         offsetX: Float,
         offsetY: Float,
@@ -64,16 +54,8 @@ class KuiklyScrollInfo {
         val ignoredOffset = ignoreScrollOffset ?: return false
         val matched = kotlin.math.abs(ignoredOffset.x - offsetX) <= epsilon &&
             kotlin.math.abs(ignoredOffset.y - offsetY) <= epsilon
-
-        if (forceClearIgnoreOffset) {
-            ignoreScrollOffset = null
-            return matched
-        }
-
-        if (matched) {
-            ignoreScrollOffset = null
-        }
-        return true
+        ignoreScrollOffset = null
+        return matched
     }
 
     /**
