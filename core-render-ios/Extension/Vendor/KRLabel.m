@@ -625,7 +625,7 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             CGFloat paddingBottom = [style[@"paddingBottom"] doubleValue];
             CGFloat left = CGRectGetMinX(bounds) + origin.x;
             CGFloat right = CGRectGetMaxX(bounds) + origin.x;
-            if ([style[@"numericReferenceAnchoredChrome"] boolValue] && runRange.length >= 2) {
+            if (runRange.length >= 2) {
                 NSUInteger leadingCharacterIndex = runRange.location;
                 NSUInteger trailingCharacterIndex = NSMaxRange(runRange) - 1;
                 NSTextAttachment *leadingAttachment = [textStorage attribute:NSAttachmentAttributeName
@@ -642,16 +642,21 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
                     NSIntersectionRange(segment, leadingGlyphRange).length > 0 &&
                     NSIntersectionRange(segment, trailingGlyphRange).length > 0;
                 if (segmentOwnsEdges) {
-                    // Underline decoration inflates boundingRectForGlyphRange past
-                    // the trailing attachment. Anchor numeric chip chrome to the
-                    // actual edge attachments instead.
-                    CGFloat marginStart = [style[@"marginStart"] doubleValue];
-                    CGFloat marginEnd = [style[@"marginEnd"] doubleValue];
                     CGPoint leadingLocation = [self locationForGlyphAtIndex:leadingGlyphRange.location];
                     CGPoint trailingLocation = [self locationForGlyphAtIndex:trailingGlyphRange.location];
-                    left = leadingLocation.x + origin.x + marginStart;
-                    right = trailingLocation.x + origin.x +
-                        CGRectGetWidth(trailingAttachment.bounds) - marginEnd;
+                    CGFloat attachmentLeft = leadingLocation.x + origin.x;
+                    CGFloat attachmentRight = trailingLocation.x + origin.x +
+                        CGRectGetWidth(trailingAttachment.bounds);
+                    BOOL decorationEscapesEdges = left < attachmentLeft || right > attachmentRight;
+                    if (decorationEscapesEdges) {
+                        // Edge attachments define the group's horizontal layout advance.
+                        // Use them only when decoration inflates the glyph bounds, keeping
+                        // unaffected inline boxes on the existing painter pixel-for-pixel.
+                        CGFloat marginStart = [style[@"marginStart"] doubleValue];
+                        CGFloat marginEnd = [style[@"marginEnd"] doubleValue];
+                        left = attachmentLeft + marginStart;
+                        right = attachmentRight - marginEnd;
+                    }
                 }
             }
             if (right <= left) return;
