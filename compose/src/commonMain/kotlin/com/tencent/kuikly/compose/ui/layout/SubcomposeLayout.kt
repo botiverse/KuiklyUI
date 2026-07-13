@@ -332,14 +332,12 @@ fun SubcomposeLayout(
                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
 
-                if (kuiklyInfo.ignoreScrollOffset != null) {
-                    val ignoreOffset = kuiklyInfo.ignoreScrollOffset!!
-                    val epsilon = 0.5 * kuiklyInfo.getDensity()  // 使用 0.5dp 作为误差值
-                    val matched = abs(ignoreOffset.x.minus(scaleParams.offsetX)) <= epsilon
-                        && abs(ignoreOffset.y.minus(scaleParams.offsetY)) <= epsilon
-                    if (matched) {
-                        kuiklyInfo.ignoreScrollOffset = null
-                    }
+                if (kuiklyInfo.consumeIgnoredScrollOffset(
+                        offsetX = scaleParams.offsetX,
+                        offsetY = scaleParams.offsetY,
+                        epsilon = 0.5 * kuiklyInfo.getDensity(),
+                    )
+                ) {
                     return@scroll
                 }
 

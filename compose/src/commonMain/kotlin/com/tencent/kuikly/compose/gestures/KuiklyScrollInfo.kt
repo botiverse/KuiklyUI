@@ -46,6 +46,18 @@ class KuiklyScrollInfo {
      */
     var ignoreScrollOffset: IntOffset? = null
 
+    internal fun consumeIgnoredScrollOffset(
+        offsetX: Float,
+        offsetY: Float,
+        epsilon: Double,
+    ): Boolean {
+        val ignoredOffset = ignoreScrollOffset ?: return false
+        val matched = kotlin.math.abs(ignoredOffset.x - offsetX) <= epsilon &&
+            kotlin.math.abs(ignoredOffset.y - offsetY) <= epsilon
+        ignoreScrollOffset = null
+        return matched
+    }
+
     /**
      * Scroll view instance
      */
