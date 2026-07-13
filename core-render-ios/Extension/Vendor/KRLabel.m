@@ -623,12 +623,37 @@ static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedSt
             CGFloat borderWidth = [style[@"borderWidth"] doubleValue];
             CGFloat paddingTop = [style[@"paddingTop"] doubleValue];
             CGFloat paddingBottom = [style[@"paddingBottom"] doubleValue];
-            // The edge attachments already reserve margin in TextKit's layout
-            // advance. Keep that advance inside the painted group fragment;
-            // trimming it here leaves transparent white notches immediately
-            // before and after an otherwise continuous bordered inline box.
             CGFloat left = CGRectGetMinX(bounds) + origin.x;
             CGFloat right = CGRectGetMaxX(bounds) + origin.x;
+            if ([style[@"numericReferenceOutsideMargins"] boolValue] && runRange.length >= 2) {
+                NSUInteger leadingCharacterIndex = runRange.location;
+                NSUInteger trailingCharacterIndex = NSMaxRange(runRange) - 1;
+                NSTextAttachment *leadingAttachment = [textStorage attribute:NSAttachmentAttributeName
+                                                                      atIndex:leadingCharacterIndex
+                                                               effectiveRange:NULL];
+                NSTextAttachment *trailingAttachment = [textStorage attribute:NSAttachmentAttributeName
+                                                                       atIndex:trailingCharacterIndex
+                                                                effectiveRange:NULL];
+                NSRange leadingGlyphRange = [self glyphRangeForCharacterRange:NSMakeRange(leadingCharacterIndex, 1)
+                                                          actualCharacterRange:NULL];
+                NSRange trailingGlyphRange = [self glyphRangeForCharacterRange:NSMakeRange(trailingCharacterIndex, 1)
+                                                           actualCharacterRange:NULL];
+                BOOL segmentOwnsEdges = leadingAttachment && trailingAttachment &&
+                    NSIntersectionRange(segment, leadingGlyphRange).length > 0 &&
+                    NSIntersectionRange(segment, trailingGlyphRange).length > 0;
+                if (segmentOwnsEdges) {
+                    // Underline decoration inflates boundingRectForGlyphRange past
+                    // the trailing attachment. Anchor numeric chip chrome to the
+                    // actual edge attachments and keep CSS-like margins outside.
+                    CGFloat marginStart = [style[@"marginStart"] doubleValue];
+                    CGFloat marginEnd = [style[@"marginEnd"] doubleValue];
+                    CGPoint leadingLocation = [self locationForGlyphAtIndex:leadingGlyphRange.location];
+                    CGPoint trailingLocation = [self locationForGlyphAtIndex:trailingGlyphRange.location];
+                    left = leadingLocation.x + origin.x + marginStart;
+                    right = trailingLocation.x + origin.x +
+                        CGRectGetWidth(trailingAttachment.bounds) - marginEnd;
+                }
+            }
             if (right <= left) return;
             CGFloat boxHeight = [style[@"boxHeight"] doubleValue];
             if (boxHeight <= 0) {

@@ -43,44 +43,6 @@ static BOOL KRIsNumericReferenceInlineBox(NSString *semanticText) {
     return YES;
 }
 
-static CGFloat KRInlineBoxTrailingCavityCompensation(NSAttributedString *group,
-                                                      NSRange visibleRange) {
-    if (group.length == 0 || visibleRange.length == 0 || NSMaxRange(visibleRange) > group.length) {
-        return 0;
-    }
-    NSTextStorage *storage = [[NSTextStorage alloc] initWithAttributedString:group];
-    KRLayoutManager *layoutManager = [KRLayoutManager new];
-    NSTextContainer *container = [[NSTextContainer alloc] initWithSize:CGSizeMake(10000, 1000)];
-    container.lineFragmentPadding = 0;
-    [layoutManager addTextContainer:container];
-    [storage addLayoutManager:layoutManager];
-    [layoutManager ensureLayoutForTextContainer:container];
-
-    NSRange groupGlyphRange = [layoutManager glyphRangeForTextContainer:container];
-    NSRange visibleGlyphRange = [layoutManager glyphRangeForCharacterRange:visibleRange
-                                                     actualCharacterRange:NULL];
-    if (groupGlyphRange.length == 0 || visibleGlyphRange.length == 0) {
-        return 0;
-    }
-    CGRect groupBounds = [layoutManager boundingRectForGlyphRange:groupGlyphRange
-                                                  inTextContainer:container];
-    CGRect visibleLayoutBounds = [layoutManager boundingRectForGlyphRange:visibleGlyphRange
-                                                           inTextContainer:container];
-    NSAttributedString *visibleText = [group attributedSubstringFromRange:visibleRange];
-    CTLineRef line = CTLineCreateWithAttributedString((CFAttributedStringRef)visibleText);
-    CGRect inkBounds = CTLineGetBoundsWithOptions(line, kCTLineBoundsUseGlyphPathBounds);
-    CFRelease(line);
-    if (CGRectIsEmpty(groupBounds) || CGRectIsEmpty(visibleLayoutBounds) ||
-        CGRectIsNull(inkBounds) || CGRectIsInfinite(inkBounds)) {
-        return 0;
-    }
-    CGFloat inkLeft = CGRectGetMinX(visibleLayoutBounds) + CGRectGetMinX(inkBounds);
-    CGFloat inkRight = CGRectGetMinX(visibleLayoutBounds) + CGRectGetMaxX(inkBounds);
-    CGFloat leadingCavity = inkLeft - CGRectGetMinX(groupBounds);
-    CGFloat trailingCavity = CGRectGetMaxX(groupBounds) - inkRight;
-    return MAX(0, trailingCavity - leadingCavity);
-}
-
 @interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
 
 @property (nonatomic, copy) NSString *originalText;
@@ -783,6 +745,9 @@ static CGFloat KRInlineBoxTrailingCavityCompensation(NSAttributedString *group,
     BOOL tightenNumericReference =
         [semantic isKindOfClass:[NSString class]] && KRIsNumericReferenceInlineBox(semantic);
     NSMutableDictionary<NSString *, id> *style = [self p_inlineBoxStyleFromSpan:span];
+    if (tightenNumericReference) {
+        style[@"numericReferenceOutsideMargins"] = @YES;
+    }
     NSMutableDictionary *base = [(_props ?: @{}) mutableCopy];
     UIFont *baseFont = [KRConvertUtil UIFont:base] ?: [UIFont systemFontOfSize:15.0];
     CGFloat maxContentHeight = baseFont.lineHeight;
@@ -815,21 +780,15 @@ static CGFloat KRInlineBoxTrailingCavityCompensation(NSAttributedString *group,
              borderWidth:borderWidth];
     [group appendAttributedString:[NSAttributedString attributedStringWithAttachment:leading]];
 
-    NSMutableString *visibleText = [NSMutableString string];
-    NSUInteger visibleStart = NSNotFound;
-    NSUInteger visibleEnd = NSNotFound;
-    BOOL hasPlaceholder = NO;
     for (NSUInteger childIndex = 0; childIndex < children.count; childIndex++) {
         NSMutableDictionary *child = children[childIndex];
         [group appendAttributedString:[[NSAttributedString alloc] initWithString:@"\u2060"]];
-        if (child[@"placeholderWidth"] || child[@"placeholderHeight"]) {
-            hasPlaceholder = YES;
+        if (child[@"placeholderWidth"]) {
             [group appendAttributedString:[self p_createPlaceholderSpanAttributedStringWithSpan:child]];
             continue;
         }
         NSString *text = child[@"value"] ?: child[@"text"];
         if (text.length == 0) continue;
-        [visibleText appendString:text];
         NSMutableDictionary *propStyle = [base mutableCopy];
         [propStyle addEntriesFromDictionary:child];
         KRSpanAttributes *attrs = [KRSpanAttributes new];
@@ -869,13 +828,7 @@ static CGFloat KRInlineBoxTrailingCavityCompensation(NSAttributedString *group,
         }
         attrs.richAttrArray = @[];
         NSMutableAttributedString *childString = [self p_createSpanAttributedStringWithAttributes:attrs];
-        if (childString.length > 0) {
-            if (visibleStart == NSNotFound) {
-                visibleStart = group.length;
-            }
-            [group appendAttributedString:childString];
-            visibleEnd = group.length;
-        }
+        if (childString.length > 0) [group appendAttributedString:childString];
     }
     [group appendAttributedString:[[NSAttributedString alloc] initWithString:@"\u2060"]];
     KRInlineBoxEdgeAttachment *trailing = [[KRInlineBoxEdgeAttachment alloc]
@@ -885,23 +838,6 @@ static CGFloat KRInlineBoxTrailingCavityCompensation(NSAttributedString *group,
            paddingBottom:paddingBottom
              borderWidth:borderWidth];
     [group appendAttributedString:[NSAttributedString attributedStringWithAttachment:trailing]];
-    if (tightenNumericReference && !hasPlaceholder && [visibleText isEqualToString:semantic] &&
-        visibleStart != NSNotFound && visibleEnd > visibleStart) {
-        NSRange visibleRange = NSMakeRange(visibleStart, visibleEnd - visibleStart);
-        CGFloat compensation = KRInlineBoxTrailingCavityCompensation(group, visibleRange);
-        CGFloat adjustedTrailingAdvance = MAX(0, trailingAdvance - compensation);
-        if (adjustedTrailingAdvance < trailingAdvance) {
-            KRInlineBoxEdgeAttachment *adjustedTrailing = [[KRInlineBoxEdgeAttachment alloc]
-                initWithAdvance:adjustedTrailingAdvance
-                            font:baseFont
-                      paddingTop:paddingTop
-                   paddingBottom:paddingBottom
-                     borderWidth:borderWidth];
-            [group replaceCharactersInRange:NSMakeRange(group.length - 1, 1)
-                        withAttributedString:[NSAttributedString attributedStringWithAttachment:adjustedTrailing]];
-        }
-    }
-
     NSRange range = NSMakeRange(0, group.length);
     [group addAttribute:KRInlineBoxStyleAttributeName value:style range:range];
     if ([semantic isKindOfClass:[NSString class]] && semantic.length > 0) {
