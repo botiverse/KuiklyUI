@@ -174,6 +174,7 @@ fun PullToRefreshList(data: List<String>) {
 |------|--------|------|
 | `topInset` | `0.dp` | overlay HeaderBar 等场景下，PTR item 顶部的额外留白。传 **header 展开时的最大高度**，不是动画中的实时高度。框架会在 PTR item 内部自动应用等效 `padding(top)`，**请勿**再在 `modifier` 上重复设置 `padding(top = ...)`。未设置时行为与原来一致。 |
 | `refreshThreshold` | `80.dp` | 触发刷新的下拉距离 |
+| `holdRefreshInset` | `true` | 刷新期间是否持续保留 `refreshThreshold` 高度的顶部 content inset。若刷新进度由列表外的固定 Header 展示，并要求松手后列表内容立即回到原位，可设为 `false`；拖动阶段的 progress 与阈值触发语义不变。 |
 
 #### overlay HeaderBar（`topInset`）
 
@@ -386,5 +387,3 @@ fun SimpleStaggeredGrid(items: List<String>) {
 - 预加载：`beyondViewportPageCount` / `beyondBoundsItemCount` 不宜设置过大，一般控制在小范围内（例如 1～3 页、4～10 个 item），否则会明显增加首帧时间和内存占用。
 - 嵌套滚动：`LazyColumn` / `LazyRow` 与 `Pager`、外层滚动容器嵌套时，优先使用 `Modifier.nestedScroll`、`Modifier.bouncesEnable` 等官方/Kuikly 提供的能力，不建议自行拦截手势事件。
 - 状态管理：业务状态尽量 hoist 到列表外（ViewModel / 上层 Composable），避免在 `items` 内部直接 `remember { mutableStateOf(...) }` 保存关键状态，以免 item 复用、插入/删除时出现错乱。
-
-
