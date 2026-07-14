@@ -173,8 +173,8 @@ fun PullToRefreshList(data: List<String>) {
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `topInset` | `0.dp` | overlay HeaderBar 等场景下，PTR item 顶部的额外留白。传 **header 展开时的最大高度**，不是动画中的实时高度。框架会在 PTR item 内部自动应用等效 `padding(top)`，**请勿**再在 `modifier` 上重复设置 `padding(top = ...)`。未设置时行为与原来一致。 |
-| `refreshThreshold` | `80.dp` | 触发刷新的下拉距离 |
-| `holdRefreshInset` | `true` | 刷新期间是否持续保留 `refreshThreshold` 高度的顶部 content inset。若刷新进度由列表外的固定 Header 展示，并要求松手后列表内容立即回到原位，可设为 `false`；拖动阶段的 progress 与阈值触发语义不变。 |
+| `refreshThreshold` | `80.dp` | 触发刷新的下拉距离；同一个 `scrollState` 重组时更新即可生效，无需重建列表状态。 |
+| `holdRefreshInset` | `true` | 刷新期间是否持续保留 `refreshThreshold` 高度的顶部 content inset。若刷新进度由列表外的固定 Header 展示，并要求松手后列表内容立即回到原位，可设为 `false`；拖动阶段的 progress 与阈值触发语义不变。同一个 `scrollState` 下运行时切换也会作用于当前/下一次 pull。 |
 
 #### overlay HeaderBar（`topInset`）
 
