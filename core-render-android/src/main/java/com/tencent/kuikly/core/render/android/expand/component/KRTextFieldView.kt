@@ -66,6 +66,10 @@ import com.tencent.kuikly.core.render.android.export.IKuiklyRenderViewExport
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderCallback
 import org.json.JSONObject
 
+// POINT_POINT moves past the first insertion when the editor is empty. MARK_POINT
+// expands over it, so the first glyph is measured with the configured line height.
+internal const val TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS = Spanned.SPAN_INCLUSIVE_INCLUSIVE
+
 /**
  * KTV单行输入组件
  */
@@ -320,9 +324,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         val text = params ?: KRCssConst.EMPTY_STRING
         lineHeightSpan?.let { span ->
             val spannable = SpannableString(text)
-            if (text.isNotEmpty()) {
-                spannable.setSpan(span, 0, text.length, Spanned.SPAN_EXCLUSIVE_INCLUSIVE)
-            }
+            spannable.setSpan(span, 0, text.length, TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS)
             super.setText(spannable, BufferType.EDITABLE)
         } ?: super.setText(text, BufferType.EDITABLE)
         setSelection(getText()?.length ?: 0)
@@ -719,11 +721,13 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             setInputEditorAdapterIfNeed()
             lineHeightSpan?.let { span ->
                 val spannable = SpannableString(limitedRawText)
-                if (limitedRawText.isNotEmpty()) {
-                    spannable.setSpan(span, 0, limitedRawText.length, Spanned.SPAN_EXCLUSIVE_INCLUSIVE)
-                }
+                spannable.setSpan(span, 0, limitedRawText.length, TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS)
                 super.setText(spannable, BufferType.EDITABLE)
             } ?: super.setText(limitedRawText, BufferType.EDITABLE)
+            // A custom Editable.Factory may rebuild the source and drop spans.
+            // Reattach after TextView creates its final Editable while the
+            // programmatic-state watcher is intentionally suppressed.
+            editableText?.also(::ensureLineHeightSpan)
             applyEmojiSpans(editableText)
             // 程序化文本也可能被长度限制截断，需要基于实际文本长度调整 selection
             val actualLength = editableText?.length ?: 0
@@ -1017,11 +1021,16 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
                 }
                 val outputText = textPostProcessorAdapter.onTextPostProcess(kuiklyRenderContext, TextPostProcessorInput(textPostProcessor,
                     source, tp)).text
-                return if (outputText is Editable) {
+                val editable = if (outputText is Editable) {
                     outputText
                 } else {
                     SpannableStringBuilder(source)
                 }
+                // TextView measures the Editable returned here. Attach the
+                // global line-height span before setText builds its layout;
+                // post-set span mutation may only invalidate a fixed layout.
+                this@KRTextFieldView.ensureLineHeightSpan(editable)
+                return editable
             }
         })
     }
@@ -1057,8 +1066,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         val span = lineHeightSpan ?: return
         text.apply {
             if (getSpanStart(span) != 0 || getSpanEnd(span) != length) {
-                // range changed, call setSpan to update
-                setSpan(span, 0, length, Spanned.SPAN_EXCLUSIVE_INCLUSIVE)
+                setSpan(span, 0, length, TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS)
             }
         }
     }
