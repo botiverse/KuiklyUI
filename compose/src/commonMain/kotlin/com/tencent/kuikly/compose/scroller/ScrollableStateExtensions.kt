@@ -62,7 +62,14 @@ internal fun ScrollableState.kuiklyOnScroll(delta: Float): Float = when (this) {
 /**
  * Handle scroll end events
  */
-internal fun ScrollableState.kuiklyOnScrollEnd(params: ScrollParams) {
+internal fun ScrollableState.kuiklyOnScrollEnd(
+    params: ScrollParams,
+    retryDeferredAlignment: ScrollableState.() -> Unit = {
+        kuiklyInfo.deferredScrollOffsetAlignmentCoordinator.retryAfterScrollEnd {
+            tryExpandStartSizeNoScroll()
+        }
+    }
+) {
     when (this) {
         is LazyListState -> scrollableState.kuiklyOnScrollEnd(params)
         is PagerState -> {
@@ -81,7 +88,7 @@ internal fun ScrollableState.kuiklyOnScrollEnd(params: ScrollParams) {
     }
     // Pager uses a different scroll-end sync path; skip lazy scroll expansion here.
     if (this !is PagerState && this !is DrawerInternalPagerState && this !is KuiklyScrollableState) {
-        tryExpandStartSizeNoScroll()
+        retryDeferredAlignment()
     }
 }
 
