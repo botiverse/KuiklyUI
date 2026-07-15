@@ -212,7 +212,8 @@ typedef char *(*KRImageAdapter)(const char *imageSrc, ArkUI_DrawableDescriptor *
  * @param src src image组件设置的src属性
  * @param image_descriptor 解码好的图片
  * @param new_src 新的src地址，比如从原src映射到一个新的src路径
- * @discuss 当image_descriptor非空时，kuikly优先用image_descriptor，其次再使用new_src
+ * @discuss 当image_descriptor非空时，kuikly优先用image_descriptor；否则使用非空new_src。
+ *          image_descriptor和new_src都为空时，表示adapter已处理但加载失败，Kuikly会触发loadFailure。
  */
 typedef void (*KRSetImageCallback)(const void* context,
                                    const char *src,
