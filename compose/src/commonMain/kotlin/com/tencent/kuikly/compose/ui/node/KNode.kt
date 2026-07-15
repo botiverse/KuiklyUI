@@ -149,7 +149,13 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         // represent semantically different content. Always redraw so reset() -> flush() clears
         // render-only state (for example borderRadius and clipPath) left by the previous item,
         // even when the replacement modifiers are structurally equal and emit no invalidation.
-        invalidateDraw()
+        //
+        // Reuse can start while this node is already dirty because onDeactivate/resetModifierState
+        // invalidated it under its previous parent. A normal invalidateDraw() is intentionally a
+        // no-op in that state, but the new parent may still be clean and therefore skip traversing
+        // this dirty child. Force propagation across the reuse boundary so the pending redraw is
+        // reachable from the new tree.
+        invalidateDrawForReuse()
     }
 
     override fun onRelease() {
@@ -240,6 +246,22 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             parent?.invalidateDraw()
         }
     }
+
+    internal fun invalidateDrawForReuse() {
+        drawInvalidated = true
+        val currentParent = parent
+        if (currentParent is KNode<*>) {
+            currentParent.invalidateDrawForReuse()
+        } else {
+            currentParent?.invalidateDraw()
+        }
+    }
+
+    internal fun clearDrawInvalidationForTest() {
+        drawInvalidated = false
+    }
+
+    internal fun isDrawInvalidatedForTest(): Boolean = drawInvalidated
 
     override fun onWillStartMeasure() {
         super.onWillStartMeasure()
