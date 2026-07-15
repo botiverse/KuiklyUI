@@ -71,6 +71,7 @@ import com.tencent.kuikly.compose.views.VirtualNodeView
 import com.tencent.kuikly.compose.layout.bindKuiklyInfo
 import com.tencent.kuikly.compose.layout.checkOffScreenNode
 import com.tencent.kuikly.compose.layout.hideOffsetScreenView
+import com.tencent.kuikly.compose.layout.invalidateDeferredScrollOffsetAlignmentOnReuse
 import com.tencent.kuikly.compose.layout.restoreScrollerViewOnReuse
 import com.tencent.kuikly.compose.layout.transferScrollToTopCallback
 import com.tencent.kuikly.compose.scroller.handleScrollToTopCallback
@@ -433,6 +434,8 @@ fun SubcomposeLayout(
                 scrollViewRef = sv
 
                 val oldKuiklyInfo = sv.extProps[KuiklyInfoKey] as? KuiklyScrollInfo
+                val newKuiklyInfo = scrollableState.kuiklyInfo
+                invalidateDeferredScrollOffsetAlignmentOnReuse(oldKuiklyInfo, newKuiklyInfo)
                 val kuiklyInfo = bindKuiklyInfo(sv, scrollableState, orientation)
                 transferScrollToTopCallback(oldKuiklyInfo, kuiklyInfo)
                 restoreScrollerViewOnReuse(sv, kuiklyInfo, isPagerView, orientation, oldKuiklyInfo?.contentOffset)
