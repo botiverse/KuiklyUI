@@ -54,6 +54,7 @@ constexpr char kEventNameLoadSuccess[] = "loadSuccess";
 constexpr char kEventNameLoadResolution[] = "loadResolution";
 constexpr char kEventNameLoadFailure[] = "loadFailure";
 constexpr char kEventNameLoadErrorCode[] = "errorCode";
+constexpr int32_t kAdapterImageLoadErrorCode = -1;
 constexpr char kParamKeyImageWidth[] = "imageWidth";
 constexpr char kParamKeyImageHeight[] = "imageHeight";
 constexpr char kPropNameMaskLinearGradient[] = "maskLinearGradient";
@@ -207,10 +208,10 @@ void KRImageView::AdapterSetImageCallback(const void* context,
 
             if (imageDescriptor) {
                 kuikly::util::SetArkUIImageSrc(image_view->GetNode(), imageDescriptor);
-            } else if (new_src) {
+            } else if (new_src && new_src[0] != '\0') {
                 image_view->LoadFromSrc(std::string(new_src));
             } else {
-                KR_LOG_INFO << "Neither image descriptor nor new_src is returned";
+                image_view->FireAdapterImageErrorEvent();
             }
         }
     }
@@ -464,6 +465,15 @@ void KRImageView::FireOnImageErrorEvent(ArkUI_NodeEvent *event) {
         KRRenderValueMap map;
         map[kPropNameSrc] = NewKRRenderValue(image_src_);
         map[kEventNameLoadErrorCode] = NewKRRenderValue(code);
+        load_failure_callback_(NewKRRenderValue(map));
+    }
+}
+
+void KRImageView::FireAdapterImageErrorEvent() {
+    if (load_failure_callback_) {
+        KRRenderValueMap map;
+        map[kPropNameSrc] = NewKRRenderValue(image_src_);
+        map[kEventNameLoadErrorCode] = NewKRRenderValue(kAdapterImageLoadErrorCode);
         load_failure_callback_(NewKRRenderValue(map));
     }
 }
