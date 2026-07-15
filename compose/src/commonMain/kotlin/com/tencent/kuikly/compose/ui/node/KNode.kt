@@ -143,6 +143,15 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         super.detach()
     }
 
+    override fun onReuse() {
+        super.onReuse()
+        // A reusable Compose slot keeps the same native view while its modifier chain can now
+        // represent semantically different content. Always redraw so reset() -> flush() clears
+        // render-only state (for example borderRadius and clipPath) left by the previous item,
+        // even when the replacement modifiers are structurally equal and emit no invalidation.
+        invalidateDraw()
+    }
+
     override fun onRelease() {
         // Release child subcompositions before clearing the Kuikly view tree. Otherwise nested
         // applier removeAt calls may observe an already-cleared ViewContainer.children list.
