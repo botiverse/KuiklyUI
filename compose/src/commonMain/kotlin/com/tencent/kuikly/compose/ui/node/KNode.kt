@@ -144,7 +144,9 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
     }
 
     override fun onReuse() {
+        traceTask139Reuse("compose.onReuse.before")
         super.onReuse()
+        traceTask139Reuse("compose.onReuse.afterSuper")
         // A reusable Compose slot keeps the same native view while its modifier chain can now
         // represent semantically different content. Always redraw so reset() -> flush() clears
         // render-only state (for example borderRadius and clipPath) left by the previous item,
@@ -156,6 +158,13 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         // this dirty child. Force propagation across the reuse boundary so the pending redraw is
         // reachable from the new tree.
         invalidateDrawForReuse()
+        traceTask139Reuse("compose.onReuse.afterInvalidate")
+    }
+
+    override fun onDeactivate() {
+        traceTask139Reuse("compose.onDeactivate.before")
+        super.onDeactivate()
+        traceTask139Reuse("compose.onDeactivate.after")
     }
 
     override fun onRelease() {
@@ -232,12 +241,16 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         if (!drawInvalidated) {
             return
         }
+        traceTask139Reuse("compose.draw.beforeReset")
         drawInvalidated = false
         view.reset()
+        traceTask139Reuse("compose.draw.afterReset")
         canvas.view = view
         super.draw(canvas)
         canvas.view = null
+        traceTask139Reuse("compose.draw.beforeFlush")
         view.flush()
+        traceTask139Reuse("compose.draw.afterFlush")
     }
 
     override fun invalidateDraw() {
@@ -262,6 +275,27 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
     }
 
     internal fun isDrawInvalidatedForTest(): Boolean = drawInvalidated
+
+    private fun traceTask139Reuse(stage: String) {
+        if (!isInitialized) return
+        val enabled =
+            runCatching {
+                view.getPager().pageData.params.optBoolean("task139ReuseTrace", false)
+            }.getOrDefault(false)
+        if (!enabled) return
+        val renderProps = view.renderProperties as? RenderProperties
+        val radius = renderProps?.borderRadius?.joinToString(prefix = "[", postfix = "]") ?: "none"
+        val attrRadius = view.getViewAttr().getProp(StyleConst.BORDER_RADIUS)?.toString() ?: "none"
+        println(
+            "TASK139_REUSE_COMMON stage=$stage nativeRef=${view.nativeRef} " +
+                "view=${view::class.simpleName} key=${lazyItemKey ?: "none"} " +
+                "parent=${parent?.let { it::class.simpleName } ?: "none"} " +
+                "foldedParent=${foldedParent?.let { it::class.simpleName } ?: "none"} " +
+                "attached=$isAttached deactivated=$isDeactivated drawInvalidated=$drawInvalidated " +
+                "renderRadius=$radius attrRadius=$attrRadius clip=${renderProps?.clip ?: false} " +
+                "clipPath=${renderProps?.clipPath.orEmpty()}"
+        )
+    }
 
     override fun onWillStartMeasure() {
         super.onWillStartMeasure()

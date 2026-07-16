@@ -28,6 +28,7 @@ import com.tencent.kuikly.core.render.android.KuiklyRenderView
 import com.tencent.kuikly.core.render.android.adapter.KuiklyRenderLog
 import com.tencent.kuikly.core.render.android.const.KRCssConst
 import com.tencent.kuikly.core.render.android.css.ktx.isMainThread
+import com.tencent.kuikly.core.render.android.css.ktx.optViewDecorator
 import com.tencent.kuikly.core.render.android.css.ktx.removeFromParent
 import com.tencent.kuikly.core.render.android.css.ktx.toDpSizeF
 import com.tencent.kuikly.core.render.android.css.ktx.toPxF
@@ -141,6 +142,9 @@ class KuiklyRenderLayerHandler : IKuiklyRenderLayerHandler {
             "must call on ui thread"
         }
         getRenderViewHandler(tag)?.viewExport?.also {
+            if (propKey == KRCssConst.BORDER_RADIUS) {
+                traceTask139Native("native.setProp.before", tag, it, propValue.toString())
+            }
             var process = it.setProp(propKey, propValue)
             if (!process) {
                 process = renderViewWeakRef?.get()?.kuiklyRenderExport?.setViewExternalProp(it,
@@ -149,6 +153,9 @@ class KuiklyRenderLayerHandler : IKuiklyRenderLayerHandler {
             }
             if (it.reusable && process) {
                 recordSetPropOperation(it.view(), propKey)
+            }
+            if (propKey == KRCssConst.BORDER_RADIUS) {
+                traceTask139Native("native.setProp.after", tag, it, propValue.toString())
             }
         } ?: run {
             KuiklyRenderLog.d("KuiklyRenderTracer", "setProp viewHandler is null, tag=$tag")
@@ -433,8 +440,18 @@ class KuiklyRenderLayerHandler : IKuiklyRenderLayerHandler {
     }
 
     private fun prepareForReuse(viewExport: IKuiklyRenderViewExport) {
-        renderViewWeakRef?.get()?.kuiklyRenderContext?.removeViewData<MutableSet<String>>(viewExport.view(),
-            HR_SET_PROP_OPERATION)?.also {
+        val resetProps =
+            renderViewWeakRef?.get()?.kuiklyRenderContext?.removeViewData<MutableSet<String>>(
+                viewExport.view(),
+                HR_SET_PROP_OPERATION
+            )
+        val traceRadius =
+            resetProps?.contains(KRCssConst.BORDER_RADIUS) == true ||
+                !viewExport.view().optViewDecorator()?.borderRadius.isNullOrEmpty()
+        if (traceRadius) {
+            traceTask139Native("native.prepareForReuse.before", 0, viewExport, resetProps.orEmpty().joinToString())
+        }
+        resetProps?.also {
             for (propKey in it) {
                 if (!viewExport.resetProp(propKey)) {
                     renderViewWeakRef?.get()?.kuiklyRenderExport?.resetViewExternalProp(viewExport,
@@ -444,7 +461,25 @@ class KuiklyRenderLayerHandler : IKuiklyRenderLayerHandler {
         }
         viewExport.resetClipChildren()
         viewExport.resetShadow()
+        if (traceRadius) {
+            traceTask139Native("native.prepareForReuse.after", 0, viewExport, resetProps.orEmpty().joinToString())
+        }
         viewExport.resetViewTag()
+    }
+
+    private fun traceTask139Native(
+        stage: String,
+        tag: Int,
+        viewExport: IKuiklyRenderViewExport,
+        value: String
+    ) {
+        val view = viewExport.view()
+        KuiklyRenderLog.i(
+            "Task139Reuse",
+            "stage=$stage tag=$tag identity=${System.identityHashCode(view)} " +
+                "view=${view.javaClass.simpleName} value=$value " +
+                "decoratorRadius=${view.optViewDecorator()?.borderRadius.orEmpty()} reusable=${viewExport.reusable}"
+        )
     }
 
     private fun assertShadowHandlerNotNull(shadowHandler: IKuiklyRenderShadowExport?) {
