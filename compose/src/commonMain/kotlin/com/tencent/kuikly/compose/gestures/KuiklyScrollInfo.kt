@@ -104,6 +104,43 @@ class KuiklyScrollInfo {
     }
 
     /**
+     * Disposition of a native scroll callback relative to a pending programmatic
+     * offset move ([ignoreScrollOffset]).
+     *
+     * A programmatic move ([applyOffsetDelta]) can land somewhere other than its
+     * recorded target: the native scroller clamps against its own (asynchronously
+     * updated) content size, or splits one move into several callbacks. Such an
+     * off-target callback is still an echo of our own move — never user input.
+     * Interpreting it as a user scroll dispatches a large phantom delta into
+     * compose; on a bottom-anchored list whose content size is still estimated
+     * this feeds the expand/align retry loop and serially composes every row up
+     * to the list start, blocking the Kotlin thread for seconds (task #318).
+     */
+    internal enum class NativeScrollEventDisposition {
+        /** Exact echo of the programmatic move: drop the event entirely. */
+        Consume,
+        /** Off-target echo of the programmatic move: adopt the reported offset
+         *  into bookkeeping, but never dispatch a compose scroll. */
+        SyncOnly,
+        /** Genuine scroll: dispatch to compose. */
+        Dispatch
+    }
+
+    internal fun resolveNativeScrollEvent(
+        offsetX: Float,
+        offsetY: Float,
+        epsilon: Double,
+    ): NativeScrollEventDisposition {
+        val hadPendingProgrammaticMove = ignoreScrollOffset != null
+        val matched = consumeIgnoredScrollOffset(offsetX, offsetY, epsilon)
+        return when {
+            matched -> NativeScrollEventDisposition.Consume
+            hadPendingProgrammaticMove && !isDragging -> NativeScrollEventDisposition.SyncOnly
+            else -> NativeScrollEventDisposition.Dispatch
+        }
+    }
+
+    /**
      * Scroll view instance
      */
     var scrollView: ScrollerView<ScrollerAttr, ScrollerEvent>? = null

@@ -17,6 +17,7 @@ package com.tencent.kuikly.compose.gestures
 
 import com.tencent.kuikly.compose.ui.unit.IntOffset
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -41,5 +42,80 @@ class KuiklyScrollInfoTest {
 
         assertTrue(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 120f, epsilon = 0.5))
         assertNull(info.ignoreScrollOffset)
+    }
+
+    // task #318: an off-target echo of a programmatic move (native clamped or
+    // split it) must never be dispatched to compose as a phantom user scroll —
+    // that phantom walked a bottom-anchored 50-row list to the top, serially
+    // composing every row and stalling the Kotlin thread for seconds.
+    @Test
+    fun exactProgrammaticEchoIsConsumed() {
+        val info = KuiklyScrollInfo().apply {
+            ignoreScrollOffset = IntOffset(x = 0, y = 120)
+        }
+
+        assertEquals(
+            KuiklyScrollInfo.NativeScrollEventDisposition.Consume,
+            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 120f, epsilon = 0.5)
+        )
+        assertNull(info.ignoreScrollOffset)
+    }
+
+    @Test
+    fun offTargetProgrammaticEchoSyncsWithoutDispatch() {
+        val info = KuiklyScrollInfo().apply {
+            ignoreScrollOffset = IntOffset(x = 0, y = 4200)
+            isDragging = false
+        }
+
+        // Native clamped the applied 4200 down to 118: still our own move's
+        // echo, so bookkeeping may sync but compose must not scroll.
+        assertEquals(
+            KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly,
+            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
+        )
+        assertNull(info.ignoreScrollOffset)
+    }
+
+    @Test
+    fun offTargetEchoWhileUserDragsStillDispatches() {
+        val info = KuiklyScrollInfo().apply {
+            ignoreScrollOffset = IntOffset(x = 0, y = 4200)
+            isDragging = true
+        }
+
+        // A finger on the screen owns the viewport: never swallow real input.
+        assertEquals(
+            KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch,
+            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
+        )
+    }
+
+    @Test
+    fun eventWithoutPendingProgrammaticMoveDispatches() {
+        val info = KuiklyScrollInfo().apply { isDragging = false }
+
+        assertEquals(
+            KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch,
+            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
+        )
+    }
+
+    @Test
+    fun programmaticEchoGuardIsSingleShot() {
+        val info = KuiklyScrollInfo().apply {
+            ignoreScrollOffset = IntOffset(x = 0, y = 4200)
+            isDragging = false
+        }
+
+        assertEquals(
+            KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly,
+            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
+        )
+        // The follow-up event has no pending move recorded: genuine scroll.
+        assertEquals(
+            KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch,
+            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 130f, epsilon = 0.5)
+        )
     }
 }
