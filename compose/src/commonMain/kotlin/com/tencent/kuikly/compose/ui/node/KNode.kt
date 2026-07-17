@@ -18,6 +18,8 @@ package com.tencent.kuikly.compose.ui.node
 import androidx.compose.runtime.CompositionLocalMap
 import com.tencent.kuikly.compose.extension.approximatelyEqual
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
+import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
+import com.tencent.kuikly.compose.gestures.ScrollOffsetOwnerToken
 import com.tencent.kuikly.compose.ui.geometry.CornerRadius
 import com.tencent.kuikly.compose.ui.geometry.Offset
 import com.tencent.kuikly.compose.ui.geometry.RoundRect
@@ -31,6 +33,13 @@ import com.tencent.kuikly.compose.ui.platform.LocalDensity
 import com.tencent.kuikly.compose.ui.unit.IntSize
 import com.tencent.kuikly.compose.views.VirtualNodeView
 import com.tencent.kuikly.compose.layout.resetViewVisible
+import com.tencent.kuikly.compose.scroller.logScrollDiagnostic
+import com.tencent.kuikly.compose.scroller.ScrollOffsetWriteContext
+import com.tencent.kuikly.compose.scroller.ScrollOffsetWriteIntent
+import com.tencent.kuikly.compose.scroller.ViewportCorrectionRetryOperation
+import com.tencent.kuikly.compose.scroller.applyScrollViewContentOffset
+import com.tencent.kuikly.compose.scroller.shouldApplyScrollOffsetWrite
+import com.tencent.kuikly.compose.scroller.isValidScrollOffsetTarget
 import com.tencent.kuikly.compose.ui.KuiklyPath
 import com.tencent.kuikly.compose.ui.layout.LookaheadLayoutCoordinates
 import com.tencent.kuikly.compose.ui.unit.plus
@@ -50,6 +59,8 @@ import com.tencent.kuikly.core.views.DivView
 import com.tencent.kuikly.core.views.HoverView
 import com.tencent.kuikly.core.views.ModalView
 import com.tencent.kuikly.core.views.ScrollerView
+import com.tencent.kuikly.core.views.ScrollerAttr
+import com.tencent.kuikly.core.views.ScrollerEvent
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.max
@@ -165,6 +176,10 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
 
         // Node is permanently destroyed — perform full view cleanup.
         if (isInitialized) {
+            (view as? ScrollerView<ScrollerAttr, ScrollerEvent>)?.let { scrollerView ->
+                (scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo
+                    ?.detachScrollView(scrollerView, invalidateNativeWrites = true)
+            }
             // Destroy native render views that were preserved during removeAt.
             // removeDomSubViewForMove only removed the flex node; now we clean up the render view.
             view.removeRenderView()
@@ -290,11 +305,15 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         val parentNode = parent as? KNode<*>
         val parentCoordinator = parentNode?.kuiklyCoordinates ?: parentNode?.innerCoordinator
         var pos = parentCoordinator?.viewPositionOf(curCoordinator) ?: Offset.Zero
+        val childScrollInfo = if (ksScrollSubView) {
+            ((parent as KNode<*>).view.renderProperties as? RenderProperties)?.kuiklyScrollInfo
+        } else {
+            null
+        }
 
         // Child nodes on scrollview, parent is virtual node
-        if (ksScrollSubView && needFixScrollOffset) {
-            val scrollerView = (parent as KNode<*>).view
-            ((scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo)?.apply {
+        if (childScrollInfo != null && needFixScrollOffset) {
+            childScrollInfo.apply {
                 val deltaOffset = composeOffset + snapAnchorOffsetCorrection
                 pos = if (orientation == Orientation.Vertical) {
                     Offset(pos.x, pos.y + deltaOffset)
@@ -329,7 +348,7 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             )
         }
 
-        view.updateFrame(newFrame)
+        view.updateFrame(newFrame, childScrollInfo)
     }
 
     /**
@@ -374,12 +393,6 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             (newFrame.width * kuiklyInfo.getDensity()).toInt()
         }
 
-        // Handle edge cases: if contentSize is 0 or viewportSize is 0, no scrolling needed
-        if (currentContentSize <= 0) {
-            kuiklyInfo.composeOffset = 0f
-            return
-        }
-
         val maxScrollOffset = maxOf(0, currentContentSize - viewportSize)
 
         // Correct composeOffset - use pixel units
@@ -409,14 +422,54 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             }
         }
 
-        // Update composeOffset
-        if (correctedOffset != currentOffset) {
-            kuiklyInfo.composeOffset = correctedOffset.toFloat()
+        if (correctedOffset == currentOffset) {
+            kuiklyInfo.deferredScrollOffsetAlignmentCoordinator.clearRetryOperation(
+                ViewportCorrectionRetryOperation
+            )
+            return
         }
+        val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return
+        val density = kuiklyInfo.getDensity()
+        val targetX = if (kuiklyInfo.isVertical()) scrollerView.curOffsetX else correctedOffset / density
+        val targetY = if (kuiklyInfo.isVertical()) correctedOffset / density else scrollerView.curOffsetY
+        kuiklyInfo.deferredScrollOffsetAlignmentCoordinator.clearRetryOperation(
+            ViewportCorrectionRetryOperation
+        )
+        kuiklyInfo.logScrollDiagnostic(
+            "viewport_offset_correction",
+            "curFrame=${curFrame.width}x${curFrame.height} newFrame=${newFrame.width}x${newFrame.height} " +
+                "current=$currentOffset corrected=$correctedOffset"
+        )
+        kuiklyInfo.applyScrollViewContentOffset(
+            ownerToken = ownerToken,
+            offsetX = targetX,
+            offsetY = targetY,
+            animated = false,
+            intent = ScrollOffsetWriteIntent.NonForcedAlignment,
+            reason = "viewport_frame_correction",
+            anchorValidator = {
+                kuiklyInfo.viewportSize == viewportSize &&
+                    kuiklyInfo.currentContentSize == currentContentSize &&
+                    isValidScrollOffsetTarget(
+                        targetOffset = correctedOffset,
+                        contentSize = currentContentSize,
+                        viewportSize = viewportSize,
+                    )
+            },
+            onCommitResult = { committed ->
+                if (committed) {
+                    kuiklyInfo.composeOffset = correctedOffset.toFloat()
+                }
+            },
+        )
     }
 
-    private fun DeclarativeBaseView<*, *>.updateFrame(newFrame: Frame) {
-        val curFrame = renderView?.currentFrame ?: Frame.zero
+    private fun DeclarativeBaseView<*, *>.updateFrame(
+        newFrame: Frame,
+        childScrollInfo: KuiklyScrollInfo?,
+    ) {
+        val targetRenderView = renderView
+        val curFrame = targetRenderView?.currentFrame ?: Frame.zero
         if (!curFrame.approximatelyEqual(newFrame)) {
             val densityFrame = Frame(
                 x = newFrame.x,
@@ -424,9 +477,17 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
                 width =  newFrame.width,
                 height = newFrame.height
             )
-
-            updateScrollViewOffset(curFrame, densityFrame)
+            if (targetRenderView != null && childScrollInfo != null) {
+                childScrollInfo.commitOrdinaryChildFrameWrite(
+                    resource = targetRenderView,
+                    previousFrame = curFrame,
+                    newFrame = densityFrame,
+                    currentFrameProvider = { targetRenderView.currentFrame },
+                    applyFrame = { frame -> setFrameToRenderView(frame) },
+                )
+            }
             setFrameToRenderView(densityFrame)
+            updateScrollViewOffset(curFrame, densityFrame)
             getViewEvent().notifyLayoutFrameDidChange(newFrame)
         }
     }

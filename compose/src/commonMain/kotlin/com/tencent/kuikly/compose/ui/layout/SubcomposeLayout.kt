@@ -43,6 +43,7 @@ import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.foundation.gestures.ScrollableState
 import com.tencent.kuikly.compose.foundation.drawer.DrawerInternalPagerState
 import com.tencent.kuikly.compose.foundation.pager.PagerState
+import com.tencent.kuikly.compose.gestures.ScrollOffsetWriteCapabilityKind
 import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.InternalComposeUiApi
 import com.tencent.kuikly.compose.ui.Modifier
@@ -92,6 +93,7 @@ import com.tencent.kuikly.core.views.ScrollerEvent
 import com.tencent.kuikly.core.views.ScrollerView
 import com.tencent.kuikly.compose.scroller.animateScrollToTop
 import com.tencent.kuikly.compose.scroller.applyScrollViewOffsetDelta
+import com.tencent.kuikly.compose.scroller.ScrollOffsetWriteIntent
 import com.tencent.kuikly.compose.scroller.shouldRejectNativeScrollOffset
 import com.tencent.kuikly.compose.scroller.calculateAndUpdateContentSize
 import kotlinx.coroutines.launch
@@ -245,14 +247,14 @@ fun SubcomposeLayout(
             return@LaunchedEffect
         }
 
-        scrollableState.kuiklyInfo.scrollView = scrollViewRef
+        scrollableState.kuiklyInfo.bindScrollView(scrollViewRef!!)
         scrollableState.kuiklyInfo.orientation = orientation
         val rp = scrollViewRef?.obtainRenderProps()
         rp?.kuiklyScrollInfo = scrollableState.kuiklyInfo
         val kuiklyInfo = scrollableState.kuiklyInfo
 
         // Bind the new scrollView after computing reset flags so density is available for reset
-        kuiklyInfo.scrollView = scrollViewRef
+        kuiklyInfo.bindScrollView(scrollViewRef!!)
 
         // Set other properties after reset to ensure they are correctly set
         kuiklyInfo.orientation = orientation
@@ -265,30 +267,37 @@ fun SubcomposeLayout(
 
             if (scrollableState is PagerState || scrollableState is DrawerInternalPagerState) {
                 willDragEndBySync(isSync = scrollableState is PagerState, handler = {
-                    val viewportSize = kuiklyInfo.viewportSize
-                    val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
-                    // 实现分页滑动
-                    val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
-                    if (scrollableState is DrawerInternalPagerState) {
-                        if ((offset < 0 && scrollableState.isAtTop()) || offset > (kuiklyInfo.currentContentSize - viewportSize)) {
-                            return@willDragEndBySync
+                    val capability = kuiklyInfo.beginScrollOffsetWriteCapability(
+                        ScrollOffsetWriteCapabilityKind.GestureSnap,
+                    )
+                    try {
+                        val viewportSize = kuiklyInfo.viewportSize
+                        val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
+                        // 实现分页滑动
+                        val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                        if (scrollableState is DrawerInternalPagerState) {
+                            if ((offset < 0 && scrollableState.isAtTop()) || offset > (kuiklyInfo.currentContentSize - viewportSize)) {
+                                return@willDragEndBySync
+                            }
+                            scrollableState.kuiklyWillDragEnd(scaleParams, orientation, capability)
+                        } else if (scrollableState is PagerState) {
+                            val targetOffset = if (isVertical) {
+                                scaleParams.targetContentOffsetY.toInt()
+                            } else {
+                                scaleParams.targetContentOffsetX.toInt()
+                            }
+                            val maxOffset = kuiklyInfo.currentContentSize - viewportSize
+                            val isAtTop = scrollableState.isAtTop()
+                            val lastItemVisible = scrollableState.lastItemVisible()
+                            val guardStart = offset <= 0 && isAtTop && targetOffset <= offset
+                            val guardEnd = offset >= maxOffset && lastItemVisible && targetOffset >= offset
+                            if (guardStart || guardEnd) {
+                                return@willDragEndBySync
+                            }
+                            scrollableState.kuiklyWillDragEnd(scaleParams, orientation, capability)
                         }
-                        scrollableState.kuiklyWillDragEnd(scaleParams, orientation)
-                    } else if (scrollableState is PagerState) {
-                        val targetOffset = if (isVertical) {
-                            scaleParams.targetContentOffsetY.toInt()
-                        } else {
-                            scaleParams.targetContentOffsetX.toInt()
-                        }
-                        val maxOffset = kuiklyInfo.currentContentSize - viewportSize
-                        val isAtTop = scrollableState.isAtTop()
-                        val lastItemVisible = scrollableState.lastItemVisible()
-                        val guardStart = offset <= 0 && isAtTop && targetOffset <= offset
-                        val guardEnd = offset >= maxOffset && lastItemVisible && targetOffset >= offset
-                        if (guardStart || guardEnd) {
-                            return@willDragEndBySync
-                        }
-                        scrollableState.kuiklyWillDragEnd(scaleParams, orientation)
+                    } finally {
+                        kuiklyInfo.endScrollOffsetWriteCapability(capability)
                     }
                 })
             }
@@ -303,6 +312,15 @@ fun SubcomposeLayout(
                 // / back是回滑,forward是前滑
                 scrollableState.kuiklyOnScrollEnd(scaleParams)
             }
+            dragBegin {
+                val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
+                val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                kuiklyInfo.contentOffset = offset
+                kuiklyInfo.beginNativeScrollInteraction(scaleParams.nativeInteractionEpoch)
+                (scrollableState as? PagerState)?.clearSnapAnimationState()
+                (scrollableState as? DrawerInternalPagerState)?.clearSnapAnimationState()
+                kuiklyInfo.isDragging = true
+            }
             dragEnd {
                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
                 val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
@@ -313,79 +331,85 @@ fun SubcomposeLayout(
                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
                 val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
 
-                // Reject unexpected native offset jumps (e.g. HarmonyOS HandleCrashTop).
-                // Correct the native side back and skip this event entirely to prevent
-                // compose state pollution.
-                // Only apply to DrawerInternalPagerState to avoid affecting existing scroll logic.
+                val applySourceEvent = sourceEvent@{
+                    kuiklyInfo.contentOffset = offset
+                    (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
+                    (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
+                    kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
+
+                    when (
+                        kuiklyInfo.resolveNativeScrollEvent(
+                            offsetX = scaleParams.offsetX,
+                            offsetY = scaleParams.offsetY,
+                            epsilon = 0.5 * kuiklyInfo.getDensity(),
+                        )
+                    ) {
+                        KuiklyScrollInfo.NativeScrollEventDisposition.Consume -> return@sourceEvent
+                        KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly -> {
+                            kuiklyInfo.composeOffset = offset.toFloat()
+                            return@sourceEvent
+                        }
+                        KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch -> Unit
+                    }
+
+                    val delta = offset - kuiklyInfo.composeOffset
+                    if (delta.toInt() == 0) return@sourceEvent
+
+                    scrollableState.calculateAndUpdateContentSize()
+
+                    val toButtomDelta = if (kuiklyInfo.realContentSize == null) {
+                        null
+                    } else {
+                        kuiklyInfo.realContentSize!! - kuiklyInfo.viewportSize - kuiklyInfo.composeOffset
+                    }
+                    if (offset < 0 && scrollableState.isAtTop()) {
+                        return@sourceEvent
+                    } else if (toButtomDelta != null && delta > toButtomDelta) {
+                        if (toButtomDelta.toInt() <= 0) {
+                            scrollableState.tryExpandStartSize(offset, true)
+                            return@sourceEvent
+                        }
+                        kuiklyInfo.composeOffset += min(delta, toButtomDelta)
+                    } else {
+                        kuiklyInfo.composeOffset = max(0f, kuiklyInfo.composeOffset + delta)
+                    }
+
+                    scrollableState.kuiklyOnScroll(delta)
+                    scrollableState.tryExpandStartSize(offset, true)
+                }
+
                 if (scrollableState is DrawerInternalPagerState
                     && scrollableState.shouldRejectNativeScrollOffset(offset)
                 ) {
                     val correctOffset = kuiklyInfo.contentOffset
                     val delta = correctOffset - offset
                     if (delta != 0) {
-                        scrollableState.applyScrollViewOffsetDelta(delta)
+                        val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken()
+                        if (ownerToken != null) {
+                            kuiklyInfo.enqueueHostEmergencySourceEvent(
+                                correction = { complete ->
+                                    scrollableState.applyScrollViewOffsetDelta(
+                                        delta,
+                                        ownerToken = ownerToken,
+                                        intent = ScrollOffsetWriteIntent.HostEmergencyCorrection,
+                                        reason = "reject_native_offset",
+                                        anchorValidator = {
+                                            val maxOffset = maxOf(
+                                                0,
+                                                kuiklyInfo.currentContentSize - kuiklyInfo.viewportSize,
+                                            )
+                                            correctOffset in 0..maxOffset
+                                        },
+                                        onCommitResult = complete,
+                                    )
+                                },
+                                applyNormalPath = applySourceEvent,
+                            )
+                            return@scroll
+                        }
                     }
-                    return@scroll
                 }
-
-                kuiklyInfo.contentOffset = offset
-                (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
-                (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
-                kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
-
-                when (
-                    kuiklyInfo.resolveNativeScrollEvent(
-                        offsetX = scaleParams.offsetX,
-                        offsetY = scaleParams.offsetY,
-                        epsilon = 0.5 * kuiklyInfo.getDensity(),
-                    )
-                ) {
-                    KuiklyScrollInfo.NativeScrollEventDisposition.Consume -> return@scroll
-                    KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly -> {
-                        // Off-target echo of our own programmatic move (native
-                        // clamped or split it). Adopt the reported offset so
-                        // future deltas use the true base, but do not dispatch
-                        // a compose scroll: offsetDirty stays set, so a later
-                        // alignment pass converges once the render-side content
-                        // size has caught up (task #318 joint first-open stall).
-                        kuiklyInfo.composeOffset = offset.toFloat()
-                        return@scroll
-                    }
-                    KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch -> Unit
-                }
-
-                // 忽略较小的滑动
-                val delta = offset - kuiklyInfo.composeOffset
-                if (delta.toInt() == 0) {
-                    return@scroll
-                }
-
-                // 更新当前的contentSize大小
-                scrollableState.calculateAndUpdateContentSize()
-
-                val toButtomDelta = if (kuiklyInfo.realContentSize == null) {
-                    null
-                } else {
-                    kuiklyInfo.realContentSize!! - kuiklyInfo.viewportSize - kuiklyInfo.composeOffset
-                }
-                // 判断是否滑出边界
-                if (offset < 0 && scrollableState.isAtTop()) {
-                    return@scroll
-                } else if (toButtomDelta != null && delta > toButtomDelta) {
-                    if (toButtomDelta.toInt() <= 0) {
-                        scrollableState.tryExpandStartSize(offset, true)
-                        return@scroll
-                    }
-                    kuiklyInfo.composeOffset += min(delta, toButtomDelta)
-                } else {
-                    kuiklyInfo.composeOffset = max(0f, kuiklyInfo.composeOffset + delta)
-                }
-
-                // 触发compose滑动，并重新布局
-                val comsumedDelta = scrollableState.kuiklyOnScroll(delta)
-
-                // 尝试扩容
-                scrollableState.tryExpandStartSize(offset, true)
+                applySourceEvent()
             }
 
             // Listen to native "scroll to top" event and scroll to index 0

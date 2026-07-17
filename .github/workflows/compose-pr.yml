@@ -1,78 +1,301 @@
-name: Compose PR
+name: Compose PR Exact Matrix
 
 on:
   pull_request:
     branches:
       - staging2
-    paths:
-      - "compose/**"
-      - "core/**"
-      - "buildSrc/**"
-      - "gradle/**"
-      - "build.gradle*"
-      - "settings.gradle*"
-      - "gradle.properties"
-      - ".github/workflows/compose-pr.yml"
 
 permissions:
   contents: read
 
+env:
+  EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
 jobs:
-  common-and-android-jvm:
+  identity-diff:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - name: Check out exact PR head
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
 
-      - name: Verify exact PR head
-        env:
-          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Verify identity, DCO, diff and clean tree
+        shell: bash
         run: |
-          actual_head_sha="$(git rev-parse HEAD)"
-          echo "expected_head_sha=${EXPECTED_HEAD_SHA}"
-          echo "actual_head_sha=${actual_head_sha}"
-          test "${actual_head_sha}" = "${EXPECTED_HEAD_SHA}"
+          set -euo pipefail
+          actual_head="$(git rev-parse HEAD)"
+          test "$actual_head" = "$EXPECTED_HEAD_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          author_email="$(git show -s --format=%ae HEAD)"
+          committer_email="$(git show -s --format=%ce HEAD)"
+          test "$author_email" = "raft-mobile-codex-kmp-developer@mail.build"
+          test "$committer_email" = "raft-mobile-codex-kmp-developer@mail.build"
+          git show -s --format=%B HEAD | grep -Fx \
+            'Signed-off-by: Codex-KMP-Developer <raft-mobile-codex-kmp-developer@mail.build>'
+          {
+            echo "head=$actual_head"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            echo "parent=$(git rev-parse HEAD^)"
+            echo "base=${{ github.event.pull_request.base.sha }}"
+            echo "merge_base=$(git merge-base HEAD '${{ github.event.pull_request.base.sha }}')"
+            echo "author=$(git show -s --format='%an <%ae>' HEAD)"
+            echo "committer=$(git show -s --format='%cn <%ce>' HEAD)"
+            echo "patch_id=$(git show --pretty=format: HEAD | git patch-id --stable | awk '{print $1}')"
+          } | tee exact-manifest.txt
+          git diff --binary "${{ github.event.pull_request.base.sha }}...HEAD" > candidate.patch
+          sha256sum candidate.patch | tee candidate.patch.sha256
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
+      - name: Upload exact identity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: identity-diff-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            exact-manifest.txt
+            candidate.patch.sha256
+
+  common-core-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Compile common metadata and run Android JVM tests
-        run: >-
-          ./gradlew
-          :compose:compileCommonMainKotlinMetadata
-          :compose:testDebugUnitTest
-          --no-daemon
-
-      - name: Report Android JVM test count
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+      - name: Compile metadata and run production JVM fixtures
+        run: |
+          ./gradlew \
+            :core:compileCommonMainKotlinMetadata \
+            :compose:compileCommonMainKotlinMetadata \
+            :core:testDebugUnitTest \
+            :compose:testDebugUnitTest \
+            :core-render-android:testDebugUnitTest \
+            --no-build-cache --no-daemon
+      - name: Require nonzero tests per module
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import xml.etree.ElementTree as ET
 
-          reports = sorted(Path("compose/build/test-results").glob("**/TEST-*.xml"))
-          if not reports:
-              raise SystemExit("No Android JVM test result XML files found")
+          for module in ("core", "compose", "core-render-android"):
+              reports = sorted(Path(module, "build", "test-results").glob("**/TEST-*.xml"))
+              tests = failures = errors = 0
+              for report in reports:
+                  suite = ET.parse(report).getroot()
+                  tests += int(suite.attrib.get("tests", "0"))
+                  failures += int(suite.attrib.get("failures", "0"))
+                  errors += int(suite.attrib.get("errors", "0"))
+              print(f"{module}: tests={tests} failures={failures} errors={errors}")
+              if tests == 0 or failures or errors:
+                  raise SystemExit(1)
+          PY
+      - name: Upload JVM evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: common-core-android-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            core/build/test-results
+            compose/build/test-results
+            core-render-android/build/test-results
 
-          totals = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
-          for report in reports:
-              suite = ET.parse(report).getroot()
-              for key in totals:
-                  totals[key] += int(suite.attrib.get(key, "0"))
+  ios-renderer:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+      - name: Generate CocoaPods dummy framework
+        run: ./gradlew :demo:generateDummyFramework --no-build-cache --no-daemon
+      - name: Install locked Pods
+        run: bundle exec pod install --project-directory=iosApp --deployment
+      - name: Run production transaction fixtures
+        run: |
+          tools/ios-renderer-tests/run-scroll-animation-policy-test.sh
+          tools/ios-renderer-tests/run-scroll-view-transaction-fixture.sh
+      - name: Compile Kotlin Native main and tests
+        run: |
+          ./gradlew \
+            :core:compileKotlinIosSimulatorArm64 \
+            :compose:compileKotlinIosSimulatorArm64 \
+            :compose:compileTestKotlinIosSimulatorArm64 \
+            --no-build-cache --no-daemon
+      - name: Build production renderer with warnings as errors
+        run: |
+          mkdir -p build
+          set -o pipefail
+          xcodebuild \
+            -workspace iosApp/iosApp.xcworkspace \
+            -scheme OpenKuiklyIOSRender \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            -derivedDataPath build/ios-derived \
+            -resultBundlePath build/ios-renderer.xcresult \
+            build | tee build/ios-renderer.log
+      - name: Upload iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-renderer-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            build/ios-renderer.log
+            build/ios-renderer.xcresult
 
-          print(
-              "android_jvm_test_count "
-              + " ".join(f"{key}={value}" for key, value in totals.items())
-          )
-          if totals["tests"] == 0 or totals["failures"] or totals["errors"]:
-              raise SystemExit(1)
+  ohos-renderer-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - name: Run production C++ transaction fixtures
+        run: |
+          tools/ohos-renderer-tests/run-pending-callback-slot-policy-test.sh
+          tools/ohos-renderer-tests/run-current-operation-arbiter-fixture.sh
+          tools/ohos-renderer-tests/run-scroll-replacement-policy-test.sh
+
+  ohos-native:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    container:
+      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
+    timeout-minutes: 60
+    env:
+      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
+      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - name: Sync OHOS dependency metadata
+        working-directory: ohosApp
+        run: |
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          ohpm install --all
+          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+      - name: Fresh arm64 production libkuikly compile and link
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          tools/ohos-renderer-tests/run-arm64-direct-link.sh "$GITHUB_WORKSPACE/build/ohos-evidence"
+      - name: Upload OHOS native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-native-${{ env.EXPECTED_HEAD_SHA }}
+          path: build/ohos-evidence
+
+  allowlist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - name: Audit every scroll writer and prove fail-closed behavior
+        run: python3 tools/check-scroll-writer-allowlist.py --mutation-test
+  mutation-common-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Kill common and Android production mutations
+        run: tools/run-scroll-transaction-mutations.sh common-android
+
+  mutation-ios:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+      - name: Kill iOS production current-operation mutation
+        run: tools/run-scroll-transaction-mutations.sh ios
+
+  mutation-ohos:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    container:
+      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
+    timeout-minutes: 30
+    env:
+      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
+      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - name: Sync OHOS dependency metadata
+        working-directory: ohosApp
+        run: |
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          ohpm install --all
+          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+      - name: Kill OHOS production current-operation mutation
+        run: tools/run-scroll-transaction-mutations.sh ohos
+
+  exact-matrix:
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - identity-diff
+      - common-core-android
+      - ios-renderer
+      - ohos-renderer-policy
+      - ohos-native
+      - allowlist
+      - mutation-common-android
+      - mutation-ios
+      - mutation-ohos
+    steps:
+      - name: Require every exact-bound gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          needs = json.loads(os.environ["RESULTS"])
+          failed = {name: value["result"] for name, value in needs.items() if value["result"] != "success"}
+          print(json.dumps(needs, indent=2, sort_keys=True))
+          if failed:
+              raise SystemExit(f"exact matrix failed: {failed}")
           PY

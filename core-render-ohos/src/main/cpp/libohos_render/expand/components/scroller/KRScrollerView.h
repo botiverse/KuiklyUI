@@ -17,6 +17,9 @@
 #define CORE_RENDER_OHOS_KRSCROLLERVIEW_H
 
 #include <unordered_set>
+#include "KRCurrentOperationArbiter.h"
+#include "KRPendingCallbackSlot.h"
+#include "KRScrollReplacementPolicy.h"
 #include "KRScrollerContentInset.h"
 #include "libohos_render/export/IKRRenderViewExport.h"
 #include "libohos_render/foundation/KRPoint.h"
@@ -36,6 +39,50 @@ class IKRContentScrollObserver {
     virtual void ContentViewDidInsertSubview() {}
     virtual void ContentViewDidMoveToParentView() {}
     virtual void ContentViewWillRemoveFromParentView() {}
+};
+
+enum class KRScrollWriteResultCode : int {
+    Committed = 0,
+    AlreadySatisfied = 1,
+    Busy = 2,
+    NotReady = 3,
+    LayoutChanged = 4,
+    Stale = 5,
+    Replaced = 6,
+    Canceled = 7,
+    Destroyed = 8,
+    OutOfRange = 9,
+    UnsupportedAxisOrNoLayout = 10,
+    Interrupted = 11,
+    AckTimeout = 12,
+    RollbackFailed = 13,
+};
+
+enum class KRNativeScrollWriteResource : int {
+    ContentOffset = 0,
+    ContentInset = 1,
+};
+
+struct KRNativeScrollWriteOperation {
+    uint64_t sequence = 0;
+    KRNativeScrollWriteResource resource = KRNativeScrollWriteResource::ContentOffset;
+    KRRenderCallback callback = nullptr;
+    int64_t generation = -1;
+    int64_t compose_operation = 0;
+    int64_t interaction_epoch = 0;
+    int64_t layout_revision = 0;
+    int64_t inset_revision = 0;
+    KRPoint start;
+    KRPoint target;
+    bool animated = false;
+    bool observed_start = false;
+    bool inset_mutation_applied = false;
+    bool inset_animation_finished = false;
+    bool offset_correction_required = false;
+    bool offset_correction_finished = false;
+    bool replaced_previous = false;
+    bool physical_end_emitted = false;
+    bool terminal = false;
 };
 
 class KRScrollerContentView : public IKRRenderViewExport {
@@ -114,12 +161,33 @@ class KRScrollerView : public IKRRenderViewExport {
     void FireEndDragEvent(ArkUI_NodeEvent *event);
     void FireEndScrollEvent(ArkUI_NodeEvent *event);
     void FireWillDragEndEvent(ArkUI_NodeEvent *event);
-    void SetContentOffset(const KRAnyValue &value);
-    void SetContentInset(const KRAnyValue &value);
-    void SetContentInset(const std::shared_ptr<KRScrollerContentInset> &content_inset);
+    void SetContentOffset(const KRAnyValue &value, const KRRenderCallback &callback);
+    void CompleteOffsetWrite(const KRRenderCallback &callback, KRScrollWriteResultCode result_code);
+    KRScrollWriteResultCode ValidateOffsetWrite(int64_t generation, bool requires_native_idle,
+                                                int64_t operation_generation,
+                                                int64_t interaction_epoch,
+                                                int64_t layout_revision,
+                                                int64_t inset_revision);
+    std::shared_ptr<KRNativeScrollWriteOperation> InstallScrollWrite(
+        KRNativeScrollWriteResource resource,
+        int64_t generation, int64_t operation_generation, int64_t interaction_epoch,
+        int64_t layout_revision, int64_t inset_revision, const KRRenderCallback &callback);
+    KRRenderCallback FinalizeScrollWrite(const std::shared_ptr<KRNativeScrollWriteOperation> &operation,
+                                         KRScrollWriteResultCode result_code,
+                                         std::shared_ptr<KRRenderValue> &result);
+    void InvalidateCurrentScrollWrite(KRScrollWriteResultCode result_code);
+    bool IsCurrentNativeScrollWrite(const std::shared_ptr<KRNativeScrollWriteOperation> &operation) const;
+    std::shared_ptr<KRRenderValue> ScrollWriteResult(
+        KRScrollWriteResultCode result_code,
+        const std::shared_ptr<KRNativeScrollWriteOperation> &operation = nullptr);
+    void SetContentInset(const KRAnyValue &value, const KRRenderCallback &callback);
+    void SetContentInset(const std::shared_ptr<KRScrollerContentInset> &content_inset,
+                         const KRRenderCallback &callback);
+    void CompleteContentInsetWrite(const std::shared_ptr<KRNativeScrollWriteOperation> &operation,
+                                   KRScrollWriteResultCode result_code, bool fire_scroll_end);
     void SetContentInsetWhenDragEnd(const KRAnyValue &value);
     void AbortContentOffsetAnimate();
-    void PrepareForComposeReuse();
+    void PrepareForComposeReuse(const KRAnyValue &value);
     void OnScrollFrameBegin(ArkUI_NodeEvent *event);
     void OnScrollStop(ArkUI_NodeEvent *event);
     void OnWillScroll(ArkUI_NodeEvent *event);
@@ -138,6 +206,11 @@ class KRScrollerView : public IKRRenderViewExport {
     bool SetFlingEnable(bool enable);
     bool SetFlingSpeedLimit(const KRAnyValue &value);
     KRPoint MaxContentOffsetInContentInset(const std::shared_ptr<KRScrollerContentInset> &content_inset);
+    bool CanApplyOffsetWrite(int64_t generation, bool requires_native_idle) const;
+    bool ClaimOffsetWrite(int64_t generation, bool requires_native_idle, int64_t operation_generation);
+    bool IsCurrentOffsetWrite(int64_t operation_generation) const;
+    bool MatchesExpectedLayout(float expected_content_size, float expected_viewport_size);
+    int NativeScrollPhase() const;
 
  private:
     KRRenderCallback on_scroll_callback_ = nullptr;
@@ -158,6 +231,22 @@ class KRScrollerView : public IKRRenderViewExport {
     int first_duration_ = 0;
     int first_curve_ = 0;
     float first_damping_ = 0;
+    int64_t first_offset_generation_ = -1;
+    bool first_offset_requires_native_idle_ = false;
+    int64_t first_offset_operation_generation_ = 0;
+    float first_offset_expected_content_size_ = -1.0f;
+    float first_offset_expected_viewport_size_ = -1.0f;
+    KRPendingCallbackSlot<KRRenderCallback> first_offset_callback_slot_;
+    int64_t compose_offset_write_generation_ = 0;
+    uint64_t native_write_operation_sequence_ = 0;
+    int64_t latest_compose_write_operation_ = 0;
+    int64_t minimum_compose_write_operation_ = 0;
+    int64_t native_interaction_epoch_ = 0;
+    int64_t native_layout_revision_ = 0;
+    int64_t native_inset_revision_ = 0;
+    KRRect last_revision_frame_;
+    KRCurrentOperationArbiter<KRNativeScrollWriteOperation> scroll_write_arbiter_;
+    KRReplacementStopEventFence replacement_stop_event_fence_;
     ArkUI_ScrollState current_scroll_state_;
 
     std::shared_ptr<KRAnimation> content_inset_animate_;

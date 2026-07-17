@@ -36,5 +36,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)cancel;
 
+/** Claims completion once unless the animator was canceled or already completed. */
+- (BOOL)claimCompletion;
+
++ (BOOL)isCurrentAnimator:(nullable KRScrollViewOffsetAnimator *)currentAnimator
+                 candidate:(KRScrollViewOffsetAnimator *)candidate
+         currentGeneration:(NSUInteger)currentGeneration
+      completionGeneration:(NSUInteger)completionGeneration;
+
++ (BOOL)shouldEmitTerminalForNativePhase:(NSInteger)nativePhase;
+
 @end
 NS_ASSUME_NONNULL_END

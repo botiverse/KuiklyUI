@@ -54,6 +54,114 @@ enum class KRNestedScrollMode(val value: String){
     PARENT_FIRST("PARENT_FIRST"),
 }
 
+internal class PendingOffsetWriteSlot<T>(
+    private val reject: (T) -> Unit,
+) {
+    private var pending: T? = null
+    private var revision = 0L
+
+    fun replace(value: T): Boolean {
+        val replacementRevision = revision + 1L
+        val previous = pending
+        pending = null
+        revision = replacementRevision
+        previous?.let(reject)
+        if (revision != replacementRevision || pending != null) {
+            reject(value)
+            return false
+        }
+        pending = value
+        return true
+    }
+
+    fun take(): T? = pending.also {
+        if (it != null) {
+            pending = null
+            revision += 1L
+        }
+    }
+
+    fun consume(value: T): Boolean {
+        if (pending !== value) return false
+        pending = null
+        revision += 1L
+        return true
+    }
+
+    fun rejectAndClear() {
+        val previous = pending ?: return
+        pending = null
+        revision += 1L
+        reject(previous)
+    }
+}
+
+internal enum class NativeScrollWriteResultCode(val wireValue: Int) {
+    Committed(0),
+    AlreadySatisfied(1),
+    Busy(2),
+    NotReady(3),
+    LayoutChanged(4),
+    Stale(5),
+    Replaced(6),
+    Canceled(7),
+    Destroyed(8),
+    OutOfRange(9),
+    UnsupportedAxisOrNoLayout(10),
+    Interrupted(11),
+    AckTimeout(12),
+    RollbackFailed(13),
+}
+
+internal class NativeScrollWriteOperation(
+    val sequence: Long,
+    val callback: KuiklyRenderCallback?,
+) {
+    var composeOperation = 0L
+    var animated = false
+    var replacedPrevious = false
+    var terminal = false
+    var started = false
+    var primaryPending = false
+    var edgePending = false
+}
+
+internal class NativeScrollWriteOperationArbiter {
+    private var current: NativeScrollWriteOperation? = null
+
+    fun install(operation: NativeScrollWriteOperation): NativeScrollWriteOperation? {
+        val previous = current
+        current = operation
+        if (previous != null) previous.terminal = true
+        return previous
+    }
+
+    fun isCurrent(operation: NativeScrollWriteOperation): Boolean =
+        current === operation && !operation.terminal
+
+    fun complete(operation: NativeScrollWriteOperation): KuiklyRenderCallback? {
+        if (!isCurrent(operation)) return null
+        operation.terminal = true
+        current = null
+        return operation.callback
+    }
+
+    fun invalidate(): NativeScrollWriteOperation? {
+        val operation = current ?: return null
+        operation.terminal = true
+        current = null
+        return operation
+    }
+
+    fun current(): NativeScrollWriteOperation? = current
+}
+
+internal fun shouldDispatchNativeScrollEnd(
+    suppressed: Boolean,
+    operation: NativeScrollWriteOperation?,
+): Boolean = !suppressed &&
+    !(operation?.started == true && (operation.primaryPending || operation.edgePending))
+
 /**
  * Kuikly List组件
  */
@@ -214,7 +322,43 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     /**
      * 将要滚动到的offset字符串描述
      */
-    private var pendingSetContentOffsetStr = ""
+    private data class PendingContentOffset(
+        val params: String,
+        val callback: KuiklyRenderCallback?,
+    )
+
+    private val pendingSetContentOffset = PendingOffsetWriteSlot<PendingContentOffset> { pending ->
+        pending.callback?.invoke(mapOf("committed" to 0))
+    }
+    private data class PendingEdgeOffset(
+        val runnable: Runnable,
+        val callback: KuiklyRenderCallback?,
+    )
+
+    private val pendingEdgeOffset = PendingOffsetWriteSlot<PendingEdgeOffset> { pending ->
+        removeCallbacks(pending.runnable)
+        pending.callback?.invoke(mapOf("committed" to 0))
+    }
+    private data class PendingContentInset(
+        val callback: KuiklyRenderCallback?,
+    )
+
+    private val pendingContentInset = PendingOffsetWriteSlot<PendingContentInset> { pending ->
+        pending.callback?.invoke(mapOf("committed" to 0))
+    }
+    private var composeOffsetWriteGeneration = 0L
+    private var latestComposeWriteOperation = 0L
+    private var minimumComposeWriteOperation = 0L
+    private var nativeWriteOperationSequence = 0L
+    private var nativeInteractionEpoch = 0L
+    private var nativeLayoutRevision = 0L
+    private var nativeInsetRevision = 0L
+    private val nativeWriteArbiter = NativeScrollWriteOperationArbiter()
+    private var suppressPhysicalScrollEnd = false
+    private var lastPhysicalViewportWidth = -1
+    private var lastPhysicalViewportHeight = -1
+    private var lastPhysicalContentWidth = -1
+    private var lastPhysicalContentHeight = -1
 
     /**
      * List 高度动态改变时, iOS系统会自动调整 contentOffset
@@ -283,6 +427,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     // 动画管理器
     private val scrollAnimationManager = KRScrollAnimationManager(this).apply {
         onAnimationEnd = {
+            nativeWriteArbiter.current()?.let(::completePrimaryWrite)
             checkAndStopScrollIfNeeded()
         }
     }
@@ -337,9 +482,11 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         val oh = overScrollHandler ?: return
         if (immediately) {
             oh.contentInsetWhenEndDrag = contentInset
+            oh.contentInsetWhenEndDragIsCurrent = { true }
             oh.bounceWithContentInset(contentInset ?: KRRecyclerContentViewContentInset(kuiklyRenderContext))
         } else {
             oh.contentInsetWhenEndDrag = contentInset
+            oh.contentInsetWhenEndDragIsCurrent = { true }
         }
     }
 
@@ -503,14 +650,14 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     override fun call(method: String, params: String?, callback: KuiklyRenderCallback?): Any? {
         return when (method) {
             METHOD_SET_HAS_PULL_TO_REFRESH -> null
-            METHOD_CONTENT_OFFSET -> setContentOffset(params)
+            METHOD_CONTENT_OFFSET -> setContentOffset(params, callback)
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> contentInsetWhenEndDrag(params)
-            METHOD_CONTENT_INSET -> contentInset(params)
+            METHOD_CONTENT_INSET -> contentInset(params, callback)
             METHOD_ABORT_CONTENT_OFFSET_ANIMATE -> {
                 scrollAnimationManager.cancel()
                 stopScroll()
             }
-            METHOD_PREPARE_FOR_COMPOSE_REUSE -> prepareForComposeReuse()
+            METHOD_PREPARE_FOR_COMPOSE_REUSE -> prepareForComposeReuse(params)
             else -> super.call(method, params, callback)
         }
     }
@@ -544,6 +691,18 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
 
     override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
         super.onLayout(changed, l, t, r, b)
+        val viewportWidth = r - l
+        val viewportHeight = b - t
+        val contentWidth = if (isContentViewAttached) contentView.frameWidth else -1
+        val contentHeight = if (isContentViewAttached) contentView.frameHeight else -1
+        if (viewportWidth != lastPhysicalViewportWidth || viewportHeight != lastPhysicalViewportHeight ||
+            contentWidth != lastPhysicalContentWidth || contentHeight != lastPhysicalContentHeight) {
+            nativeLayoutRevision += 1L
+            lastPhysicalViewportWidth = viewportWidth
+            lastPhysicalViewportHeight = viewportHeight
+            lastPhysicalContentWidth = contentWidth
+            lastPhysicalContentHeight = contentHeight
+        }
 
         // 记录 RecyclerView 位置变化，用于补偿触摸事件
         // 当 RecyclerView 在父容器中的位置发生变化时，需要记录这个变化量
@@ -574,6 +733,24 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     override fun onDestroy() {
+        nativeWriteOperationSequence += 1L
+        composeOffsetWriteGeneration += 1L
+        nativeInteractionEpoch += 1L
+        nativeLayoutRevision += 1L
+        nativeInsetRevision += 1L
+        val operation = nativeWriteArbiter.invalidate()
+        val deferredCallbacks = mutableListOf<KuiklyRenderCallback>()
+        pendingSetContentOffset.take()?.callback?.let(deferredCallbacks::add)
+        pendingEdgeOffset.take()?.also { pending ->
+            removeCallbacks(pending.runnable)
+            pending.callback?.let(deferredCallbacks::add)
+        }
+        pendingContentInset.take()?.callback?.let(deferredCallbacks::add)
+        withPhysicalScrollEndSuppressed {
+            scrollAnimationManager.cancel()
+            overScrollHandler?.prepareForComposeReuse()
+            stopScroll()
+        }
         super.onDestroy()
         nestedHorizontalChildInterceptor?.also { interceptor ->
             closestHorizontalRecyclerViewParent?.removeNestedChildInterceptEventListener(interceptor)
@@ -592,6 +769,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         nestedScrollVelocityTracker?.recycle()
         nestedScrollVelocityTracker = null
         nestedScrollLastMoveTime = 0L
+        dispatchDetachedWriteCallbacks(operation, deferredCallbacks, NativeScrollWriteResultCode.Destroyed)
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -600,6 +778,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         // to fireWillDragEndEvent, instead of using lastScrollParentX/Y (single-frame displacement).
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                nativeInteractionEpoch += 1L
+                cancelPendingNativeWritesForUserGesture()
                 nestedScrollVelocityTracker?.recycle()
                 nestedScrollVelocityTracker = VelocityTracker.obtain()
                 nestedScrollVelocityTracker?.addMovement(ev)
@@ -758,6 +938,13 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                 // 由于setScrollState内部在dispatchOnScrollStateChanged之前可能会再次调用setScrollState，
                 // 导致dispatchOnScrollStateChanged逆序回调，因此newState的值不可靠，需要从getScrollState重新获取
                 val currentState = recyclerView.scrollState
+                KuiklyRenderLog.d(
+                    "SlockKuiklyScroll",
+                    "event=native_state view=${this@KRRecyclerView.hashCode()} previous=${scrollStateName(preScrollState)} " +
+                        "callback=${scrollStateName(newState)} current=${scrollStateName(currentState)} " +
+                        "offset=$contentOffsetX:$contentOffsetY range=${computeHorizontalScrollRange()}:${computeVerticalScrollRange()} " +
+                        "extent=${computeHorizontalScrollExtent()}:${computeVerticalScrollExtent()}"
+                )
                 when(newState) {
                     SCROLL_STATE_IDLE -> nativeGestureViewHashCodeSet.remove(this.hashCode())
                     SCROLL_STATE_DRAGGING -> nativeGestureViewHashCodeSet.add(this.hashCode())
@@ -769,6 +956,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                 }
                 if (isIdeaStateToDraggingState(currentState) || isSettlingStateToDraggingState(currentState)) {
                     isDragging = true
+                    cancelPendingNativeWritesForUserGesture()
                     scrollAnimationManager.cancel()
                     fireBeginDragEvent()
                 }
@@ -780,6 +968,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                 }
 
                 if (isEndState(currentState)) {
+                    nativeWriteArbiter.current()?.let(::completePrimaryWrite)
                     fireEndScrollEvent()
                 }
                 preScrollState = currentState
@@ -849,7 +1038,12 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     private fun fireEndScrollEvent() {
-        scrollEndEventCallback?.invoke(getCommonScrollParams())
+        val operation = nativeWriteArbiter.current()
+        if (!shouldDispatchNativeScrollEnd(suppressPhysicalScrollEnd, operation)) return
+        val terminal = takeNativeWriteTerminalIfReady()
+        val params = getCommonScrollParams()
+        scrollEndEventCallback?.invoke(params)
+        terminal?.first?.invoke(terminal.second)
     }
 
     private fun getCommonScrollParams(): MutableMap<String, Any> {
@@ -867,7 +1061,23 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         offsetMap[VIEW_WIDTH] = kuiklyRenderContext.toDpF(frameWidth.toFloat())
         offsetMap[VIEW_HEIGHT] = kuiklyRenderContext.toDpF(frameHeight.toFloat())
         offsetMap[IS_DRAGGING] = getIsDragging(isDragging)
+        offsetMap[NATIVE_SCROLL_PHASE] = nativeScrollPhase()
+        offsetMap[NATIVE_INTERACTION_EPOCH] = nativeInteractionEpoch
+        offsetMap[LAYOUT_REVISION] = nativeLayoutRevision
+        offsetMap[INSET_REVISION] = nativeInsetRevision
+        val sourceOperation = nativeWriteArbiter.current()?.takeIf {
+            it.animated && it.composeOperation > 0L && nativeScrollPhase() == NATIVE_SCROLL_PHASE_SETTLING
+        }?.composeOperation ?: 0L
+        offsetMap[SOURCE_OPERATION_GENERATION] = sourceOperation
         return offsetMap
+    }
+
+    private fun nativeScrollPhase(): Int = when {
+        isDragging || scrollState == SCROLL_STATE_DRAGGING -> NATIVE_SCROLL_PHASE_DRAGGING
+        scrollState == SCROLL_STATE_SETTLING ||
+            overScrollHandler?.overScrolling == true ||
+            scrollAnimationManager.hasRunningAnimation() -> NATIVE_SCROLL_PHASE_SETTLING
+        else -> NATIVE_SCROLL_PHASE_IDLE
     }
 
     private fun setupAdapter(contentView: View) {
@@ -903,6 +1113,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                     isDragging: Boolean
                 ) {
                     if (isContentViewAttached) {
+                        cancelPendingNativeWritesForUserGesture()
+                        overScrollHandler?.cancelActiveBounce()
                         nativeGestureViewHashCodeSet.add(this.hashCode())
                         fireOverScrollBeginDragEvent(offsetX, offsetY, overScrollStart)
                     }
@@ -936,6 +1148,13 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                             velocityY,
                             overScrollStart
                         )
+                    }
+                }
+
+                override fun onBounceEnd() {
+                    if (isContentViewAttached) {
+                        isDragging = false
+                        fireEndScrollEvent()
                     }
                 }
 
@@ -1025,19 +1244,38 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         callback(paramsMap)
     }
 
-    private fun setContentOffset(value: String?) {
+    private fun setContentOffset(value: String?, callback: KuiklyRenderCallback? = null) {
+        val params = value ?: return
+        val writeToken = parseOffsetWriteToken(params)
+        val validation = validateOffsetWrite(writeToken)
+        if (validation != NativeScrollWriteResultCode.Committed) {
+            callback?.invoke(scrollWriteResult(validation))
+            return
+        }
         val rvLayoutManager = layoutManager
         if (rvLayoutManager == null || !isContentViewAttached) { // 还没设置contentView，所以layoutManager为null，等Layout完再apply
-            pendingSetContentOffsetStr = value ?: KRCssConst.EMPTY_STRING
+            if (writeToken != null) {
+                callback?.invoke(scrollWriteResult(NativeScrollWriteResultCode.NotReady))
+            } else {
+                pendingSetContentOffset.replace(PendingContentOffset(params, callback))
+            }
             return
         }
 
-        val params = value ?: return
         val isVertical = rvLayoutManager.canScrollVertically()
+        if (!matchesExpectedLayout(writeToken, isVertical)) {
+            callback?.invoke(scrollWriteResult(NativeScrollWriteResultCode.LayoutChanged))
+            return
+        }
+        commitOffsetWriteAuthority(writeToken)
+        val operation = installNativeWriteOperation(callback)
+        operation.composeOperation = writeToken?.operationGeneration ?: 0L
+        if (!nativeWriteArbiter.isCurrent(operation)) return
         val contentOffsetSplits = params.split(KRCssConst.BLANK_SEPARATOR)
         var offsetX = kuiklyRenderContext.toPxI(contentOffsetSplits[0].toFloat())
         var offsetY = kuiklyRenderContext.toPxI(contentOffsetSplits[1].toFloat())
         val animate = contentOffsetSplits[2] == "1" // "1"为以动画的形式滚动
+        operation.animated = animate
         var animationDuration = 0
         var animationDamping = 0f
         var animationVelocity = 0f
@@ -1054,7 +1292,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         val originOffsetY = offsetY
         val originOffsetX = offsetX
 
-        pendingSetContentOffsetStr = if (canScrollImmediately(originOffsetX, originOffsetY)) {
+        if (canScrollImmediately(originOffsetX, originOffsetY)) {
             internalSetContentOffset(originOffsetX,
                 originOffsetY,
                 offsetX,
@@ -1064,12 +1302,296 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                 animationDuration,
                 animationDamping,
                 animationVelocity,
-                animationCurve)
-            KRCssConst.EMPTY_STRING
+                animationCurve,
+                writeToken,
+                operation)
         } else {
             // KTV侧有可能先更改了contentView的高度或者宽度后, setContentOffset. 此时应该等Layout完后才设置offset
-            value
+            finishNativeWrite(operation, NativeScrollWriteResultCode.LayoutChanged)
         }
+    }
+
+    private data class OffsetWriteToken(
+        val generation: Long,
+        val requiresNativeIdle: Boolean,
+        val operationGeneration: Long,
+        val expectedContentSize: Float,
+        val expectedViewportSize: Float,
+        val bindingGeneration: Long = 0L,
+        val capabilityKind: Int = -1,
+        val capabilityLeaseId: Long = 0L,
+        val semanticOperationId: Long = operationGeneration,
+        val attemptGeneration: Long = operationGeneration,
+        val nativeInteractionEpoch: Long = 0L,
+        val layoutRevision: Long = 0L,
+        val anchorRevision: Long = 0L,
+        val rangeRevision: Long = 0L,
+        val insetRevision: Long = 0L,
+    )
+
+    private fun parseOffsetWriteToken(params: String): OffsetWriteToken? {
+        val splits = params.split(KRCssConst.BLANK_SEPARATOR)
+        if (splits.size < 9) return null
+        return OffsetWriteToken(
+            generation = splits[7].toLong(),
+            requiresNativeIdle = splits[8] == "1",
+            operationGeneration = splits.getOrNull(9)?.toLong() ?: 0L,
+            expectedContentSize = splits.getOrNull(10)?.toFloat() ?: -1f,
+            expectedViewportSize = splits.getOrNull(11)?.toFloat() ?: -1f,
+            bindingGeneration = splits.getOrNull(12)?.toLong() ?: 0L,
+            capabilityKind = splits.getOrNull(13)?.toInt() ?: -1,
+            capabilityLeaseId = splits.getOrNull(14)?.toLong() ?: 0L,
+            semanticOperationId = splits.getOrNull(15)?.toLong() ?: 0L,
+            attemptGeneration = splits.getOrNull(16)?.toLong() ?: 0L,
+            nativeInteractionEpoch = splits.getOrNull(17)?.toLong() ?: 0L,
+            layoutRevision = splits.getOrNull(18)?.toLong() ?: 0L,
+            anchorRevision = splits.getOrNull(19)?.toLong() ?: 0L,
+            rangeRevision = splits.getOrNull(20)?.toLong() ?: 0L,
+            insetRevision = splits.getOrNull(21)?.toLong() ?: 0L,
+        )
+    }
+
+    private fun parseInsetWriteToken(splits: List<String>): OffsetWriteToken? {
+        if (splits.size <= 6) return null
+        return OffsetWriteToken(
+            generation = splits[5].toLong(),
+            requiresNativeIdle = splits[6] == "1",
+            operationGeneration = splits.getOrNull(7)?.toLong() ?: 0L,
+            expectedContentSize = splits.getOrNull(8)?.toFloat() ?: -1f,
+            expectedViewportSize = splits.getOrNull(9)?.toFloat() ?: -1f,
+            bindingGeneration = splits.getOrNull(10)?.toLong() ?: 0L,
+            capabilityKind = splits.getOrNull(11)?.toInt() ?: -1,
+            capabilityLeaseId = splits.getOrNull(12)?.toLong() ?: 0L,
+            semanticOperationId = splits.getOrNull(13)?.toLong() ?: 0L,
+            attemptGeneration = splits.getOrNull(14)?.toLong() ?: 0L,
+            nativeInteractionEpoch = splits.getOrNull(15)?.toLong() ?: 0L,
+            layoutRevision = splits.getOrNull(16)?.toLong() ?: 0L,
+            anchorRevision = splits.getOrNull(17)?.toLong() ?: 0L,
+            rangeRevision = splits.getOrNull(18)?.toLong() ?: 0L,
+            insetRevision = splits.getOrNull(19)?.toLong() ?: 0L,
+        )
+    }
+
+    private fun canApplyOffsetWrite(token: OffsetWriteToken?): Boolean {
+        return canApplyComposeOffsetWrite(
+            tokenGeneration = token?.generation,
+            requiresNativeIdle = token?.requiresNativeIdle ?: false,
+            currentGeneration = composeOffsetWriteGeneration,
+            nativeScrollPhase = nativeScrollPhase(),
+        ) && (token == null || token.operationGeneration <= 0L ||
+            (token.operationGeneration == latestComposeWriteOperation &&
+                token.operationGeneration >= minimumComposeWriteOperation)) &&
+            (token == null || (
+                token.nativeInteractionEpoch == nativeInteractionEpoch &&
+                    token.layoutRevision == nativeLayoutRevision &&
+                    token.insetRevision == nativeInsetRevision
+                ))
+    }
+
+    private fun claimOffsetWrite(token: OffsetWriteToken?): Boolean {
+        if (validateOffsetWrite(token) != NativeScrollWriteResultCode.Committed) return false
+        commitOffsetWriteAuthority(token)
+        return true
+    }
+
+    private fun commitOffsetWriteAuthority(token: OffsetWriteToken?) {
+        val operation = token?.operationGeneration ?: return
+        if (operation > 0L) latestComposeWriteOperation = operation
+    }
+
+    private fun validateOffsetWrite(token: OffsetWriteToken?): NativeScrollWriteResultCode {
+        if (!canApplyComposeOffsetWrite(
+                tokenGeneration = token?.generation,
+                requiresNativeIdle = token?.requiresNativeIdle ?: false,
+                currentGeneration = composeOffsetWriteGeneration,
+                nativeScrollPhase = nativeScrollPhase(),
+            )) {
+            return if (token?.generation != null && token.generation != composeOffsetWriteGeneration) {
+                NativeScrollWriteResultCode.Stale
+            } else {
+                NativeScrollWriteResultCode.Busy
+            }
+        }
+        val operation = token?.operationGeneration ?: return NativeScrollWriteResultCode.Committed
+        if (operation <= 0L) return NativeScrollWriteResultCode.Committed
+        if (operation < minimumComposeWriteOperation || operation < latestComposeWriteOperation) {
+            return NativeScrollWriteResultCode.Stale
+        }
+        if (token.nativeInteractionEpoch != nativeInteractionEpoch) {
+            return NativeScrollWriteResultCode.Interrupted
+        }
+        if (token.layoutRevision != nativeLayoutRevision) {
+            return NativeScrollWriteResultCode.LayoutChanged
+        }
+        if (token.insetRevision != nativeInsetRevision) {
+            return NativeScrollWriteResultCode.Stale
+        }
+        return NativeScrollWriteResultCode.Committed
+    }
+
+    private fun cancelPendingNativeWritesForUserGesture() {
+        val operation = nativeWriteArbiter.invalidate()
+        nativeWriteOperationSequence += 1L
+        minimumComposeWriteOperation = latestComposeWriteOperation + 1L
+        val deferredCallbacks = mutableListOf<KuiklyRenderCallback>()
+        pendingSetContentOffset.take()?.callback?.let(deferredCallbacks::add)
+        pendingEdgeOffset.take()?.also { pending ->
+            removeCallbacks(pending.runnable)
+            pending.callback?.let(deferredCallbacks::add)
+        }
+        pendingContentInset.take()?.callback?.let(deferredCallbacks::add)
+        withPhysicalScrollEndSuppressed {
+            scrollAnimationManager.cancel()
+            overScrollHandler?.cancelActiveBounce()
+            stopScroll()
+        }
+        overScrollHandler?.contentInsetWhenEndDrag = null
+        dispatchDetachedWriteCallbacks(operation, deferredCallbacks, NativeScrollWriteResultCode.Interrupted)
+    }
+
+    private fun matchesExpectedLayout(token: OffsetWriteToken?, isVertical: Boolean): Boolean {
+        if (token == null || token.expectedContentSize < 0f || token.expectedViewportSize < 0f) {
+            return true
+        }
+        val expectedContent = kuiklyRenderContext.toPxI(token.expectedContentSize)
+        val expectedViewport = kuiklyRenderContext.toPxI(token.expectedViewportSize)
+        val actualContent = if (isVertical) contentView.frameHeight else contentView.frameWidth
+        val actualViewport = if (isVertical) frameHeight else frameWidth
+        val tolerance = max(2, kuiklyRenderContext.toPxI(1f))
+        return abs(expectedContent - actualContent) <= tolerance &&
+            abs(expectedViewport - actualViewport) <= tolerance
+    }
+
+    private fun scrollWriteResult(
+        code: NativeScrollWriteResultCode,
+        accepted: Boolean = code == NativeScrollWriteResultCode.Committed ||
+            code == NativeScrollWriteResultCode.AlreadySatisfied,
+        installed: Boolean = accepted,
+        replacedPrevious: Boolean = false,
+    ): Map<String, Any> = mapOf(
+        "committed" to if (
+            code == NativeScrollWriteResultCode.Committed ||
+            code == NativeScrollWriteResultCode.AlreadySatisfied
+        ) 1 else 0,
+        "resultCode" to code.wireValue,
+        "accepted" to if (accepted) 1 else 0,
+        "installed" to if (installed) 1 else 0,
+        "replacedPrevious" to if (replacedPrevious) 1 else 0,
+        NATIVE_INTERACTION_EPOCH to nativeInteractionEpoch,
+        LAYOUT_REVISION to nativeLayoutRevision,
+        INSET_REVISION to nativeInsetRevision,
+    )
+
+    private inline fun withPhysicalScrollEndSuppressed(block: () -> Unit) {
+        val wasSuppressed = suppressPhysicalScrollEnd
+        suppressPhysicalScrollEnd = true
+        try {
+            block()
+        } finally {
+            suppressPhysicalScrollEnd = wasSuppressed
+        }
+    }
+
+    private fun dispatchDetachedWriteCallbacks(
+        operation: NativeScrollWriteOperation?,
+        deferredCallbacks: List<KuiklyRenderCallback>,
+        code: NativeScrollWriteResultCode,
+    ) {
+        val operationResult = operation?.callback?.let {
+            scrollWriteResult(
+                code,
+                accepted = true,
+                installed = true,
+                replacedPrevious = operation.replacedPrevious,
+            )
+        }
+        val deferredResult = if (deferredCallbacks.isNotEmpty()) scrollWriteResult(code) else null
+        operation?.callback?.let { it.invoke(operationResult!!) }
+        deferredCallbacks.forEach { it.invoke(deferredResult!!) }
+    }
+
+    private fun installNativeWriteOperation(
+        callback: KuiklyRenderCallback?,
+    ): NativeScrollWriteOperation {
+        val operation = NativeScrollWriteOperation(++nativeWriteOperationSequence, callback)
+        val previous = nativeWriteArbiter.install(operation)
+        operation.replacedPrevious = previous != null
+        val deferredCallbacks = mutableListOf<KuiklyRenderCallback>()
+        pendingSetContentOffset.take()?.callback?.let(deferredCallbacks::add)
+        pendingEdgeOffset.take()?.also { pending ->
+            removeCallbacks(pending.runnable)
+            pending.callback?.let(deferredCallbacks::add)
+        }
+        pendingContentInset.take()?.callback?.let(deferredCallbacks::add)
+        withPhysicalScrollEndSuppressed {
+            scrollAnimationManager.cancel()
+            overScrollHandler?.cancelActiveBounce()
+        }
+        dispatchDetachedWriteCallbacks(previous, deferredCallbacks, NativeScrollWriteResultCode.Replaced)
+        return operation
+    }
+
+    private fun finishNativeWrite(
+        operation: NativeScrollWriteOperation,
+        code: NativeScrollWriteResultCode,
+    ) {
+        val callback = nativeWriteArbiter.complete(operation) ?: return
+        callback.invoke(
+            scrollWriteResult(
+                code,
+                accepted = true,
+                installed = true,
+                replacedPrevious = operation.replacedPrevious,
+            ),
+        )
+    }
+
+    private fun completePrimaryWrite(operation: NativeScrollWriteOperation) {
+        if (!nativeWriteArbiter.isCurrent(operation) || !operation.primaryPending) return
+        operation.primaryPending = false
+    }
+
+    private fun completeEdgeWrite(operation: NativeScrollWriteOperation) {
+        if (!nativeWriteArbiter.isCurrent(operation) || !operation.edgePending) return
+        operation.edgePending = false
+    }
+
+    private fun takeNativeWriteTerminalIfReady(): Pair<KuiklyRenderCallback, Map<String, Any>>? {
+        val operation = nativeWriteArbiter.current() ?: return null
+        if (!operation.started || operation.primaryPending || operation.edgePending) return null
+        val callback = nativeWriteArbiter.complete(operation) ?: return null
+        return callback to scrollWriteResult(
+            NativeScrollWriteResultCode.Committed,
+            accepted = true,
+            installed = true,
+            replacedPrevious = operation.replacedPrevious,
+        )
+    }
+
+    private fun scheduleNativeWriteDeadline(
+        operation: NativeScrollWriteOperation,
+        declaredDurationMs: Long,
+    ) {
+        val normalizedDuration = declaredDurationMs.coerceAtLeast(0L)
+        val slack = max(1_000L, normalizedDuration / 4L)
+        postDelayed({
+            if (!nativeWriteArbiter.isCurrent(operation)) return@postDelayed
+            val callback = nativeWriteArbiter.complete(operation)
+            withPhysicalScrollEndSuppressed {
+                scrollAnimationManager.cancel()
+                overScrollHandler?.cancelActiveBounce()
+                stopScroll()
+            }
+            val result = scrollWriteResult(
+                NativeScrollWriteResultCode.AckTimeout,
+                accepted = true,
+                installed = true,
+                replacedPrevious = operation.replacedPrevious,
+            )
+            val params = getCommonScrollParams()
+            scrollEndEventCallback?.invoke(params)
+            callback?.invoke(result)
+        }, normalizedDuration + slack)
     }
 
     private fun setNestedScroll(propValue: Any): Boolean {
@@ -1099,9 +1621,12 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         animationDuration: Int = 0,
         animationDamping: Float = 0f,
         animationVelocity: Float = 0f,
-        animationCurve: Int = 0
+        animationCurve: Int = 0,
+        writeToken: OffsetWriteToken?,
+        operation: NativeScrollWriteOperation,
     ) {
         if (isContentViewAttached) {
+            operation.started = true
             var dx = 0
             var dy = 0
             var ox = offsetX
@@ -1119,7 +1644,11 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             } else {
                 dx = ox - (-contentView.left)
             }
-            if (animate) {
+            val hasPrimaryDelta = dx != 0 || dy != 0
+            if (animate && hasPrimaryDelta) {
+                operation.primaryPending = true
+            }
+            val primaryCommitted = if (animate) {
                 if (animationDuration > 0) {
                     when (animationCurve) {
                         0 -> {
@@ -1127,7 +1656,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                             if (animationDamping == 1f) {
                                 // 无需弹簧效果时使用默认方案，目前startSpringScroll会存在快速滑动无法准确停靠问题
                                 // 待后续优化后移除这段代码
-                                smoothScrollBy(dx, dy)
+                                startPlatformSmoothScroll(dx, dy)
                             } else {
                                 startSpringScroll(dx, dy, animationDuration, animationDamping, animationVelocity, isVertical)
                             }
@@ -1136,26 +1665,53 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                             // Linear 动画
                             startLinearScroll(dx, dy, animationDuration)
                         }
+                        else -> false
                     }
                 } else {
-                    smoothScrollBy(dx, dy)
+                    startPlatformSmoothScroll(dx, dy)
                 }
             } else {
-                scrollBy(dx, dy)
+                performImmediateScroll(dx, dy)
+            }
+            if (!primaryCommitted) {
+                operation.primaryPending = false
             }
 
             // 超出部分, 使用OverScrollHandler来滚动
-            if (isVertical) {
+            val edgeOffsetScheduled = if (isVertical) {
                 setVerticalContentOffsetByOverScrollHandler(originOffsetY,
                     frameHeight,
                     contentView.frameHeight,
-                    animate)
+                    animate,
+                    writeToken,
+                    operation)
             } else {
                 setHorizontalContentOffsetByOverScrollHandler(originOffsetX,
                     frameWidth,
                     contentView.frameWidth,
-                    animate)
+                    animate,
+                    writeToken,
+                    operation)
             }
+            if (!primaryCommitted) {
+                finishNativeWrite(operation, NativeScrollWriteResultCode.UnsupportedAxisOrNoLayout)
+            } else if (!operation.primaryPending && !operation.edgePending) {
+                finishNativeWrite(
+                    operation,
+                    if (!hasPrimaryDelta && !edgeOffsetScheduled) {
+                        NativeScrollWriteResultCode.AlreadySatisfied
+                    } else {
+                        NativeScrollWriteResultCode.Committed
+                    },
+                )
+            } else if (nativeWriteArbiter.isCurrent(operation)) {
+                scheduleNativeWriteDeadline(
+                    operation,
+                    if (animationDuration > 0) animationDuration.toLong() else 300L,
+                )
+            }
+        } else {
+            finishNativeWrite(operation, NativeScrollWriteResultCode.NotReady)
         }
     }
 
@@ -1175,11 +1731,17 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         damping: Float,
         velocity: Float,
         isVertical: Boolean
-    ) {
-        if (isLayoutSuppressed) {
-            return
-        }
-        scrollAnimationManager.startSpringAnimation(
+    ): Boolean {
+        val manager = layoutManager
+        if (!canStartScrollMutation(
+                dx,
+                dy,
+                isLayoutSuppressed,
+                manager != null,
+                manager?.canScrollHorizontally() == true,
+                manager?.canScrollVertically() == true,
+            )) return false
+        return scrollAnimationManager.startSpringAnimation(
             dx, dy, duration, damping, velocity, isVertical
         ) { newState ->
             if (scrollState != newState) {
@@ -1192,17 +1754,61 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         dx: Int,
         dy: Int,
         duration: Int
-    ) {
-        if (isLayoutSuppressed) {
-            return
-        }
-        scrollAnimationManager.startLinearAnimation(
+    ): Boolean {
+        val manager = layoutManager
+        if (!canStartScrollMutation(
+                dx,
+                dy,
+                isLayoutSuppressed,
+                manager != null,
+                manager?.canScrollHorizontally() == true,
+                manager?.canScrollVertically() == true,
+            )) return false
+        return scrollAnimationManager.startLinearAnimation(
             dx, dy, duration
         ) { newState ->
             if (scrollState != newState) {
                 forceSetScrollState(newState)
             }
         }
+    }
+
+    private fun startPlatformSmoothScroll(dx: Int, dy: Int): Boolean {
+        val manager = layoutManager
+        if (!canStartScrollMutation(
+                dx,
+                dy,
+                isLayoutSuppressed,
+                manager != null,
+                manager?.canScrollHorizontally() == true,
+                manager?.canScrollVertically() == true,
+            )) return false
+        if (dx == 0 && dy == 0) return true
+        manager ?: return false
+        val actualDx = if (manager.canScrollHorizontally()) dx else 0
+        val actualDy = if (manager.canScrollVertically()) dy else 0
+        if (actualDx == 0 && actualDy == 0) return false
+        smoothScrollBy(actualDx, actualDy)
+        return true
+    }
+
+    private fun performImmediateScroll(dx: Int, dy: Int): Boolean {
+        val manager = layoutManager
+        if (!canStartScrollMutation(
+                dx,
+                dy,
+                isLayoutSuppressed,
+                manager != null,
+                manager?.canScrollHorizontally() == true,
+                manager?.canScrollVertically() == true,
+            )) return false
+        if (dx == 0 && dy == 0) return true
+        manager ?: return false
+        val actualDx = if (manager.canScrollHorizontally()) dx else 0
+        val actualDy = if (manager.canScrollVertically()) dy else 0
+        if (actualDx == 0 && actualDy == 0) return false
+        scrollBy(actualDx, actualDy)
+        return true
     }
 
     private fun canScrollImmediately(offsetX: Int, offsetY: Int): Boolean {
@@ -1218,10 +1824,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             return
         }
 
-        if (pendingSetContentOffsetStr.isNotEmpty()) {
-            setContentOffset(pendingSetContentOffsetStr)
-            pendingSetContentOffsetStr = KRCssConst.EMPTY_STRING
-        }
+        val pending = pendingSetContentOffset.take() ?: return
+        setContentOffset(pending.params, pending.callback)
     }
 
     private fun tryApplyPendingFireOnScroll() {
@@ -1238,8 +1842,10 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         offsetY: Int,
         rvHeight: Int,
         contentHeight: Int,
-        animate: Boolean
-    ) {
+        animate: Boolean,
+        writeToken: OffsetWriteToken?,
+        operation: NativeScrollWriteOperation,
+    ): Boolean {
 
         val scrollOffsetY = if (offsetY < 0) {
             offsetY
@@ -1252,16 +1858,20 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
 
         if (scrollOffsetY != -1) {
-            setContentOffsetByOverScrollHandler(0, scrollOffsetY, animate)
+            setContentOffsetByOverScrollHandler(0, scrollOffsetY, animate, writeToken, operation)
+            return true
         }
+        return false
     }
 
     private fun setHorizontalContentOffsetByOverScrollHandler(
         offsetX: Int,
         rvWidth: Int,
         contentWidth: Int,
-        animate: Boolean
-    ) {
+        animate: Boolean,
+        writeToken: OffsetWriteToken?,
+        operation: NativeScrollWriteOperation,
+    ): Boolean {
         val scrollOffsetX = if (offsetX < 0) {
             offsetX
         } else if (offsetX > 0 && contentWidth <= rvWidth) {
@@ -1272,8 +1882,10 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             -1
         }
         if (scrollOffsetX != -1) {
-            setContentOffsetByOverScrollHandler(scrollOffsetX, 0, animate)
+            setContentOffsetByOverScrollHandler(scrollOffsetX, 0, animate, writeToken, operation)
+            return true
         }
+        return false
     }
 
     /**
@@ -1282,19 +1894,40 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     private fun setContentOffsetByOverScrollHandler(
         offsetX: Int,
         offsetY: Int,
-        animate: Boolean
+        animate: Boolean,
+        writeToken: OffsetWriteToken?,
+        operation: NativeScrollWriteOperation,
     ) {
+        val handler = overScrollHandler ?: run {
+            finishNativeWrite(operation, NativeScrollWriteResultCode.UnsupportedAxisOrNoLayout)
+            return
+        }
         val contentInset = KRRecyclerContentViewContentInset(kuiklyRenderContext, KRCssConst.EMPTY_STRING).apply {
             top = -offsetY.toFloat()
             left = -offsetX.toFloat()
             this.animate = animate
+            finishCallback = { completeEdgeWrite(operation) }
         }
+        operation.edgePending = true
         if (animate) {
-            postDelayed({
-                overScrollHandler?.bounceWithContentInset(contentInset)
-            }, 0)
+            lateinit var pending: PendingEdgeOffset
+            val runnable = Runnable {
+                if (!pendingEdgeOffset.consume(pending)) return@Runnable
+                if (!nativeWriteArbiter.isCurrent(operation) || !canApplyOffsetWrite(writeToken)) {
+                    finishNativeWrite(operation, NativeScrollWriteResultCode.Stale)
+                    return@Runnable
+                }
+                handler.bounceWithContentInset(contentInset)
+            }
+            pending = PendingEdgeOffset(runnable, null)
+            pendingEdgeOffset.replace(pending)
+            post(pending.runnable)
         } else {
-            overScrollHandler?.bounceWithContentInset(contentInset)
+            if (!nativeWriteArbiter.isCurrent(operation) || !canApplyOffsetWrite(writeToken)) {
+                finishNativeWrite(operation, NativeScrollWriteResultCode.Stale)
+                return
+            }
+            handler.bounceWithContentInset(contentInset)
         }
     }
 
@@ -1304,22 +1937,109 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
      */
     private fun contentInsetWhenEndDrag(contentInset: String?) {
         val ci = contentInset ?: return
-        overScrollHandler?.contentInsetWhenEndDrag = KRRecyclerContentViewContentInset(kuiklyRenderContext, ci)
+        val splits = ci.split(KRCssConst.BLANK_SEPARATOR)
+        val token = parseInsetWriteToken(splits)
+        if (!claimOffsetWrite(token)) return
+        overScrollHandler?.apply {
+            contentInsetWhenEndDrag = KRRecyclerContentViewContentInset(kuiklyRenderContext, ci) {
+                if (canApplyOffsetWrite(token)) {
+                    nativeInsetRevision += 1L
+                }
+            }
+            contentInsetWhenEndDragIsCurrent = {
+                val manager = layoutManager
+                manager != null && canApplyOffsetWrite(token) &&
+                    matchesExpectedLayout(token, manager.canScrollVertically())
+            }
+        }
     }
 
     /**
      * 设置当前内容边距
      * @param contentInset 内容边距
      */
-    private fun contentInset(contentInset: String?) {
-        val ci = contentInset ?: return
-        overScrollHandler?.bounceWithContentInset(KRRecyclerContentViewContentInset(kuiklyRenderContext, ci))
+    private fun contentInset(contentInset: String?, callback: KuiklyRenderCallback?) {
+        val ci = contentInset ?: run {
+            callback?.invoke(scrollWriteResult(NativeScrollWriteResultCode.Stale))
+            return
+        }
+        val splits = ci.split(KRCssConst.BLANK_SEPARATOR)
+        val token = parseInsetWriteToken(splits)
+        val validation = validateOffsetWrite(token)
+        if (validation != NativeScrollWriteResultCode.Committed) {
+            callback?.invoke(scrollWriteResult(validation))
+            return
+        }
+        val insetLayoutManager = layoutManager
+        if (insetLayoutManager == null ||
+            !matchesExpectedLayout(token, insetLayoutManager.canScrollVertically())) {
+            callback?.invoke(
+                scrollWriteResult(
+                    if (insetLayoutManager == null) {
+                        NativeScrollWriteResultCode.NotReady
+                    } else {
+                        NativeScrollWriteResultCode.LayoutChanged
+                    },
+                ),
+            )
+            return
+        }
+        val handler = overScrollHandler ?: run {
+            callback?.invoke(scrollWriteResult(NativeScrollWriteResultCode.UnsupportedAxisOrNoLayout))
+            return
+        }
+        commitOffsetWriteAuthority(token)
+        val operation = installNativeWriteOperation(callback)
+        operation.composeOperation = token?.operationGeneration ?: 0L
+        operation.animated = splits.getOrNull(4) == "1"
+        if (!nativeWriteArbiter.isCurrent(operation)) return
+        operation.started = true
+        operation.edgePending = true
+        lateinit var pending: PendingContentInset
+        val inset = KRRecyclerContentViewContentInset(kuiklyRenderContext, ci) {
+            if (!pendingContentInset.consume(pending)) return@KRRecyclerContentViewContentInset
+            if (!nativeWriteArbiter.isCurrent(operation) || !canApplyOffsetWrite(token)) {
+                finishNativeWrite(operation, NativeScrollWriteResultCode.Stale)
+                return@KRRecyclerContentViewContentInset
+            }
+            nativeInsetRevision += 1L
+            completeEdgeWrite(operation)
+        }
+        pending = PendingContentInset(null)
+        pendingContentInset.replace(pending)
+        handler.bounceWithContentInset(inset)
+        if (!inset.animate && nativeWriteArbiter.isCurrent(operation) && !operation.edgePending) {
+            finishNativeWrite(operation, NativeScrollWriteResultCode.Committed)
+        } else if (inset.animate && nativeWriteArbiter.isCurrent(operation)) {
+            scheduleNativeWriteDeadline(operation, 300L)
+        }
     }
 
     /**
      * Clear transient native state for Compose DSL reuse (not the native reuse pool).
      */
-    private fun prepareForComposeReuse() {
+    private fun prepareForComposeReuse(value: String?) {
+        nativeWriteOperationSequence += 1L
+        nativeInteractionEpoch += 1L
+        nativeLayoutRevision += 1L
+        nativeInsetRevision += 1L
+        composeOffsetWriteGeneration = value?.toLongOrNull()
+            ?: (composeOffsetWriteGeneration + 1L)
+        latestComposeWriteOperation = 0L
+        minimumComposeWriteOperation = 0L
+        val operation = nativeWriteArbiter.invalidate()
+        val deferredCallbacks = mutableListOf<KuiklyRenderCallback>()
+        pendingSetContentOffset.take()?.callback?.let(deferredCallbacks::add)
+        pendingEdgeOffset.take()?.also { pending ->
+            removeCallbacks(pending.runnable)
+            pending.callback?.let(deferredCallbacks::add)
+        }
+        pendingContentInset.take()?.callback?.let(deferredCallbacks::add)
+        withPhysicalScrollEndSuppressed {
+            scrollAnimationManager.cancel()
+            cancelActivePointerStreamForReuse()
+            stopScroll()
+        }
         // Reset scroll event dedup cache so restored offset fires a scroll event
         contentOffsetX = -Float.MAX_VALUE
         contentOffsetY = -Float.MAX_VALUE
@@ -1342,6 +2062,26 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         lastLayoutTop = -1
         // Reset OverScrollHandler transient state
         overScrollHandler?.prepareForComposeReuse()
+        dispatchDetachedWriteCallbacks(operation, deferredCallbacks, NativeScrollWriteResultCode.Destroyed)
+    }
+
+    private fun cancelActivePointerStreamForReuse() {
+        if (!isDragging && scrollState != SCROLL_STATE_DRAGGING) return
+        val now = SystemClock.uptimeMillis()
+        val cancelEvent = MotionEvent.obtain(
+            now,
+            now,
+            MotionEvent.ACTION_CANCEL,
+            0f,
+            0f,
+            0,
+        )
+        try {
+            super.dispatchTouchEvent(cancelEvent)
+            overScrollHandler?.onTouchEvent(cancelEvent)
+        } finally {
+            cancelEvent.recycle()
+        }
     }
 
 
@@ -1373,6 +2113,14 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     private fun getIsDragging(isDragging: Boolean): Int = if (isDragging) 1 else 0
+
+    private fun scrollStateName(state: Int): String =
+        when (state) {
+            SCROLL_STATE_IDLE -> "IDLE"
+            SCROLL_STATE_DRAGGING -> "DRAGGING"
+            SCROLL_STATE_SETTLING -> "SETTLING"
+            else -> "UNKNOWN($state)"
+        }
 
     private fun isIdeaStateToDraggingState(newState: Int): Boolean =
         preScrollState == SCROLL_STATE_IDLE && newState == SCROLL_STATE_DRAGGING
@@ -1499,6 +2247,14 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         private const val METHOD_CONTENT_INSET = "contentInset" // 设置内容边距
         private const val METHOD_ABORT_CONTENT_OFFSET_ANIMATE = "abortContentOffsetAnimate" // 停止滚动动画
         private const val METHOD_PREPARE_FOR_COMPOSE_REUSE = "prepareForComposeReuse" // Compose DSL 复用前重置瞬态
+        private const val NATIVE_SCROLL_PHASE = "nativeScrollPhase"
+        private const val NATIVE_INTERACTION_EPOCH = "nativeInteractionEpoch"
+        private const val LAYOUT_REVISION = "layoutRevision"
+        private const val INSET_REVISION = "insetRevision"
+        private const val SOURCE_OPERATION_GENERATION = "sourceOperationGeneration"
+        private const val NATIVE_SCROLL_PHASE_IDLE = 0
+        private const val NATIVE_SCROLL_PHASE_DRAGGING = 1
+        private const val NATIVE_SCROLL_PHASE_SETTLING = 2
         private const val METHOD_SET_HAS_PULL_TO_REFRESH = "setHasPullToRefresh"
 
         private const val NESTED_SCROLL = "nestedScroll"
@@ -2025,4 +2781,28 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
         return super.canScrollVertically(direction)
     }
+}
+
+internal fun canApplyComposeOffsetWrite(
+    tokenGeneration: Long?,
+    requiresNativeIdle: Boolean,
+    currentGeneration: Long,
+    nativeScrollPhase: Int,
+): Boolean {
+    if (tokenGeneration == null) return true
+    return tokenGeneration == currentGeneration &&
+        (!requiresNativeIdle || nativeScrollPhase == 0)
+}
+
+internal fun canStartScrollMutation(
+    dx: Int,
+    dy: Int,
+    isLayoutSuppressed: Boolean,
+    hasLayoutManager: Boolean,
+    canScrollHorizontally: Boolean,
+    canScrollVertically: Boolean,
+): Boolean {
+    if (dx == 0 && dy == 0) return true
+    if (isLayoutSuppressed || !hasLayoutManager) return false
+    return (dx != 0 && canScrollHorizontally) || (dy != 0 && canScrollVertically)
 }

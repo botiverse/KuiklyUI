@@ -62,6 +62,10 @@ kotlin {
                 api(project(":core-render-web:base"))
             }
         }
+        val jsTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
+            }
+        }
     }
 }
-

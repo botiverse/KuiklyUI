@@ -13,9 +13,11 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <memory>
 
 #include "libohos_render/expand/components/scroller/KRScrollerView.h"
+#include "libohos_render/expand/components/scroller/KRScrollReplacementPolicy.h"
 
 #include <cfloat>
 #include <cmath>
@@ -23,6 +25,7 @@
 #include <deviceinfo.h>
 #include "libohos_render/expand/components/view/KRView.h"
 #include "libohos_render/foundation/type/KRRenderValue.h"
+#include "libohos_render/scheduler/KRContextScheduler.h"
 #include "libohos_render/utils/KRJSONObject.h"
 #include "libohos_render/utils/KRRenderLoger.h"
 
@@ -70,6 +73,10 @@ constexpr char kEventKeyContentHeight[] = "contentHeight";
 constexpr char kEventKeyViewWidth[] = "viewWidth";
 constexpr char kEventKeyViewHeight[] = "viewHeight";
 constexpr char kEventKeyIsDragging[] = "isDragging";
+constexpr char kEventKeyNativeScrollPhase[] = "nativeScrollPhase";
+constexpr char kEventKeyNativeInteractionEpoch[] = "nativeInteractionEpoch";
+constexpr char kEventKeyLayoutRevision[] = "layoutRevision";
+constexpr char kEventKeyInsetRevision[] = "insetRevision";
 constexpr char kEventKeyVelocityX[] = "velocityX";
 constexpr char kEventKeyVelocityY[] = "velocityY";
 
@@ -146,13 +153,30 @@ bool isBouncesEnableProp(const std::string &prop_key) {
 }
 
 void KRScrollerView::SetRenderViewFrame(const KRRect &frame) {
+    if (frame.width != last_revision_frame_.width || frame.height != last_revision_frame_.height) {
+        native_layout_revision_++;
+        last_revision_frame_ = frame;
+    }
     IKRRenderViewExport::SetRenderViewFrame(frame);
     if (!is_set_frame_) {
         is_set_frame_ = true;
         if (is_need_set_content_offset_) {
-            kuikly::util::SetArkUIContentOffset(GetNode(), first_offset_x_, first_offset_y_, first_animate_,
-                                                first_duration_, first_curve_, first_damping_);
+            auto callback = first_offset_callback_slot_.Take();
             is_need_set_content_offset_ = false;
+            KRScrollWriteResultCode result_code;
+            if (CanApplyOffsetWrite(first_offset_generation_, first_offset_requires_native_idle_) &&
+                IsCurrentOffsetWrite(first_offset_operation_generation_) &&
+                MatchesExpectedLayout(first_offset_expected_content_size_, first_offset_expected_viewport_size_)) {
+                kuikly::util::SetArkUIContentOffset(GetNode(), first_offset_x_, first_offset_y_, first_animate_,
+                                                    first_duration_, first_curve_, first_damping_);
+                result_code = KRScrollWriteResultCode::Committed;
+            } else {
+                result_code = KRScrollWriteResultCode::LayoutChanged;
+            }
+            auto result = callback ? ScrollWriteResult(result_code) : nullptr;
+            if (callback) {
+                callback(result);
+            }
         }
     }
 }
@@ -215,8 +239,26 @@ bool KRScrollerView::SetProp(const std::string &prop_key, const KRAnyValue &prop
 }
 
 bool KRScrollerView::ResetProp(const std::string &prop_key) {
-    is_set_frame_ = false;
+    native_write_operation_sequence_++;
+    compose_offset_write_generation_++;
+    native_interaction_epoch_++;
+    native_layout_revision_++;
+    native_inset_revision_++;
+    latest_compose_write_operation_ = 0;
+    minimum_compose_write_operation_ = 0;
+    std::shared_ptr<KRRenderValue> terminal_result;
+    auto terminal = FinalizeScrollWrite(scroll_write_arbiter_.Current(), KRScrollWriteResultCode::Destroyed,
+                                        terminal_result);
+    auto pending_offset_callback = first_offset_callback_slot_.Take();
+    auto pending_offset_result = pending_offset_callback
+        ? ScrollWriteResult(KRScrollWriteResultCode::Destroyed) : nullptr;
     is_need_set_content_offset_ = false;
+    content_inset_animate_ = nullptr;
+    content_inset_when_drag_end_ = nullptr;
+    ArkUI_NumberValue values[] = {{.f32 = 0}, {.f32 = 0}};
+    ArkUI_AttributeItem item = {values, 2};
+    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_SCROLL_BY, &item);
+    is_set_frame_ = false;
     first_offset_x_ = 0;
     first_offset_y_ = 0;
     first_animate_ = false;
@@ -235,20 +277,26 @@ bool KRScrollerView::ResetProp(const std::string &prop_key) {
             }
         }
     }
+    if (terminal) {
+        terminal(terminal_result);
+    }
+    if (pending_offset_callback) {
+        pending_offset_callback(pending_offset_result);
+    }
     return didHanded;
 }
 
 void KRScrollerView::CallMethod(const std::string &method, const KRAnyValue &params, const KRRenderCallback &callback) {
     if (kuikly::util::isEqual(method, kMethodNameContentOffset)) {
-        SetContentOffset(params);
+        SetContentOffset(params, callback);
     } else if (kuikly::util::isEqual(method, kMethodNameContentInset)) {
-        SetContentInset(params);
+        SetContentInset(params, callback);
     } else if (kuikly::util::isEqual(method, kMethodNameContentInsetWhenDragEnd)) {
         SetContentInsetWhenDragEnd(params);
     } else if (kuikly::util::isEqual(method, kMethodNameAbortContentOffsetAnimate)) {
         AbortContentOffsetAnimate();
     } else if (kuikly::util::isEqual(method, kMethodNamePrepareForComposeReuse)) {
-        PrepareForComposeReuse();
+        PrepareForComposeReuse(params);
     } else {
         IKRRenderViewExport::CallMethod(method, params, callback);
     }
@@ -324,11 +372,34 @@ void KRScrollerView::DidInsertSubRenderView(const std::shared_ptr<IKRRenderViewE
 }
 
 void KRScrollerView::OnDestroy() {
-    if (!content_view_) {
-        return;
-    }
+    replacement_stop_event_fence_.Reset();
+    native_write_operation_sequence_++;
+    compose_offset_write_generation_++;
+    native_interaction_epoch_++;
+    native_layout_revision_++;
+    native_inset_revision_++;
+    latest_compose_write_operation_ = 0;
+    minimum_compose_write_operation_ = 0;
+    std::shared_ptr<KRRenderValue> terminal_result;
+    auto terminal = FinalizeScrollWrite(scroll_write_arbiter_.Current(), KRScrollWriteResultCode::Destroyed,
+                                        terminal_result);
+    auto pending_offset_callback = first_offset_callback_slot_.Take();
+    auto pending_offset_result = pending_offset_callback
+        ? ScrollWriteResult(KRScrollWriteResultCode::Destroyed) : nullptr;
+    is_need_set_content_offset_ = false;
+    content_inset_animate_ = nullptr;
+    content_inset_when_drag_end_ = nullptr;
+    ArkUI_NumberValue values[] = {{.f32 = 0}, {.f32 = 0}};
+    ArkUI_AttributeItem item = {values, 2};
+    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_SCROLL_BY, &item);
     content_view_ = nullptr;
     scroll_observers_.clear();
+    if (terminal) {
+        terminal(terminal_result);
+    }
+    if (pending_offset_callback) {
+        pending_offset_callback(pending_offset_result);
+    }
 }
 
 static ArkUI_ScrollNestedMode ParseOption(const std::string &option) {
@@ -429,7 +500,7 @@ bool KRScrollerView::RegisterWillDragEndEvent(const KRRenderCallback event_callb
     CGPoint contentOffset = CGPointMake([points.firstObject doubleValue], [points[1] doubleValue]);
  * @param value
  */
-void KRScrollerView::SetContentOffset(const KRAnyValue &value) {
+void KRScrollerView::SetContentOffset(const KRAnyValue &value, const KRRenderCallback &callback) {
     auto content_offset_splits = kuikly::util::SplitString(value->toString(), ' ');
     auto offset_x = content_offset_splits[0]->toFloat();
     auto offset_y = content_offset_splits[1]->toFloat();
@@ -437,34 +508,355 @@ void KRScrollerView::SetContentOffset(const KRAnyValue &value) {
     auto duration = content_offset_splits.size() > 3 ? content_offset_splits[3]->toInt() : 0;
     auto damping = content_offset_splits.size() > 4 ? content_offset_splits[4]->toFloat() : 0;
     auto curve = content_offset_splits.size() > 6 ? content_offset_splits[6]->toInt() : 0;
+    auto generation = content_offset_splits.size() > 8 ? content_offset_splits[7]->toLong() : -1;
+    auto requires_native_idle = content_offset_splits.size() > 8 && content_offset_splits[8]->toBool();
+    auto compose_operation = content_offset_splits.size() > 9 ? content_offset_splits[9]->toLong() : 0;
+    auto expected_content_size = content_offset_splits.size() > 10 ? content_offset_splits[10]->toFloat() : -1.0f;
+    auto expected_viewport_size = content_offset_splits.size() > 11 ? content_offset_splits[11]->toFloat() : -1.0f;
+    auto interaction_epoch = content_offset_splits.size() > 17 ? content_offset_splits[17]->toLong()
+                                                                 : native_interaction_epoch_;
+    auto layout_revision = content_offset_splits.size() > 18 ? content_offset_splits[18]->toLong()
+                                                              : native_layout_revision_;
+    auto inset_revision = content_offset_splits.size() > 21 ? content_offset_splits[21]->toLong()
+                                                             : native_inset_revision_;
+
+    auto validation = ValidateOffsetWrite(generation, requires_native_idle, compose_operation,
+                                          interaction_epoch, layout_revision, inset_revision);
+    if (validation != KRScrollWriteResultCode::Committed) {
+        CompleteOffsetWrite(callback, validation);
+        return;
+    }
+    if (!MatchesExpectedLayout(expected_content_size, expected_viewport_size)) {
+        CompleteOffsetWrite(callback, is_set_frame_ ? KRScrollWriteResultCode::LayoutChanged
+                                                    : KRScrollWriteResultCode::NotReady);
+        return;
+    }
 
     if (!is_set_frame_) {
+        if (generation >= 0) {
+            CompleteOffsetWrite(callback, KRScrollWriteResultCode::NotReady);
+            return;
+        }
         first_offset_x_ = offset_x;
         first_offset_y_ = offset_y;
         first_animate_ = animate;
         first_duration_ = duration;
         first_curve_ = curve;
         first_damping_ = damping;
+        first_offset_generation_ = generation;
+        first_offset_requires_native_idle_ = requires_native_idle;
+        first_offset_operation_generation_ = compose_operation;
+        first_offset_expected_content_size_ = expected_content_size;
+        first_offset_expected_viewport_size_ = expected_viewport_size;
+        auto previous_callback = first_offset_callback_slot_.Replace(callback);
         is_need_set_content_offset_ = true;
+        auto previous_result = previous_callback
+            ? ScrollWriteResult(KRScrollWriteResultCode::Replaced) : nullptr;
+        if (previous_callback) {
+            previous_callback(previous_result);
+        }
+        return;
+    }
+    auto operation = InstallScrollWrite(KRNativeScrollWriteResource::ContentOffset,
+                                        generation, compose_operation, interaction_epoch,
+                                        layout_revision, inset_revision, callback);
+    if (!IsCurrentNativeScrollWrite(operation)) {
+        return;
+    }
+    operation->target = KRPoint{offset_x, offset_y};
+    operation->animated = animate;
+    auto current_offset = GetContentOffset();
+    if (std::fabs(current_offset.x - offset_x) <= 0.5f &&
+        std::fabs(current_offset.y - offset_y) <= 0.5f) {
+        std::shared_ptr<KRRenderValue> result;
+        auto terminal = FinalizeScrollWrite(operation, KRScrollWriteResultCode::AlreadySatisfied, result);
+        if (terminal) {
+            terminal(result);
+        }
         return;
     }
     kuikly::util::SetArkUIContentOffset(GetNode(), offset_x, offset_y, animate, duration, curve, damping);
+    if (!animate && IsCurrentNativeScrollWrite(operation)) {
+        std::shared_ptr<KRRenderValue> result;
+        auto terminal = FinalizeScrollWrite(operation, KRScrollWriteResultCode::Committed, result);
+        if (terminal) {
+            terminal(result);
+        }
+    } else if (animate && IsCurrentNativeScrollWrite(operation)) {
+        auto accepted_duration = duration > 0 ? duration : 1000;
+        auto slack = std::max(1000, accepted_duration / 4);
+        auto weak_this = std::weak_ptr<KRScrollerView>(
+            std::dynamic_pointer_cast<KRScrollerView>(shared_from_this()));
+        KRContextScheduler::ScheduleTask(accepted_duration + slack, [weak_this, operation]() {
+            if (auto strong_this = weak_this.lock()) {
+                if (!strong_this->IsCurrentNativeScrollWrite(operation)) {
+                    return;
+                }
+                std::shared_ptr<KRRenderValue> result;
+                auto terminal = strong_this->FinalizeScrollWrite(
+                    operation, KRScrollWriteResultCode::AckTimeout, result);
+                ArkUI_NumberValue values[] = {{.f32 = 0}, {.f32 = 0}};
+                ArkUI_AttributeItem item = {values, 2};
+                strong_this->replacement_stop_event_fence_.Arm();
+                kuikly::util::GetNodeApi()->setAttribute(
+                    strong_this->GetNode(), NODE_SCROLL_BY, &item);
+                strong_this->FireEndScrollEvent(nullptr);
+                if (terminal) {
+                    terminal(result);
+                }
+            }
+        });
+    }
 }
 
-void KRScrollerView::SetContentInset(const KRAnyValue &value) {
+void KRScrollerView::CompleteOffsetWrite(const KRRenderCallback &callback,
+                                         KRScrollWriteResultCode result_code) {
+    if (!callback) {
+        return;
+    }
+    callback(ScrollWriteResult(result_code));
+}
+
+std::shared_ptr<KRRenderValue> KRScrollerView::ScrollWriteResult(
+    KRScrollWriteResultCode result_code,
+    const std::shared_ptr<KRNativeScrollWriteOperation> &operation) {
+    KRRenderValueMap result;
+    auto committed = result_code == KRScrollWriteResultCode::Committed ||
+        result_code == KRScrollWriteResultCode::AlreadySatisfied;
+    result["committed"] = NewKRRenderValue(committed ? 1 : 0);
+    result["resultCode"] = NewKRRenderValue(static_cast<int>(result_code));
+    result["accepted"] = NewKRRenderValue(operation ? 1 : (committed ? 1 : 0));
+    result["installed"] = NewKRRenderValue(operation ? 1 : (committed ? 1 : 0));
+    result["replacedPrevious"] = NewKRRenderValue(
+        operation && operation->replaced_previous ? 1 : 0);
+    result["nativeInteractionEpoch"] = NewKRRenderValue(native_interaction_epoch_);
+    result["layoutRevision"] = NewKRRenderValue(native_layout_revision_);
+    result["insetRevision"] = NewKRRenderValue(native_inset_revision_);
+    return NewKRRenderValue(result);
+}
+
+KRScrollWriteResultCode KRScrollerView::ValidateOffsetWrite(
+    int64_t generation, bool requires_native_idle, int64_t operation_generation,
+    int64_t interaction_epoch, int64_t layout_revision, int64_t inset_revision) {
+    if (generation >= 0 && generation != compose_offset_write_generation_) {
+        return KRScrollWriteResultCode::Stale;
+    }
+    if (requires_native_idle && NativeScrollPhase() != 0) {
+        return KRScrollWriteResultCode::Busy;
+    }
+    if (operation_generation > 0 &&
+        (operation_generation < minimum_compose_write_operation_ ||
+         operation_generation < latest_compose_write_operation_)) {
+        return KRScrollWriteResultCode::Stale;
+    }
+    if (interaction_epoch != native_interaction_epoch_) {
+        return KRScrollWriteResultCode::Interrupted;
+    }
+    if (layout_revision != native_layout_revision_) {
+        return KRScrollWriteResultCode::LayoutChanged;
+    }
+    if (inset_revision != native_inset_revision_) {
+        return KRScrollWriteResultCode::Stale;
+    }
+    return KRScrollWriteResultCode::Committed;
+}
+
+std::shared_ptr<KRNativeScrollWriteOperation> KRScrollerView::InstallScrollWrite(
+    KRNativeScrollWriteResource resource, int64_t generation,
+    int64_t operation_generation, int64_t interaction_epoch,
+    int64_t layout_revision, int64_t inset_revision, const KRRenderCallback &callback) {
+    KREnsureMainThread();
+    auto operation = std::make_shared<KRNativeScrollWriteOperation>();
+    operation->sequence = ++native_write_operation_sequence_;
+    operation->resource = resource;
+    operation->callback = callback;
+    operation->generation = generation;
+    operation->compose_operation = operation_generation;
+    operation->interaction_epoch = interaction_epoch;
+    operation->layout_revision = layout_revision;
+    operation->inset_revision = inset_revision;
+    operation->start = GetContentOffset();
+    if (operation_generation > 0) {
+        latest_compose_write_operation_ = operation_generation;
+    }
+
+    auto previous = scroll_write_arbiter_.Replace(operation);
+    operation->replaced_previous = previous != nullptr;
+    KRRenderCallback previous_callback = nullptr;
+    std::shared_ptr<KRRenderValue> previous_result;
+    if (previous) {
+        previous_callback = FinalizeScrollWrite(previous, KRScrollWriteResultCode::Replaced, previous_result);
+    }
+
+    auto pending_offset_callback = first_offset_callback_slot_.Take();
+    auto pending_offset_result = pending_offset_callback
+        ? ScrollWriteResult(KRScrollWriteResultCode::Replaced) : nullptr;
+    is_need_set_content_offset_ = false;
+    content_inset_animate_ = nullptr;
+    if (previous && KRShouldStopReplacedScrollMotion(
+        previous->resource == KRNativeScrollWriteResource::ContentOffset,
+        previous->animated,
+        previous->offset_correction_required,
+        previous->offset_correction_finished)) {
+        ArkUI_NumberValue values[] = {{.f32 = 0}, {.f32 = 0}};
+        ArkUI_AttributeItem item = {values, 2};
+        replacement_stop_event_fence_.Arm();
+        kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_SCROLL_BY, &item);
+    }
+
+    if (previous_callback) {
+        previous_callback(previous_result);
+    }
+    if (pending_offset_callback) {
+        pending_offset_callback(pending_offset_result);
+    }
+    return operation;
+}
+
+KRRenderCallback KRScrollerView::FinalizeScrollWrite(
+    const std::shared_ptr<KRNativeScrollWriteOperation> &operation,
+    KRScrollWriteResultCode result_code,
+    std::shared_ptr<KRRenderValue> &result) {
+    if (!scroll_write_arbiter_.Finalize(operation)) {
+        return nullptr;
+    }
+    auto callback = operation->callback;
+    operation->callback = nullptr;
+    result = ScrollWriteResult(result_code, operation);
+    return callback;
+}
+
+void KRScrollerView::InvalidateCurrentScrollWrite(KRScrollWriteResultCode result_code) {
+    std::shared_ptr<KRRenderValue> result;
+    auto callback = FinalizeScrollWrite(scroll_write_arbiter_.Current(), result_code, result);
+    if (callback) {
+        callback(result);
+    }
+}
+
+bool KRScrollerView::IsCurrentNativeScrollWrite(
+    const std::shared_ptr<KRNativeScrollWriteOperation> &operation) const {
+    return scroll_write_arbiter_.IsCurrent(operation);
+}
+
+bool KRScrollerView::CanApplyOffsetWrite(int64_t generation, bool requires_native_idle) const {
+    if (generation < 0) {
+        return true;
+    }
+    return generation == compose_offset_write_generation_ &&
+           (!requires_native_idle || NativeScrollPhase() == 0);
+}
+
+bool KRScrollerView::ClaimOffsetWrite(int64_t generation, bool requires_native_idle,
+                                      int64_t operation_generation) {
+    if (!CanApplyOffsetWrite(generation, requires_native_idle)) {
+        return false;
+    }
+    if (operation_generation <= 0) {
+        return true;
+    }
+    if (operation_generation < minimum_compose_write_operation_ ||
+        operation_generation < latest_compose_write_operation_) {
+        return false;
+    }
+    latest_compose_write_operation_ = operation_generation;
+    return true;
+}
+
+bool KRScrollerView::IsCurrentOffsetWrite(int64_t operation_generation) const {
+    return operation_generation <= 0 ||
+        (operation_generation == latest_compose_write_operation_ &&
+         operation_generation >= minimum_compose_write_operation_);
+}
+
+bool KRScrollerView::MatchesExpectedLayout(float expected_content_size, float expected_viewport_size) {
+    if (expected_content_size < 0 || expected_viewport_size < 0) {
+        return true;
+    }
+    if (!content_view_) {
+        return false;
+    }
+    auto content_frame = content_view_->GetFrame();
+    auto viewport_frame = GetFrame();
+    auto actual_content_size = direction_row_ ? content_frame.width : content_frame.height;
+    auto actual_viewport_size = direction_row_ ? viewport_frame.width : viewport_frame.height;
+    return std::fabs(actual_content_size - expected_content_size) <= 1.0f &&
+        std::fabs(actual_viewport_size - expected_viewport_size) <= 1.0f;
+}
+
+int KRScrollerView::NativeScrollPhase() const {
+    if (is_dragging_ || current_scroll_state_ == ArkUI_ScrollState::ARKUI_SCROLL_STATE_SCROLL) {
+        return 1;
+    }
+    if (current_scroll_state_ == ArkUI_ScrollState::ARKUI_SCROLL_STATE_FLING ||
+        content_inset_animate_ ||
+        (scroll_write_arbiter_.Current() && scroll_write_arbiter_.Current()->animated &&
+         !scroll_write_arbiter_.Current()->terminal)) {
+        return 2;
+    }
+    return 0;
+}
+
+void KRScrollerView::SetContentInset(const KRAnyValue &value, const KRRenderCallback &callback) {
     auto content_inset = std::make_shared<KRScrollerContentInset>(value);
-    SetContentInset(content_inset);
+    SetContentInset(content_inset, callback);
 }
 
 void KRScrollerView::SetContentInsetWhenDragEnd(const KRAnyValue &value) {
     if (!content_view_) {
         return;
     }
-    content_inset_when_drag_end_ = std::make_shared<KRScrollerContentInset>(value);
+    auto content_inset = std::make_shared<KRScrollerContentInset>(value);
+    auto validation = ValidateOffsetWrite(
+        content_inset->generation, content_inset->requires_native_idle,
+        content_inset->operation_generation,
+        content_inset->generation < 0 ? native_interaction_epoch_ : content_inset->native_interaction_epoch,
+        content_inset->generation < 0 ? native_layout_revision_ : content_inset->layout_revision,
+        content_inset->generation < 0 ? native_inset_revision_ : content_inset->inset_revision);
+    if (validation != KRScrollWriteResultCode::Committed) {
+        return;
+    }
+    if (!MatchesExpectedLayout(content_inset->expected_content_size,
+                               content_inset->expected_viewport_size)) {
+        return;
+    }
+    if (!ClaimOffsetWrite(content_inset->generation, content_inset->requires_native_idle,
+                          content_inset->operation_generation)) {
+        return;
+    }
+    content_inset_when_drag_end_ = content_inset;
 }
 
-void KRScrollerView::SetContentInset(const std::shared_ptr<KRScrollerContentInset> &content_inset) {
+void KRScrollerView::SetContentInset(const std::shared_ptr<KRScrollerContentInset> &content_inset,
+                                      const KRRenderCallback &callback) {
+    auto validation = ValidateOffsetWrite(
+        content_inset->generation, content_inset->requires_native_idle,
+        content_inset->operation_generation,
+        content_inset->generation < 0 ? native_interaction_epoch_ : content_inset->native_interaction_epoch,
+        content_inset->generation < 0 ? native_layout_revision_ : content_inset->layout_revision,
+        content_inset->generation < 0 ? native_inset_revision_ : content_inset->inset_revision);
+    if (validation != KRScrollWriteResultCode::Committed) {
+        CompleteOffsetWrite(callback, validation);
+        return;
+    }
+    if (!MatchesExpectedLayout(content_inset->expected_content_size,
+                               content_inset->expected_viewport_size)) {
+        CompleteOffsetWrite(callback, KRScrollWriteResultCode::LayoutChanged);
+        return;
+    }
+    auto native_phase_before_install = NativeScrollPhase();
+    auto operation = InstallScrollWrite(
+        KRNativeScrollWriteResource::ContentInset,
+        content_inset->generation, content_inset->operation_generation,
+        content_inset->generation < 0 ? native_interaction_epoch_ : content_inset->native_interaction_epoch,
+        content_inset->generation < 0 ? native_layout_revision_ : content_inset->layout_revision,
+        content_inset->generation < 0 ? native_inset_revision_ : content_inset->inset_revision,
+        callback);
+    if (!IsCurrentNativeScrollWrite(operation)) {
+        return;
+    }
     if (!content_view_) {
+        CompleteContentInsetWrite(operation, KRScrollWriteResultCode::NotReady, false);
         return;
     }
     auto top = content_inset->top;
@@ -472,37 +864,156 @@ void KRScrollerView::SetContentInset(const std::shared_ptr<KRScrollerContentInse
     auto bottom = content_inset->bottom;
     auto end = content_inset->end;
     auto animate = content_inset->animate;
-    if (animate) {
+    operation->animated = animate;
+    if (content_inset->generation < 0 && native_phase_before_install != 0) {
+        kuikly::util::SetArkUIMargin(content_view_->GetNode(), start, top, end, bottom);
+        operation->inset_mutation_applied = true;
+        CompleteContentInsetWrite(operation, KRScrollWriteResultCode::Committed, false);
+    } else if (animate) {
         // 对齐 iOS 逻辑：若当前 offset 超出新 inset 的合法范围，先滚回合法位置
         auto current_offset = GetContentOffset();
         auto target_offset = MaxContentOffsetInContentInset(content_inset);
         if (target_offset.x != current_offset.x || target_offset.y != current_offset.y) {
+            operation->target = target_offset;
+            operation->offset_correction_required = true;
             kuikly::util::SetArkUIContentOffset(GetNode(), target_offset.x, target_offset.y, true, 0, 0, 0);
+        } else {
+            operation->offset_correction_finished = true;
         }
         // 再用原有动画逻辑设置 margin
         auto root_view = GetRootView().lock();
         if (!root_view) {
+            if (operation->offset_correction_required) {
+                kuikly::util::SetArkUIContentOffset(
+                    GetNode(), operation->target.x, operation->target.y, false, 0, 0, 0);
+                operation->offset_correction_finished = true;
+            }
             kuikly::util::SetArkUIMargin(content_view_->GetNode(), start, top, end, bottom);
+            operation->inset_mutation_applied = true;
+            CompleteContentInsetWrite(operation, KRScrollWriteResultCode::Committed, false);
         } else {
             auto animate_option = std::make_shared<KRAnimateOption>();
             animate_option->SetDuration(200);
             auto weak_this = std::weak_ptr<KRScrollerView>(std::dynamic_pointer_cast<KRScrollerView>(shared_from_this()));
             content_inset_animate_ = std::make_shared<KRAnimation>(
-                root_view->GetUIContextHandle(), animate_option, [weak_this, top, start, bottom, end]() {
+                root_view->GetUIContextHandle(), animate_option,
+                [weak_this, content_inset, top, start, bottom, end, operation]() {
                     if (auto strong_this = weak_this.lock()) {
-                        kuikly::util::SetArkUIMargin(strong_this->content_view_->GetNode(), start, top, end, bottom);
+                        if (!strong_this->IsCurrentNativeScrollWrite(operation)) {
+                            return;
+                        }
+                        bool current = operation->generation < 0 ||
+                            operation->generation == strong_this->compose_offset_write_generation_;
+                        current = current && strong_this->IsCurrentOffsetWrite(operation->compose_operation);
+                        current = current && operation->interaction_epoch ==
+                            strong_this->native_interaction_epoch_;
+                        current = current && operation->layout_revision ==
+                            strong_this->native_layout_revision_;
+                        current = current && operation->inset_revision ==
+                            strong_this->native_inset_revision_;
+                        current = current && strong_this->MatchesExpectedLayout(
+                            content_inset->expected_content_size,
+                            content_inset->expected_viewport_size);
+                        bool native_idle = !strong_this->is_dragging_ &&
+                            strong_this->current_scroll_state_ == ArkUI_ScrollState::ARKUI_SCROLL_STATE_IDLE;
+                        if (strong_this->content_view_ && current &&
+                            (!content_inset->requires_native_idle || native_idle)) {
+                            kuikly::util::SetArkUIMargin(
+                                strong_this->content_view_->GetNode(), start, top, end, bottom);
+                            operation->inset_mutation_applied = true;
+                        }
                     }
                 });
             content_inset_animate_->SetCompleteCallback(
-                ArkUI_FinishCallbackType::ARKUI_FINISH_CALLBACK_LOGICALLY, [weak_this]() {
+                ArkUI_FinishCallbackType::ARKUI_FINISH_CALLBACK_LOGICALLY,
+                [weak_this, content_inset, operation]() {
                     if (auto strong_this = weak_this.lock()) {
+                        if (!strong_this->IsCurrentNativeScrollWrite(operation)) {
+                            return;
+                        }
+                        auto result_code = KRScrollWriteResultCode::Committed;
+                        if (!strong_this->content_view_) {
+                            result_code = KRScrollWriteResultCode::NotReady;
+                        } else if (operation->interaction_epoch != strong_this->native_interaction_epoch_) {
+                            result_code = KRScrollWriteResultCode::Interrupted;
+                        } else if (operation->layout_revision != strong_this->native_layout_revision_ ||
+                                   !strong_this->MatchesExpectedLayout(
+                                       content_inset->expected_content_size,
+                                       content_inset->expected_viewport_size)) {
+                            result_code = KRScrollWriteResultCode::LayoutChanged;
+                        } else if ((operation->generation >= 0 &&
+                                    operation->generation != strong_this->compose_offset_write_generation_) ||
+                                   !strong_this->IsCurrentOffsetWrite(operation->compose_operation) ||
+                                   operation->inset_revision != strong_this->native_inset_revision_) {
+                            result_code = KRScrollWriteResultCode::Stale;
+                        }
+                        bool native_idle = !strong_this->is_dragging_ &&
+                            strong_this->current_scroll_state_ == ArkUI_ScrollState::ARKUI_SCROLL_STATE_IDLE;
+                        if (result_code == KRScrollWriteResultCode::Committed &&
+                            content_inset->requires_native_idle && !native_idle) {
+                            result_code = KRScrollWriteResultCode::Busy;
+                        }
                         strong_this->content_inset_animate_ = nullptr;
+                        operation->inset_animation_finished = true;
+                        if (result_code != KRScrollWriteResultCode::Committed) {
+                            strong_this->CompleteContentInsetWrite(
+                                operation, result_code, !operation->physical_end_emitted);
+                        } else if (!operation->inset_mutation_applied) {
+                            strong_this->CompleteContentInsetWrite(
+                                operation, KRScrollWriteResultCode::NotReady,
+                                !operation->physical_end_emitted);
+                        } else if (!operation->offset_correction_required ||
+                                   operation->offset_correction_finished) {
+                            strong_this->CompleteContentInsetWrite(
+                                operation, KRScrollWriteResultCode::Committed,
+                                !operation->physical_end_emitted);
+                        }
                     }
                 });
             content_inset_animate_->Start();
+            KRContextScheduler::ScheduleTask(1200, [weak_this, operation]() {
+                if (auto strong_this = weak_this.lock()) {
+                    if (!strong_this->IsCurrentNativeScrollWrite(operation)) {
+                        return;
+                    }
+                    ArkUI_NumberValue values[] = {{.f32 = 0}, {.f32 = 0}};
+                    ArkUI_AttributeItem item = {values, 2};
+                    if (operation->offset_correction_required &&
+                        !operation->offset_correction_finished) {
+                        strong_this->replacement_stop_event_fence_.Arm();
+                    }
+                    kuikly::util::GetNodeApi()->setAttribute(
+                        strong_this->GetNode(), NODE_SCROLL_BY, &item);
+                    strong_this->CompleteContentInsetWrite(
+                        operation, KRScrollWriteResultCode::AckTimeout, true);
+                }
+            });
         }
     } else {
         kuikly::util::SetArkUIMargin(content_view_->GetNode(), start, top, end, bottom);
+        operation->inset_mutation_applied = true;
+        CompleteContentInsetWrite(operation, KRScrollWriteResultCode::Committed, false);
+    }
+}
+
+void KRScrollerView::CompleteContentInsetWrite(
+    const std::shared_ptr<KRNativeScrollWriteOperation> &operation,
+    KRScrollWriteResultCode result_code, bool fire_scroll_end) {
+    if (!IsCurrentNativeScrollWrite(operation) ||
+        operation->resource != KRNativeScrollWriteResource::ContentInset) {
+        return;
+    }
+    content_inset_animate_ = nullptr;
+    if (result_code == KRScrollWriteResultCode::Committed) {
+        native_inset_revision_++;
+    }
+    std::shared_ptr<KRRenderValue> result;
+    auto callback = FinalizeScrollWrite(operation, result_code, result);
+    if (fire_scroll_end) {
+        FireEndScrollEvent(nullptr);
+    }
+    if (callback) {
+        callback(result);
     }
 }
 
@@ -556,6 +1067,20 @@ void KRScrollerView::OnScrollFrameBegin(ArkUI_NodeEvent *event) {
     auto current_time = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     auto point = kuikly::util::GetArkUIScrollContentOffset(GetNode());
+    auto operation = scroll_write_arbiter_.Current();
+    if (IsCurrentNativeScrollWrite(operation) &&
+        operation->resource == KRNativeScrollWriteResource::ContentOffset &&
+        operation->animated &&
+        (std::fabs(point.x - operation->start.x) > 0.5f ||
+         std::fabs(point.y - operation->start.y) > 0.5f)) {
+        operation->observed_start = true;
+    } else if (IsCurrentNativeScrollWrite(operation) &&
+               operation->resource == KRNativeScrollWriteResource::ContentInset &&
+               operation->offset_correction_required &&
+               (std::fabs(point.x - operation->start.x) > 0.5f ||
+                std::fabs(point.y - operation->start.y) > 0.5f)) {
+        operation->observed_start = true;
+    }
 
     if (last_scroll_time_ > 0) {
         auto dt = current_time - last_scroll_time_;
@@ -581,11 +1106,41 @@ void KRScrollerView::OnScrollFrameBegin(ArkUI_NodeEvent *event) {
 }
 
 void KRScrollerView::OnScrollStop(ArkUI_NodeEvent *event) {
+    KREnsureMainThread();
+    if (replacement_stop_event_fence_.ConsumeReplacementStop()) {
+        return;
+    }
+    KRRenderCallback terminal = nullptr;
+    std::shared_ptr<KRRenderValue> terminal_result;
+    auto operation = scroll_write_arbiter_.Current();
+    if (IsCurrentNativeScrollWrite(operation) && operation->animated && operation->observed_start) {
+        auto point = GetContentOffset();
+        if (std::fabs(point.x - operation->target.x) <= 1.0f &&
+            std::fabs(point.y - operation->target.y) <= 1.0f) {
+            if (operation->resource == KRNativeScrollWriteResource::ContentOffset) {
+                terminal = FinalizeScrollWrite(operation, KRScrollWriteResultCode::Committed,
+                                               terminal_result);
+            } else if (operation->resource == KRNativeScrollWriteResource::ContentInset &&
+                       operation->offset_correction_required) {
+                operation->offset_correction_finished = true;
+                operation->physical_end_emitted = true;
+                if (operation->inset_animation_finished && operation->inset_mutation_applied) {
+                    content_inset_animate_ = nullptr;
+                    native_inset_revision_++;
+                    terminal = FinalizeScrollWrite(operation, KRScrollWriteResultCode::Committed,
+                                                   terminal_result);
+                }
+            }
+        }
+    }
     current_scroll_state_ = ArkUI_ScrollState::ARKUI_SCROLL_STATE_IDLE;
     if (is_dragging_) {
         OnWillDragEnd(event);
     }
     FireEndScrollEvent(event);
+    if (terminal) {
+        terminal(terminal_result);
+    }
     if (auto handler = weak_super_touch_handler_.lock()) {
         handler->ClearNativeTouchConsumer(shared_from_this());
     }
@@ -599,13 +1154,35 @@ void KRScrollerView::OnWillScroll(ArkUI_NodeEvent *event) {
         return;
     }
     if (IsIdeaStateToDraggingState(new_scroll_state) || IsFlingStateToDraggingState(new_scroll_state)) {
+        current_scroll_state_ = new_scroll_state;
         is_dragging_ = true;
+        native_interaction_epoch_++;
+        native_write_operation_sequence_++;
+        minimum_compose_write_operation_ = latest_compose_write_operation_ + 1;
+        std::shared_ptr<KRRenderValue> terminal_result;
+        auto terminal = FinalizeScrollWrite(scroll_write_arbiter_.Current(),
+                                            KRScrollWriteResultCode::Interrupted,
+                                            terminal_result);
+        auto pending_offset_callback = first_offset_callback_slot_.Take();
+        auto pending_offset_result = pending_offset_callback
+            ? ScrollWriteResult(KRScrollWriteResultCode::Interrupted) : nullptr;
+        is_need_set_content_offset_ = false;
+        content_inset_animate_ = nullptr;
+        content_inset_when_drag_end_ = nullptr;
+        if (terminal) {
+            terminal(terminal_result);
+        }
+        if (pending_offset_callback) {
+            pending_offset_callback(pending_offset_result);
+        }
         FireBeginDragEvent(event);
     } else if (is_dragging_ &&
         (IsDraggingStateToFlingState(new_scroll_state) || IsDraggingStateToIdeaState(new_scroll_state))) {
+        current_scroll_state_ = new_scroll_state;
         OnWillDragEnd(event);
+    } else {
+        current_scroll_state_ = new_scroll_state;
     }
-    current_scroll_state_ = new_scroll_state;
     if (auto handler = weak_super_touch_handler_.lock()) {
         handler->SetNativeTouchConsumer(shared_from_this());
     }
@@ -669,6 +1246,14 @@ std::shared_ptr<KRRenderValue> KRScrollerView::GetCommonScrollParams() {
         map[kEventKeyContentHeight] = NewKRRenderValue(content_view_frame.height);
     }
     map[kEventKeyIsDragging] = NewKRRenderValue(is_dragging_ ? 1 : 0);
+    map[kEventKeyNativeScrollPhase] = NewKRRenderValue(NativeScrollPhase());
+    map[kEventKeyNativeInteractionEpoch] = NewKRRenderValue(native_interaction_epoch_);
+    map[kEventKeyLayoutRevision] = NewKRRenderValue(native_layout_revision_);
+    map[kEventKeyInsetRevision] = NewKRRenderValue(native_inset_revision_);
+    auto current_operation = scroll_write_arbiter_.Current();
+    auto source_operation = !is_dragging_ && current_operation && current_operation->animated
+        ? current_operation->compose_operation : 0;
+    map["sourceOperationGeneration"] = NewKRRenderValue(source_operation);
 
     // 统一计算有效速度：基于最后位移的 stale 检测 + 最小阈值过滤
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -698,8 +1283,10 @@ void KRScrollerView::ApplyContentInsetWhenDragEnd() {
     if (!content_inset_when_drag_end_) {
         return;
     }
-    KR_LOG_INFO << "apply content inset: " << content_inset_when_drag_end_->top;
-    SetContentInset(content_inset_when_drag_end_);
+    auto content_inset = content_inset_when_drag_end_;
+    content_inset_when_drag_end_ = nullptr;
+    KR_LOG_INFO << "apply content inset: " << content_inset->top;
+    SetContentInset(content_inset, nullptr);
 }
 
 void KRScrollerView::InnerSetBouncesEnable(bool enable) {
@@ -801,7 +1388,34 @@ void KRScrollerView::TryApplyPendingFireOnScroll() {
 }
 
 // Clear transient native state for Compose DSL reuse (not the native reuse pool).
-void KRScrollerView::PrepareForComposeReuse() {
+void KRScrollerView::PrepareForComposeReuse(const KRAnyValue &value) {
+    auto previous = scroll_write_arbiter_.Current();
+    auto should_stop_previous = previous && KRShouldStopReplacedScrollMotion(
+        previous->resource == KRNativeScrollWriteResource::ContentOffset,
+        previous->animated,
+        previous->offset_correction_required,
+        previous->offset_correction_finished);
+    native_write_operation_sequence_++;
+    compose_offset_write_generation_ = value ? value->toLong() : compose_offset_write_generation_ + 1;
+    native_interaction_epoch_++;
+    native_layout_revision_++;
+    native_inset_revision_++;
+    latest_compose_write_operation_ = 0;
+    minimum_compose_write_operation_ = 0;
+    std::shared_ptr<KRRenderValue> terminal_result;
+    auto terminal = FinalizeScrollWrite(scroll_write_arbiter_.Current(), KRScrollWriteResultCode::Destroyed,
+                                        terminal_result);
+    auto pending_offset_callback = first_offset_callback_slot_.Take();
+    auto pending_offset_result = pending_offset_callback
+        ? ScrollWriteResult(KRScrollWriteResultCode::Destroyed) : nullptr;
+    is_need_set_content_offset_ = false;
+    content_inset_animate_ = nullptr;
+    ArkUI_NumberValue values[] = {{.f32 = 0}, {.f32 = 0}};
+    ArkUI_AttributeItem item = {values, 2};
+    if (should_stop_previous) {
+        replacement_stop_event_fence_.Arm();
+    }
+    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_SCROLL_BY, &item);
     // Reset scroll event dedup cache so restored offset fires a scroll event
     last_fired_scroll_x_ = -FLT_MAX;
     last_fired_scroll_y_ = -FLT_MAX;
@@ -820,9 +1434,24 @@ void KRScrollerView::PrepareForComposeReuse() {
     last_move_time_ = 0;
     velocity_x_ = 0;
     velocity_y_ = 0;
+    if (terminal) {
+        terminal(terminal_result);
+    }
+    if (pending_offset_callback) {
+        pending_offset_callback(pending_offset_result);
+    }
 }
 
 void KRScrollerView::AbortContentOffsetAnimate() {
+    auto previous = scroll_write_arbiter_.Current();
+    auto should_stop_previous = previous && KRShouldStopReplacedScrollMotion(
+        previous->resource == KRNativeScrollWriteResource::ContentOffset,
+        previous->animated,
+        previous->offset_correction_required,
+        previous->offset_correction_finished);
+    std::shared_ptr<KRRenderValue> terminal_result;
+    auto terminal = FinalizeScrollWrite(scroll_write_arbiter_.Current(), KRScrollWriteResultCode::Canceled,
+                                        terminal_result);
     // 停止 ContentInset 动画（释放动画对象）
     if (content_inset_animate_) {
         content_inset_animate_ = nullptr;
@@ -831,5 +1460,12 @@ void KRScrollerView::AbortContentOffsetAnimate() {
     // 停止滚动：通过 scrollBy(0, 0) 来停止当前的滚动/Fling 动画
     ArkUI_NumberValue values[] = {{.f32 = 0}, {.f32 = 0}};
     ArkUI_AttributeItem item = {values, 2};
+    if (should_stop_previous) {
+        replacement_stop_event_fence_.Arm();
+    }
     kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_SCROLL_BY, &item);
+    FireEndScrollEvent(nullptr);
+    if (terminal) {
+        terminal(terminal_result);
+    }
 }

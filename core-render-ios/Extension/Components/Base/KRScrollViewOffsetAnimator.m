@@ -26,6 +26,8 @@
 @property (nonatomic, assign) CGPoint fromOffset;
 @property (nonatomic, assign, readwrite) CGPoint toOffset;  // readwrite for internal use
 @property (nonatomic, assign) CGPoint lastOffset;
+@property (nonatomic, assign) BOOL canceled;
+@property (nonatomic, assign) BOOL completionClaimed;
 
 @end
 
@@ -45,12 +47,36 @@
 }
 
 - (void)cancel {
+    self.canceled = YES;
     [self.displayLink stop];
     self.displayLink = nil;
 }
 
+- (BOOL)claimCompletion {
+    if (self.canceled || self.completionClaimed) {
+        return NO;
+    }
+    self.completionClaimed = YES;
+    [self.displayLink stop];
+    self.displayLink = nil;
+    return YES;
+}
+
++ (BOOL)isCurrentAnimator:(KRScrollViewOffsetAnimator *)currentAnimator
+                 candidate:(KRScrollViewOffsetAnimator *)candidate
+         currentGeneration:(NSUInteger)currentGeneration
+      completionGeneration:(NSUInteger)completionGeneration {
+    return currentAnimator == candidate && currentGeneration == completionGeneration;
+}
+
++ (BOOL)shouldEmitTerminalForNativePhase:(NSInteger)nativePhase {
+    return nativePhase == 0;
+}
+
 - (void)animateToOffset:(CGPoint)offset withVelocity:(CGPoint)velocity {
     [self cancel];
+    self.canceled = NO;
+    self.completionClaimed = NO;
     self.toOffset = offset;  // Store the target offset
     self.lastOffset = [self getCurScrollContetOffset];
     KRDisplayLink *link = [KRDisplayLink new];

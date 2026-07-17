@@ -19,13 +19,18 @@ import com.tencent.kuikly.compose.foundation.drawer.DrawerInternalPagerState
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.foundation.pager.PagerMeasureResult
 import com.tencent.kuikly.compose.foundation.pager.PagerSnapDistance
+import com.tencent.kuikly.compose.gestures.ScrollOffsetWriteCapability
 import com.tencent.kuikly.compose.ui.util.fastFirstOrNull
 import com.tencent.kuikly.core.views.SpringAnimation
 import com.tencent.kuikly.core.views.WillEndDragParams
 import kotlin.math.abs
 import kotlin.math.min
 
-internal fun DrawerInternalPagerState.kuiklyWillDragEnd(params: WillEndDragParams, orientation: Orientation) {
+internal fun DrawerInternalPagerState.kuiklyWillDragEnd(
+    params: WillEndDragParams,
+    orientation: Orientation,
+    capability: ScrollOffsetWriteCapability?,
+) {
     clearSnapAnimationState()
     val currentPageSize = pageSizeForPage(currentPage)
     val currentPageSizeWithSpacing = pageSizeWithSpacingForPage(currentPage)
@@ -66,9 +71,6 @@ internal fun DrawerInternalPagerState.kuiklyWillDragEnd(params: WillEndDragParam
         val pageBoundaryOffset = this@kuiklyWillDragEnd.pageBoundaryOffset(correctedTargetPage).toInt()
         var targetOffset = composeCandidateOffset ?: pageBoundaryOffset
         targetOffset = min(targetOffset, maxOffset).coerceAtLeast(0)
-        this@kuiklyWillDragEnd.markSnapAnimationStarted(
-            targetOffset, correctedTargetPage, nextPage?.key, desyncPages
-        )
         val springVelocity = if (orientation == Orientation.Horizontal) {
             params.velocityX
         } else {
@@ -80,10 +82,54 @@ internal fun DrawerInternalPagerState.kuiklyWillDragEnd(params: WillEndDragParam
             springVelocity
         )
         val targetOffsetDp = targetOffset / density
-        if (orientation == Orientation.Horizontal) {
-            kuiklyInfo.scrollView?.setContentOffset(targetOffsetDp, 0f, true, springAnimation)
+        val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return
+        val capabilityClaim = kuiklyInfo.claimScrollOffsetWriteCapability(capability) ?: return
+        val onCommitResult: (Boolean) -> Unit = { committed ->
+            if (committed) {
+                this@kuiklyWillDragEnd.markSnapAnimationStarted(
+                    targetOffset,
+                    correctedTargetPage,
+                    nextPage?.key,
+                    desyncPages,
+                    capabilityClaim,
+                )
+            } else {
+                kuiklyInfo.releaseScrollOffsetCapabilityClaim(capabilityClaim)
+            }
+        }
+        val accepted = if (orientation == Orientation.Horizontal) {
+            kuiklyInfo.applyScrollViewContentOffset(
+                ownerToken = ownerToken,
+                offsetX = targetOffsetDp,
+                offsetY = 0f,
+                animated = true,
+                intent = ScrollOffsetWriteIntent.GestureSnap,
+                reason = "drawer_drag_end_snap",
+                springAnimation = springAnimation,
+                capabilityClaim = capabilityClaim,
+                anchorValidator = {
+                    correctedTargetPage in 0 until pageCount && targetOffset in 0..maxOffset
+                },
+                onCommitResult = onCommitResult,
+            )
         } else {
-            kuiklyInfo.scrollView?.setContentOffset(0f, targetOffsetDp, true, springAnimation)
+            kuiklyInfo.applyScrollViewContentOffset(
+                ownerToken = ownerToken,
+                offsetX = 0f,
+                offsetY = targetOffsetDp,
+                animated = true,
+                intent = ScrollOffsetWriteIntent.GestureSnap,
+                reason = "drawer_drag_end_snap",
+                springAnimation = springAnimation,
+                capabilityClaim = capabilityClaim,
+                anchorValidator = {
+                    correctedTargetPage in 0 until pageCount && targetOffset in 0..maxOffset
+                },
+                onCommitResult = onCommitResult,
+            )
+        }
+        if (!accepted) {
+            kuiklyInfo.releaseScrollOffsetCapabilityClaim(capabilityClaim)
         }
     }
 }
