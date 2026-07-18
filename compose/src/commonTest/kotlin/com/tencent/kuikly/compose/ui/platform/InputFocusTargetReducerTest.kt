@@ -379,6 +379,48 @@ class InputFocusTargetReducerTest {
     }
 
     @Test
+    fun softwareKeyboardShowReassertsConfirmedFocusWithoutChangingGeneration() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("focused-editor-with-hidden-keyboard")
+
+        reducer.start(view)
+        val initialFocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        reducer.onNativeFocus(view, initialFocus.generation)
+
+        assertNull(reducer.reconcile())
+        val keyboardShow =
+            assertIs<InputFocusTargetReducer.Command.Focus<View>>(
+                reducer.reconcile(reassertCurrentFocus = true),
+            )
+        assertSame(view, keyboardShow.view)
+        assertEquals(initialFocus.generation, keyboardShow.generation)
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+            reducer.onNativeFocus(view, keyboardShow.generation),
+        )
+        assertSame(view, reducer.desiredView)
+        assertSame(view, reducer.observedView)
+    }
+
+    @Test
+    fun softwareKeyboardShowCannotReviveObservedViewWithoutDesiredOwner() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("stale-native-editor")
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
+            reducer.onNativeFocus(view, requestId = null),
+        )
+
+        val blur =
+            assertIs<InputFocusTargetReducer.Command.Blur<View>>(
+                reducer.reconcile(reassertCurrentFocus = true),
+            )
+        assertSame(view, blur.view)
+        assertNull(reducer.desiredView)
+    }
+
+    @Test
     fun blurWithoutProgrammaticCallbackStillLetsLaterUserBlurClearCompose() {
         val reducer = InputFocusTargetReducer<View>()
         val view = View("editor")
