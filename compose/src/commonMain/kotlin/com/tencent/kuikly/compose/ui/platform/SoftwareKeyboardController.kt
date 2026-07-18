@@ -75,7 +75,9 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
 
     override fun hide() {
         keyboardHidden = true
-        scheduleReconcile(focusReducer.desiredView ?: focusReducer.observedView)
+        val target = focusReducer.desiredView ?: focusReducer.observedView
+        target?.let(focusReducer::onBlurRequested)
+        scheduleReconcile(target)
     }
 
     internal fun startInput(view: AutoHeightTextAreaView) {
@@ -137,7 +139,10 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
                 execute(focusReducer.reconcile())
             }
             if (keyboardHidden) {
-                focusReducer.observedView?.blur(focusReducer.generation)
+                focusReducer.observedView?.let { observedView ->
+                    focusReducer.onBlurRequested(observedView)
+                    observedView.blur(focusReducer.generation)
+                }
             }
         }
     }
@@ -150,8 +155,10 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
         when (command) {
             is InputFocusTargetReducer.Command.Focus ->
                 executeFocus(command)
-            is InputFocusTargetReducer.Command.Blur ->
+            is InputFocusTargetReducer.Command.Blur -> {
+                focusReducer.onBlurRequested(command.view)
                 command.view.blur(command.generation)
+            }
             is InputFocusTargetReducer.Command.CancelPendingFocus ->
                 command.view.cancelPendingFocus(command.generation)
             null -> Unit
