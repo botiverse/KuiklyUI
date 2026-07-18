@@ -72,6 +72,10 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
 }
 
 dependencies {
@@ -80,7 +84,8 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.2.0")
     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.12.2")
+    testImplementation(project(":core"))
+    testImplementation("org.robolectric:robolectric:4.14.1")
     // task #476: real org.json for JVM unit tests (the android.jar stubs
     // throw "not mocked") — needed by KuiklyRenderExtensionMarshalTest.
     testImplementation("org.json:json:20231013")

@@ -45,7 +45,11 @@ fun ScrollParams.scaleWithDensity(density: Float): ScrollParams {
         viewWidth = viewWidth * density,
         viewHeight = viewHeight * density,
         isDragging = isDragging,
-        touches = touches.map { it.scaleWithDensity(density) }
+        nativeScrollPhase = nativeScrollPhase,
+        touches = touches.map { it.scaleWithDensity(density) },
+        nativeInteractionEpoch = nativeInteractionEpoch,
+        layoutRevision = layoutRevision,
+        insetRevision = insetRevision,
     )
 }
 

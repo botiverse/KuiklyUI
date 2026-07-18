@@ -64,6 +64,37 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
     var curOffsetY: Float = 0f
         private set
     var isDragging: Boolean = false
+    var nativeScrollPhase: NativeScrollPhase = NativeScrollPhase.Idle
+        internal set
+
+    var nativeInteractionEpoch: Long = 0L
+        internal set
+
+    var nativeLayoutRevision: Long = 0L
+        internal set
+
+    var nativeInsetRevision: Long = 0L
+        internal set
+    var offsetWriteGeneration: Long = 0L
+        private set
+    private val contentOffsetWriteLedger = ContentOffsetWriteLedger()
+    private var contentInsetWriteOperation = 0L
+    private var contentInsetArmGeneration = 0L
+    private val composeWriteOperationLedger = ComposeWriteOperationLedger()
+    private var composeAnimatedUnderlyingPhase: NativeScrollPhase? = null
+    private var composeAnimatedPhaseOwner: ComposeAnimatedPhaseOwner? = null
+    private val composeAnimatedPhasePredecessors = mutableMapOf<
+        ComposeAnimatedPhaseOwner,
+        ComposeAnimatedPhaseOwner?,
+    >()
+    private val composeAnimatedPhaseUnderlyingPhases = mutableMapOf<
+        ComposeAnimatedPhaseOwner,
+        NativeScrollPhase,
+    >()
+    private val inactiveComposeAnimatedPhaseOwners = mutableSetOf<ComposeAnimatedPhaseOwner>()
+    private var composeAnimatedPhaseAuthorityGeneration = 0L
+    private var nativeRevisionWaiterSequence = 0L
+    private val nativeRevisionWaiters = mutableMapOf<Long, NativeRevisionWaiter>()
 
     val contentViewOffsetX: Float
       get() {
@@ -104,13 +135,101 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
      * @param animated 是否使用动画进行偏移，默认为 false。
      * @param springAnimation 弹簧动画参数，可为空，默认为 null。
      */
-    fun setContentOffset(offsetX: Float, offsetY: Float, animated: Boolean = false, springAnimation: SpringAnimation? = null) {
+    fun setContentOffset(
+        offsetX: Float,
+        offsetY: Float,
+        animated: Boolean = false,
+        springAnimation: SpringAnimation? = null,
+        writeToken: ScrollOffsetCommitToken? = null,
+        onCommitResult: ((Boolean) -> Unit)? = null,
+        onCommitResultDetailed: ((ScrollWriteResult) -> Unit)? = null,
+    ) {
+        val commitToken = writeToken ?: nextLegacyWriteToken(requiresNativeIdle = false)
         val contentOffset = transformInputSetContentOffset(offsetX, offsetY)
+        if (!claimComposeWriteOperation(commitToken)) {
+            val result = currentScrollWriteResult(ScrollWriteResultCode.Stale)
+            onCommitResultDetailed?.invoke(result)
+            onCommitResult?.invoke(false)
+            return
+        }
         performTaskWhenRenderViewDidLoad {
-            if (!animated && springAnimation == null) {
+            if (!canCommitOffsetWrite(commitToken)) {
+                val code = if (commitToken.requiresNativeIdle &&
+                    nativeScrollPhase != NativeScrollPhase.Idle
+                ) {
+                    ScrollWriteResultCode.Busy
+                } else {
+                    ScrollWriteResultCode.Stale
+                }
+                val result = currentScrollWriteResult(code)
+                onCommitResultDetailed?.invoke(result)
+                onCommitResult?.invoke(false)
+                return@performTaskWhenRenderViewDidLoad
+            }
+            val writeSequence = contentOffsetWriteLedger.beginWrite(
+                currentOffset = contentViewOffsetX to contentViewOffsetY,
+            )
+            val updatesContentOffsetImmediately = !animated && springAnimation == null
+            val phaseBeforeAnimatedWrite = beginComposeWritePhase(
+                animated = !updatesContentOffsetImmediately,
+                writeToken = commitToken,
+            )
+            if (updatesContentOffsetImmediately) {
                 contentView?.contentOffsetWillChanged(contentOffset.first, contentOffset.second)
             }
-            callContentOffset(contentOffset.first, contentOffset.second, animated, springAnimation)
+            val commitResult = run {
+                { result: ScrollWriteResult ->
+                    updateNativeRevisions(result)
+                    val committed = result.committed
+                    val current = committed && isCurrentComposeWriteOperation(commitToken)
+                    if (result.installed) {
+                        markComposeWritePhaseTerminal(phaseBeforeAnimatedWrite)
+                    }
+                    if (!result.installed) {
+                        rollbackComposeWritePhase(phaseBeforeAnimatedWrite)
+                    } else if (updatesContentOffsetImmediately && current) {
+                        commitImmediateComposeWritePhase(phaseBeforeAnimatedWrite)
+                    }
+                    if (current) {
+                        contentOffsetWriteLedger.confirmWrite(writeSequence, contentOffset)
+                    } else if (!committed &&
+                        isCurrentComposeWriteOperation(commitToken) &&
+                        updatesContentOffsetImmediately) {
+                        contentOffsetWriteLedger.rollbackTarget(writeSequence)?.let { rollback ->
+                            contentView?.contentOffsetWillChanged(rollback.first, rollback.second)
+                        }
+                    }
+                    if (result.installed &&
+                        !updatesContentOffsetImmediately &&
+                        (!committed || result.code == ScrollWriteResultCode.AlreadySatisfied) &&
+                        commitToken.generation == offsetWriteGeneration &&
+                        nativeScrollPhase == NativeScrollPhase.SettlingOrAnimating
+                    ) {
+                        restoreComposeAnimatedPhase(phaseBeforeAnimatedWrite)
+                    }
+                    val currentResult = if (current) result else ScrollWriteResult(
+                        code = if (result.committed) ScrollWriteResultCode.Stale else result.code,
+                        nativeInteractionEpoch = result.nativeInteractionEpoch,
+                        layoutRevision = result.layoutRevision,
+                        insetRevision = result.insetRevision,
+                        accepted = result.accepted,
+                        installed = result.installed,
+                        replacedPrevious = result.replacedPrevious,
+                    )
+                    onCommitResultDetailed?.invoke(currentResult)
+                    onCommitResult?.invoke(currentResult.committed)
+                    dispatchNativeRevisionWaiters()
+                    Unit
+                }
+            }
+            callContentOffset(
+                contentOffset.first,
+                contentOffset.second,
+                animated,
+                springAnimation,
+                commitToken,
+                commitResult,
+            )
         }
     }
 
@@ -122,12 +241,42 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
      * @param animation 动画参数，可为空。
      */
     fun setContentOffset(offsetX: Float, offsetY: Float, animation: SetContentOffsetAnimation?) {
+        val commitToken = nextLegacyWriteToken(requiresNativeIdle = false)
+        if (!claimComposeWriteOperation(commitToken)) return
         performTaskWhenRenderViewDidLoad {
-            var animationString = ""
-            animation?.also {
-                animationString = it.toString()
+            if (!canCommitOffsetWrite(commitToken)) return@performTaskWhenRenderViewDidLoad
+            val animationString = animation?.toString() ?: " 0 0 0 0"
+            val phaseBeforeAnimatedWrite = beginComposeWritePhase(
+                animated = animation != null,
+                writeToken = commitToken,
+            )
+            val tokenString = " ${commitToken.generation} ${commitToken.requiresNativeIdle.toInt()}" +
+                " ${commitToken.operationGeneration} ${commitToken.expectedContentSize}" +
+                " ${commitToken.expectedViewportSize}${commitToken.extendedIdentityWireSuffix()}"
+            renderView?.callMethod(
+                "contentOffset",
+                "$offsetX $offsetY ${if (animation != null) 1 else 0}${animationString}$tokenString",
+            ) { result ->
+                val decoded = decodeScrollWriteResult(result)
+                updateNativeRevisions(decoded)
+                if (decoded.installed) {
+                    markComposeWritePhaseTerminal(phaseBeforeAnimatedWrite)
+                }
+                if (!decoded.installed) {
+                    rollbackComposeWritePhase(phaseBeforeAnimatedWrite)
+                } else if (animation == null && decoded.committed &&
+                    isCurrentComposeWriteOperation(commitToken)) {
+                    commitImmediateComposeWritePhase(phaseBeforeAnimatedWrite)
+                }
+                if (decoded.installed &&
+                    animation != null &&
+                    (!decoded.committed || decoded.code == ScrollWriteResultCode.AlreadySatisfied) &&
+                    nativeScrollPhase == NativeScrollPhase.SettlingOrAnimating
+                ) {
+                    restoreComposeAnimatedPhase(phaseBeforeAnimatedWrite)
+                }
+                dispatchNativeRevisionWaiters()
             }
-            renderView?.callMethod("contentOffset", "$offsetX $offsetY ${if (animation != null) 1 else 0}${animationString}")
         }
     }
 
@@ -137,20 +286,184 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
         }
     }
 
-    /** Clear transient native state for Compose DSL reuse (not the native reuse pool). */
-    fun prepareForComposeReuse() {
+    /** Clear transient state for Compose DSL reuse (not the native reuse pool). */
+    fun prepareForComposeReuse(beforeNativePrepare: () -> Unit = {}) {
+        offsetWriteGeneration += 1L
+        nativeInteractionEpoch += 1L
+        nativeLayoutRevision += 1L
+        nativeInsetRevision += 1L
+        contentOffsetWriteLedger.invalidateWrites(
+            currentOffset = contentViewOffsetX to contentViewOffsetY,
+        )
+        contentInsetWriteOperation += 1L
+        contentInsetArmGeneration += 1L
+        composeWriteOperationLedger.invalidate()
+        invalidateComposeAnimatedPhase()
+        nativeRevisionWaiters.clear()
+        val generation = offsetWriteGeneration
+        nativeScrollPhase = NativeScrollPhase.Idle
+        beforeNativePrepare()
         performTaskWhenRenderViewDidLoad {
-            renderView?.callMethod("prepareForComposeReuse")
+            renderView?.callMethod("prepareForComposeReuse", generation.toString())
         }
     }
 
-    open fun callContentOffset(offsetX: Float, offsetY: Float, animated: Boolean = false, springAnimation: SpringAnimation? = null) {
-        var springAnimationString = ""
-        springAnimation?.also {
-            springAnimationString = it.toString()
-        }
-        renderView?.callMethod("contentOffset", "${offsetX} ${offsetY} ${animated.toInt()}${springAnimationString}")
+    open fun callContentOffset(
+        offsetX: Float,
+        offsetY: Float,
+        animated: Boolean = false,
+        springAnimation: SpringAnimation? = null,
+        writeToken: ScrollOffsetCommitToken? = null,
+        onCommitResult: ((ScrollWriteResult) -> Unit)? = null,
+    ) {
+        val springAnimationString = springAnimation?.toString()
+            ?: if (writeToken != null) " 0 0 0 0" else ""
+        val tokenString = writeToken?.let {
+            " ${it.generation} ${it.requiresNativeIdle.toInt()} ${it.operationGeneration}" +
+                " ${it.expectedContentSize} ${it.expectedViewportSize}" +
+                " ${it.bindingGeneration} ${it.capabilityKind} ${it.capabilityLeaseId}" +
+                " ${it.semanticOperationId} ${it.attemptGeneration} ${it.nativeInteractionEpoch}" +
+                " ${it.layoutRevision} ${it.anchorRevision} ${it.rangeRevision} ${it.insetRevision}"
+        } ?: ""
+        renderView?.callMethod(
+            "contentOffset",
+            "${offsetX} ${offsetY} ${animated.toInt()}${springAnimationString}$tokenString",
+            onCommitResult?.let { callback ->
+                { result -> callback(decodeScrollWriteResult(result)) }
+            },
+        )
 
+    }
+
+    private fun canCommitOffsetWrite(writeToken: ScrollOffsetCommitToken?): Boolean {
+        if (writeToken == null) return true
+        return writeToken.generation == offsetWriteGeneration &&
+            (!writeToken.requiresNativeIdle || nativeScrollPhase == NativeScrollPhase.Idle) &&
+            writeToken.nativeInteractionEpoch == nativeInteractionEpoch &&
+            writeToken.layoutRevision == nativeLayoutRevision &&
+            writeToken.insetRevision == nativeInsetRevision &&
+            isCurrentComposeWriteOperation(writeToken)
+    }
+
+    private fun claimComposeWriteOperation(writeToken: ScrollOffsetCommitToken?): Boolean {
+        val operation = writeToken?.operationGeneration ?: return true
+        return composeWriteOperationLedger.claim(operation)
+    }
+
+    private fun nextLegacyWriteToken(requiresNativeIdle: Boolean): ScrollOffsetCommitToken {
+        val operation = composeWriteOperationLedger.nextAfter(contentInsetWriteOperation)
+        contentInsetWriteOperation = maxOf(contentInsetWriteOperation, operation)
+        return ScrollOffsetCommitToken(
+            generation = offsetWriteGeneration,
+            requiresNativeIdle = requiresNativeIdle,
+            operationGeneration = operation,
+            nativeInteractionEpoch = nativeInteractionEpoch,
+            layoutRevision = nativeLayoutRevision,
+            insetRevision = nativeInsetRevision,
+        )
+    }
+
+    private fun isCurrentComposeWriteOperation(writeToken: ScrollOffsetCommitToken?): Boolean {
+        val operation = writeToken?.operationGeneration ?: return true
+        return composeWriteOperationLedger.isCurrent(operation)
+    }
+
+    private fun beginComposeWritePhase(
+        animated: Boolean,
+        writeToken: ScrollOffsetCommitToken,
+    ): ComposeAnimatedPhaseSnapshot {
+        val owner = ComposeAnimatedPhaseOwner(
+            operationGeneration = writeToken.operationGeneration,
+            attemptGeneration = writeToken.attemptGeneration,
+        )
+        val underlyingPhase = if (
+            nativeScrollPhase == NativeScrollPhase.SettlingOrAnimating &&
+            composeAnimatedUnderlyingPhase != null
+        ) {
+            composeAnimatedUnderlyingPhase ?: nativeScrollPhase
+        } else {
+            nativeScrollPhase
+        }
+        val snapshot = ComposeAnimatedPhaseSnapshot(
+            animated = animated,
+            underlyingPhase = underlyingPhase,
+            authorityGeneration = composeAnimatedPhaseAuthorityGeneration,
+            owner = owner,
+            previousOwner = composeAnimatedPhaseOwner,
+        )
+        if (animated) {
+            composeAnimatedPhasePredecessors[owner] = composeAnimatedPhaseOwner
+            composeAnimatedPhaseUnderlyingPhases[owner] = underlyingPhase
+            inactiveComposeAnimatedPhaseOwners.remove(owner)
+            composeAnimatedUnderlyingPhase = underlyingPhase
+            composeAnimatedPhaseOwner = owner
+            nativeScrollPhase = NativeScrollPhase.SettlingOrAnimating
+        }
+        return snapshot
+    }
+
+    private fun rollbackComposeWritePhase(phase: ComposeAnimatedPhaseSnapshot) {
+        if (!phase.animated) return
+        if (phase.authorityGeneration != composeAnimatedPhaseAuthorityGeneration) return
+        inactiveComposeAnimatedPhaseOwners += phase.owner
+        if (phase.owner != composeAnimatedPhaseOwner) return
+
+        var predecessor = phase.previousOwner
+        while (predecessor != null && predecessor in inactiveComposeAnimatedPhaseOwners) {
+            predecessor = composeAnimatedPhasePredecessors[predecessor]
+        }
+        if (predecessor != null) {
+            composeAnimatedPhaseOwner = predecessor
+            composeAnimatedUnderlyingPhase =
+                composeAnimatedPhaseUnderlyingPhases[predecessor] ?: phase.underlyingPhase
+            nativeScrollPhase = NativeScrollPhase.SettlingOrAnimating
+        } else {
+            invalidateComposeAnimatedPhase()
+            nativeScrollPhase = phase.underlyingPhase
+        }
+    }
+
+    private fun markComposeWritePhaseTerminal(phase: ComposeAnimatedPhaseSnapshot) {
+        if (!phase.animated) return
+        if (phase.authorityGeneration != composeAnimatedPhaseAuthorityGeneration) return
+        inactiveComposeAnimatedPhaseOwners += phase.owner
+    }
+
+    private fun commitImmediateComposeWritePhase(phase: ComposeAnimatedPhaseSnapshot) {
+        if (phase.authorityGeneration != composeAnimatedPhaseAuthorityGeneration) return
+        invalidateComposeAnimatedPhase()
+        nativeScrollPhase = phase.underlyingPhase
+    }
+
+    private fun restoreComposeAnimatedPhase(phase: ComposeAnimatedPhaseSnapshot) {
+        if (phase.authorityGeneration != composeAnimatedPhaseAuthorityGeneration) return
+        if (phase.owner != composeAnimatedPhaseOwner) return
+        nativeScrollPhase = phase.underlyingPhase
+        invalidateComposeAnimatedPhase()
+    }
+
+    private fun invalidateComposeAnimatedPhase() {
+        composeAnimatedUnderlyingPhase = null
+        composeAnimatedPhaseOwner = null
+        composeAnimatedPhasePredecessors.clear()
+        composeAnimatedPhaseUnderlyingPhases.clear()
+        inactiveComposeAnimatedPhaseOwners.clear()
+        composeAnimatedPhaseAuthorityGeneration += 1L
+    }
+
+    internal fun updateNativeScrollPhaseFromNative(
+        phase: NativeScrollPhase,
+        sourceOperationGeneration: Long = 0L,
+    ): Boolean {
+        if (sourceOperationGeneration <= 0L) {
+            invalidateComposeAnimatedPhase()
+        } else if (sourceOperationGeneration != composeAnimatedPhaseOwner?.operationGeneration) {
+            return false
+        } else if (phase == NativeScrollPhase.Idle) {
+            invalidateComposeAnimatedPhase()
+        }
+        nativeScrollPhase = phase
+        return true
     }
 
     internal fun contentViewDidSetFrameToRenderView() {
@@ -174,10 +487,76 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
         left: Float = 0f,
         bottom: Float = 0f,
         right: Float = 0f,
-        animated: Boolean = false
+        animated: Boolean = false,
+        writeToken: ScrollOffsetCommitToken? = null,
+        onCommitResult: ((Boolean) -> Unit)? = null,
+        onCommitResultDetailed: ((ScrollWriteResult) -> Unit)? = null,
     ) {
+        val commitToken = writeToken ?: nextLegacyWriteToken(requiresNativeIdle = true)
+        contentInsetWriteOperation = maxOf(
+            contentInsetWriteOperation,
+            commitToken.operationGeneration,
+        )
+        if (!claimComposeWriteOperation(commitToken)) {
+            onCommitResultDetailed?.invoke(currentScrollWriteResult(ScrollWriteResultCode.Stale))
+            onCommitResult?.invoke(false)
+            return
+        }
         performTaskWhenRenderViewDidLoad {
-            renderView?.callMethod("contentInset", "$top $left $bottom $right ${animated.toInt()}")
+            if (!canCommitOffsetWrite(commitToken)) {
+                val code = if (commitToken.requiresNativeIdle &&
+                    nativeScrollPhase != NativeScrollPhase.Idle
+                ) {
+                    ScrollWriteResultCode.Busy
+                } else {
+                    ScrollWriteResultCode.Stale
+                }
+                onCommitResultDetailed?.invoke(currentScrollWriteResult(code))
+                onCommitResult?.invoke(false)
+                return@performTaskWhenRenderViewDidLoad
+            }
+            val writeSequence = commitToken.operationGeneration
+            val phaseBeforeAnimatedWrite = beginComposeWritePhase(
+                animated = animated,
+                writeToken = commitToken,
+            )
+            renderView?.callMethod(
+                "contentInset",
+                    "$top $left $bottom $right ${animated.toInt()} ${commitToken.generation} " +
+                    "${commitToken.requiresNativeIdle.toInt()} ${commitToken.operationGeneration} " +
+                    "${commitToken.expectedContentSize} ${commitToken.expectedViewportSize}" +
+                    commitToken.extendedIdentityWireSuffix(),
+                { result ->
+                    val decoded = decodeScrollWriteResult(result)
+                    updateNativeRevisions(decoded)
+                    val committed = decoded.committed &&
+                        isCurrentComposeWriteOperation(commitToken)
+                    if (decoded.installed) {
+                        markComposeWritePhaseTerminal(phaseBeforeAnimatedWrite)
+                    }
+                    if (!decoded.installed) {
+                        rollbackComposeWritePhase(phaseBeforeAnimatedWrite)
+                    } else if (!animated && committed) {
+                        commitImmediateComposeWritePhase(phaseBeforeAnimatedWrite)
+                    }
+                    if (
+                        decoded.installed &&
+                        animated &&
+                        (!decoded.committed || decoded.code == ScrollWriteResultCode.AlreadySatisfied) &&
+                        commitToken.generation == offsetWriteGeneration &&
+                        nativeScrollPhase == NativeScrollPhase.SettlingOrAnimating
+                    ) {
+                        restoreComposeAnimatedPhase(phaseBeforeAnimatedWrite)
+                    }
+                    onCommitResultDetailed?.invoke(
+                        if (committed) decoded else decoded.copy(
+                            code = if (decoded.committed) ScrollWriteResultCode.Stale else decoded.code,
+                        ),
+                    )
+                    onCommitResult?.invoke(committed)
+                    dispatchNativeRevisionWaiters()
+                },
+            )
         }
     }
 
@@ -185,10 +564,28 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
         top: Float = 0f,
         left: Float = 0f,
         bottom: Float = 0f,
-        right: Float = 0f
+        right: Float = 0f,
+        writeToken: ScrollOffsetCommitToken? = null,
     ) {
+        val armIdentity = ++contentInsetArmGeneration
+        val commitToken = (writeToken ?: ScrollOffsetCommitToken(
+            generation = offsetWriteGeneration,
+            requiresNativeIdle = false,
+            nativeInteractionEpoch = nativeInteractionEpoch,
+            layoutRevision = nativeLayoutRevision,
+            insetRevision = nativeInsetRevision,
+            semanticOperationId = armIdentity,
+            attemptGeneration = armIdentity,
+        )).copy(operationGeneration = 0L)
         performTaskWhenRenderViewDidLoad {
-            renderView?.callMethod("contentInsetWhenEndDrag", "$top $left $bottom $right")
+            if (!canCommitOffsetWrite(commitToken)) return@performTaskWhenRenderViewDidLoad
+            renderView?.callMethod(
+                "contentInsetWhenEndDrag",
+                "$top $left $bottom $right 0 ${commitToken.generation} " +
+                    "${commitToken.requiresNativeIdle.toInt()} ${commitToken.operationGeneration} " +
+                    "${commitToken.expectedContentSize} ${commitToken.expectedViewportSize}" +
+                    commitToken.extendedIdentityWireSuffix(),
+            )
         }
     }
 
@@ -237,6 +634,9 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
 
     override fun layoutFrameDidChanged(frame: Frame) {
         super.layoutFrameDidChanged(frame)
+        if (lastFrame.isDefaultValue() || lastFrame.width != frame.width || lastFrame.height != frame.height) {
+            nativeLayoutRevision += 1L
+        }
         scrollerViewEventObserverSet.toFastMutableList().forEach {
             it.scrollFrameDidChanged(frame)
         }
@@ -245,6 +645,7 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
             subViewsDidLayout()
         }
         lastFrame = frame
+        dispatchNativeRevisionWaiters()
     }
 
     internal fun subViewsDidLayout() {
@@ -289,25 +690,105 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
     }
 
     private fun handleListDidScroll(offsetX: Float, offsetY: Float, params: ScrollParams) {
+        updateNativeRevisions(params)
         curOffsetX = offsetX
         curOffsetY = offsetY
+        contentOffsetWriteLedger.recordNativeOffset(offsetX to offsetY)
         contentView?.contentOffsetWillChanged(offsetX, offsetY)
         scrollerViewEventObserverSet.toFastMutableList().forEach {
             it.onContentOffsetDidChanged(curOffsetX, curOffsetY, params)
         }
         contentView?.contentOffsetDidChanged(offsetX, offsetY, params)
+        dispatchNativeRevisionWaiters()
     }
 
     private fun handleListDidScrollEnd(params: ScrollParams) {
+        updateNativeRevisions(params)
         curOffsetX = params.offsetX
         curOffsetY = params.offsetY
+        contentOffsetWriteLedger.recordNativeOffset(params.offsetX to params.offsetY)
         contentView?.contentOffsetWillChanged(params.offsetX, params.offsetY)
         scrollerViewEventObserverSet.toFastMutableList().forEach {
             it.onScrollEnd(params)
             it.scrollerScrollDidEnd(params)
         }
         contentView?.contentOffsetDidChanged(params.offsetX, params.offsetY, params)
+        dispatchNativeRevisionWaiters()
     }
+
+    fun awaitNativeRevisionAdvance(
+        interactionEpoch: Long,
+        layoutRevision: Long,
+        insetRevision: Long,
+        callback: () -> Unit,
+    ): Long {
+        val id = ++nativeRevisionWaiterSequence
+        nativeRevisionWaiters[id] = NativeRevisionWaiter(
+            interactionEpoch = interactionEpoch,
+            layoutRevision = layoutRevision,
+            insetRevision = insetRevision,
+            callback = callback,
+        )
+        return id
+    }
+
+    fun cancelNativeRevisionWaiter(id: Long) {
+        nativeRevisionWaiters.remove(id)
+    }
+
+    private fun dispatchNativeRevisionWaiters() {
+        val ready = nativeRevisionWaiters.mapNotNull { (id, waiter) ->
+            if (nativeInteractionEpoch > waiter.interactionEpoch ||
+                nativeLayoutRevision > waiter.layoutRevision ||
+                nativeInsetRevision > waiter.insetRevision
+            ) {
+                id to waiter.callback
+            } else {
+                null
+            }
+        }
+        ready.forEach { (id, _) -> nativeRevisionWaiters.remove(id) }
+        ready.forEach { (_, callback) -> callback() }
+    }
+
+    private fun updateNativeRevisions(params: ScrollParams) {
+        nativeInteractionEpoch = maxOf(nativeInteractionEpoch, params.nativeInteractionEpoch)
+        nativeLayoutRevision = maxOf(nativeLayoutRevision, params.layoutRevision)
+        nativeInsetRevision = maxOf(nativeInsetRevision, params.insetRevision)
+    }
+
+    internal fun acceptNativeScrollEvent(params: ScrollParams): Boolean {
+        if (nativeInteractionEpoch > 0L && params.nativeInteractionEpoch <= 0L) {
+            return false
+        }
+        if (params.nativeInteractionEpoch > 0L &&
+            params.nativeInteractionEpoch < nativeInteractionEpoch
+        ) {
+            return false
+        }
+        updateNativeRevisions(params)
+        return true
+    }
+
+    private fun updateNativeRevisions(result: ScrollWriteResult) {
+        if (result.nativeInteractionEpoch >= 0L) {
+            nativeInteractionEpoch = maxOf(nativeInteractionEpoch, result.nativeInteractionEpoch)
+        }
+        if (result.layoutRevision >= 0L) {
+            nativeLayoutRevision = maxOf(nativeLayoutRevision, result.layoutRevision)
+        }
+        if (result.insetRevision >= 0L) {
+            nativeInsetRevision = maxOf(nativeInsetRevision, result.insetRevision)
+        }
+    }
+
+    private fun currentScrollWriteResult(code: ScrollWriteResultCode): ScrollWriteResult =
+        ScrollWriteResult(
+            code = code,
+            nativeInteractionEpoch = nativeInteractionEpoch,
+            layoutRevision = nativeLayoutRevision,
+            insetRevision = nativeInsetRevision,
+        )
 
     fun listenScrollEvent() {
         val ctx = this
@@ -397,6 +878,72 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
     fun setHasPullToRefresh(enabled: Boolean) {
         performTaskWhenRenderViewDidLoad {
             renderView?.callMethod("setHasPullToRefresh", if (enabled) "1" else "0", null)
+        }
+    }
+}
+
+private data class NativeRevisionWaiter(
+    val interactionEpoch: Long,
+    val layoutRevision: Long,
+    val insetRevision: Long,
+    val callback: () -> Unit,
+)
+
+private data class ComposeAnimatedPhaseSnapshot(
+    val animated: Boolean,
+    val underlyingPhase: NativeScrollPhase,
+    val authorityGeneration: Long,
+    val owner: ComposeAnimatedPhaseOwner,
+    val previousOwner: ComposeAnimatedPhaseOwner?,
+)
+
+private data class ComposeAnimatedPhaseOwner(
+    val operationGeneration: Long,
+    val attemptGeneration: Long,
+)
+
+internal class ContentOffsetWriteLedger {
+    private var latestWriteSequence = 0L
+    private var confirmedWriteSequence = 0L
+    private var confirmedOffset = 0f to 0f
+    private var initialized = false
+
+    fun beginWrite(currentOffset: Pair<Float, Float>): Long {
+        ensureInitialized(currentOffset)
+        latestWriteSequence += 1L
+        return latestWriteSequence
+    }
+
+    fun confirmWrite(sequence: Long, offset: Pair<Float, Float>) {
+        if (sequence >= confirmedWriteSequence) {
+            confirmedWriteSequence = sequence
+            confirmedOffset = offset
+        }
+    }
+
+    fun rollbackTarget(sequence: Long): Pair<Float, Float>? {
+        return confirmedOffset.takeIf { sequence == latestWriteSequence }
+    }
+
+    fun isLatestWrite(sequence: Long): Boolean = sequence == latestWriteSequence
+
+    fun recordNativeOffset(offset: Pair<Float, Float>) {
+        confirmedWriteSequence = latestWriteSequence
+        confirmedOffset = offset
+        initialized = true
+    }
+
+    fun invalidateWrites(currentOffset: Pair<Float, Float>) {
+        latestWriteSequence += 1L
+        confirmedWriteSequence = latestWriteSequence
+        confirmedOffset = currentOffset
+        initialized = true
+    }
+
+    private fun ensureInitialized(currentOffset: Pair<Float, Float>) {
+        if (!initialized) {
+            confirmedOffset = currentOffset
+            initialized = true
         }
     }
 }
@@ -545,7 +1092,15 @@ open class ScrollerEvent : Event() {
      */
     open fun scroll(sync: Boolean, handler: (ScrollParams) -> Unit) {
         syncScroll = sync
-        registerScrollerEvent(ScrollerEventConst.SCROLL, handler, sync)
+        registerScrollerEvent(ScrollerEventConst.SCROLL, handler = {
+            val view = getView() as ScrollerView<*, *>
+            if (!view.acceptNativeScrollEvent(it)) return@registerScrollerEvent
+            view.updateNativeScrollPhaseFromNative(
+                it.nativeScrollPhase,
+                it.sourceOperationGeneration,
+            )
+            handler(it)
+        }, sync = sync)
     }
 
     /**
@@ -554,7 +1109,17 @@ open class ScrollerEvent : Event() {
      * @param handler 一个接收 ScrollParams 参数的函数，当滚动结束时被调用。
      */
     open fun scrollEnd(handler: (ScrollParams) -> Unit) {
-        registerScrollerEvent(ScrollerEventConst.SCROLL_END, handler, false)
+        registerScrollerEvent(ScrollerEventConst.SCROLL_END, handler = {
+            val view = getView() as ScrollerView<*, *>
+            if (!view.acceptNativeScrollEvent(it)) return@registerScrollerEvent
+            if (!view.updateNativeScrollPhaseFromNative(
+                    NativeScrollPhase.Idle,
+                    it.sourceOperationGeneration,
+                )) {
+                return@registerScrollerEvent
+            }
+            handler(it)
+        }, sync = false)
     }
 
     /**
@@ -563,9 +1128,11 @@ open class ScrollerEvent : Event() {
      * @param handler 一个接收 ScrollParams 参数的函数，当开始拖拽滚动时被调用。
      */
     open fun dragBegin(handler: (ScrollParams) -> Unit) {
-        val ctx = this
         registerScrollerEvent(ScrollerEventConst.DRAG_BEGIN, handler = {
-            (getView() as ScrollerView).isDragging = true
+            val view = getView() as ScrollerView<*, *>
+            if (!view.acceptNativeScrollEvent(it)) return@registerScrollerEvent
+            view.isDragging = true
+            view.updateNativeScrollPhaseFromNative(NativeScrollPhase.Dragging)
             handler.invoke(it)
         }, sync = false)
     }
@@ -577,7 +1144,10 @@ open class ScrollerEvent : Event() {
      */
     open fun dragEnd(handler: (ScrollParams) -> Unit) {
         registerScrollerEvent(ScrollerEventConst.DRAG_END, handler = {
-            (getView() as ScrollerView).isDragging = false
+            val view = getView() as ScrollerView<*, *>
+            if (!view.acceptNativeScrollEvent(it)) return@registerScrollerEvent
+            view.isDragging = false
+            view.updateNativeScrollPhaseFromNative(it.nativeScrollPhase)
             handler.invoke(it)
         }, sync = false)
     }
@@ -737,7 +1307,16 @@ data class ScrollParams(
     val viewWidth: Float,  // 列表View宽度
     val viewHeight: Float, // 列表View高度
     val isDragging: Boolean, // 是否在dragging
-    val touches: List<Touch> = listOf()   // Touch触摸点信息列表
+    val nativeScrollPhase: NativeScrollPhase = if (isDragging) {
+        NativeScrollPhase.Dragging
+    } else {
+        NativeScrollPhase.Idle
+    },
+    val touches: List<Touch> = listOf(),   // Touch触摸点信息列表
+    val nativeInteractionEpoch: Long = 0L,
+    val layoutRevision: Long = 0L,
+    val insetRevision: Long = 0L,
+    val sourceOperationGeneration: Long = 0L,
 ) { // 当前是否处于拖拽列表滚动中
     companion object {
         fun decode(params: JSONObject): ScrollParams {
@@ -748,6 +1327,13 @@ data class ScrollParams(
             val viewWidth = params.optDouble("viewWidth").toFloat()
             val viewHeight = params.optDouble("viewHeight").toFloat()
             val isDragging = params.optInt("isDragging") == 1
+            val nativeScrollPhase = if (params.has("nativeScrollPhase")) {
+                NativeScrollPhase.fromWireValue(params.optInt("nativeScrollPhase"))
+            } else if (isDragging) {
+                NativeScrollPhase.Dragging
+            } else {
+                NativeScrollPhase.Idle
+            }
             val jsonArray = params.optJSONArray("touches")
             val touches = mutableListOf<Touch>()
             jsonArray?.let {
@@ -764,12 +1350,74 @@ data class ScrollParams(
                 viewWidth,
                 viewHeight,
                 isDragging,
-                touches
+                nativeScrollPhase,
+                touches,
+                params.optDouble("nativeInteractionEpoch", 0.0).toLong(),
+                params.optDouble("layoutRevision", 0.0).toLong(),
+                params.optDouble("insetRevision", 0.0).toLong(),
+                params.optDouble("sourceOperationGeneration", 0.0).toLong(),
             )
         }
     }
 
 }
+
+enum class NativeScrollPhase(internal val wireValue: Int) {
+    Idle(0),
+    Dragging(1),
+    SettlingOrAnimating(2);
+
+    companion object {
+        internal fun fromWireValue(value: Int): NativeScrollPhase = when (value) {
+            1 -> Dragging
+            2 -> SettlingOrAnimating
+            else -> Idle
+        }
+    }
+}
+
+data class ScrollOffsetCommitToken(
+    val generation: Long,
+    val requiresNativeIdle: Boolean,
+    val operationGeneration: Long = 0L,
+    val expectedContentSize: Float = -1f,
+    val expectedViewportSize: Float = -1f,
+    val bindingGeneration: Long = 0L,
+    val capabilityKind: Int = -1,
+    val capabilityLeaseId: Long = 0L,
+    val semanticOperationId: Long = operationGeneration,
+    val attemptGeneration: Long = operationGeneration,
+    val nativeInteractionEpoch: Long = 0L,
+    val layoutRevision: Long = 0L,
+    val anchorRevision: Long = 0L,
+    val rangeRevision: Long = 0L,
+    val insetRevision: Long = 0L,
+)
+
+private fun decodeScrollWriteResult(result: JSONObject?): ScrollWriteResult {
+    val committed = result?.optInt("committed", 0) == 1
+    val defaultCode = if (committed) {
+        ScrollWriteResultCode.Committed
+    } else {
+        ScrollWriteResultCode.Stale
+    }
+    return ScrollWriteResult(
+        code = ScrollWriteResultCode.fromWireValue(
+            result?.optInt("resultCode", defaultCode.wireValue) ?: defaultCode.wireValue,
+        ),
+        nativeInteractionEpoch = result?.optDouble("nativeInteractionEpoch", -1.0)?.toLong() ?: -1L,
+        layoutRevision = result?.optDouble("layoutRevision", -1.0)?.toLong() ?: -1L,
+        insetRevision = result?.optDouble("insetRevision", -1.0)?.toLong() ?: -1L,
+        accepted = result?.optInt("accepted", if (committed) 1 else 0) == 1,
+        installed = result?.optInt("installed", if (committed) 1 else 0) == 1,
+        replacedPrevious = result?.optInt("replacedPrevious", 0) == 1,
+    )
+}
+
+private fun ScrollOffsetCommitToken.extendedIdentityWireSuffix(): String =
+    " $bindingGeneration $capabilityKind $capabilityLeaseId" +
+        " $semanticOperationId $attemptGeneration $nativeInteractionEpoch" +
+        " $layoutRevision $anchorRevision $rangeRevision $insetRevision"
 
 class WillEndDragParams(
     val offsetX: Float,  // 列表当前纵轴偏移量

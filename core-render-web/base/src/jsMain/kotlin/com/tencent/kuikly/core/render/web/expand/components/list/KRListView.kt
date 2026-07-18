@@ -112,10 +112,15 @@ class KRListView : IKuiklyRenderViewExport {
                 listEle.hasPullToRefresh = (params == "1")
                 null
             }
-            METHOD_CONTENT_OFFSET -> listEle.setContentOffset(params)
-            METHOD_CONTENT_INSET -> listEle.setContentInset(params)
+            METHOD_CONTENT_OFFSET -> {
+                listEle.setContentOffset(params, callback)
+            }
+            METHOD_CONTENT_INSET -> listEle.setContentInset(params, callback)
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> listEle.setContentInsetWhenEndDrag(params)
-            METHOD_PREPARE_FOR_COMPOSE_REUSE -> listEle.prepareForComposeReuse()
+            METHOD_PREPARE_FOR_COMPOSE_REUSE -> {
+                val generation = params?.toLongOrNull() ?: 0L
+                listEle.prepareForComposeReuse(generation)
+            }
             else -> super.call(method, params, callback)
         }
     }
