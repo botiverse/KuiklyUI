@@ -104,6 +104,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 - (BOOL)p_shouldReapplyTextPostProcessorForIncomingRawText:(NSString *)rawText;
 - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
 - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
+- (NSDictionary *)p_currentTextInputStatePayload;
 #if !TARGET_OS_OSX
 - (BOOL)p_shouldForwardHardwareTabKey;
 - (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
@@ -439,17 +440,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
             self.css_textLengthBeyondLimit(@{});
         }
         if (self.css_textInputStateChange) {
-            NSString *outputText = [self p_outputText];
-            NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-            self.css_textInputStateChange(@{
-                @"text": outputText ?: @"",
-                @"selectionStart": @(outputSelectionRange.location),
-                @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-                @"compositionStart": @(-1),
-                @"compositionEnd": @(-1),
-                @"syncRevision": @(_textInputSyncRevision),
-                @"length": @([self p_calculateLengthForText:outputText])
-            });
+            self.css_textInputStateChange([self p_currentTextInputStatePayload]);
         }
         return;
     }
@@ -498,17 +489,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
     // 触发 textInputStateChange 回调，通知长度变化
     if (self.css_textInputStateChange) {
-        NSString *outputText = [self p_outputText];
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        self.css_textInputStateChange(@{
-            @"text": outputText ?: @"",
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"syncRevision": @(_textInputSyncRevision),
-            @"length": @([self p_calculateLengthForText:outputText])
-        });
+        self.css_textInputStateChange([self p_currentTextInputStatePayload]);
     }
     if (shouldRequestComposeFocus && self.css_inputFocus) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -530,17 +511,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 - (void)css_getTextInputState:(NSDictionary *)args {
     KuiklyRenderCallback callback = args[KRC_CALLBACK_KEY];
     if (callback) {
-        NSString *rawText = [self p_outputText];
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        callback(@{
-            @"text": rawText ?: @"",
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"syncRevision": @(_textInputSyncRevision),
-            @"length": @([self p_calculateLengthForText:rawText])
-        });
+        callback([self p_currentTextInputStatePayload]);
     }
 }
 
@@ -816,6 +787,12 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     if (textView.markedTextRange) {
         BOOL enablePinyinCallback = [self.css_enablePinyinCallback boolValue];
         if (enablePinyinCallback) {
+            // Complete editing state must lead the legacy text callback. Compose then preserves
+            // the marked range and pairs/drops the legacy echo instead of hoisting a null
+            // composition back into the controlled TextFieldValue.
+            if (self.css_textInputStateChange) {
+                self.css_textInputStateChange([self p_currentTextInputStatePayload]);
+            }
             if (self.css_textDidChange) {
                 NSString *text = [self p_outputText].copy ?: @"";
                 self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text]), @"syncRevision": @(_textInputSyncRevision)});
@@ -833,17 +810,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     }
 
     if (self.css_textInputStateChange) {
-        NSString *rawText = [self p_outputText];
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        self.css_textInputStateChange(@{
-            @"text": rawText ?: @"",
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"syncRevision": @(_textInputSyncRevision),
-            @"length": @([self p_calculateLengthForText:rawText])
-        });
+        self.css_textInputStateChange([self p_currentTextInputStatePayload]);
     }
 }
 
@@ -854,16 +821,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     if (!self.css_selectionChange) {
         return;
     }
-    NSString *rawText = [self p_outputText];
-    NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-    self.css_selectionChange(@{
-        @"text": rawText ?: @"",
-        @"selectionStart": @(outputSelectionRange.location),
-        @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-        @"compositionStart": @(-1),
-        @"compositionEnd": @(-1),
-        @"syncRevision": @(_textInputSyncRevision)
-    });
+    self.css_selectionChange([self p_currentTextInputStatePayload]);
 }
 
 - (void)copy:(id)sender {
@@ -948,16 +906,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
         self.css_textDidChange(@{@"text": newRawText, @"length": @([self p_calculateLengthForText:newRawText]), @"syncRevision": @(_textInputSyncRevision)});
     }
     if (self.css_textInputStateChange) {
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        self.css_textInputStateChange(@{
-            @"text": newRawText,
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"syncRevision": @(_textInputSyncRevision),
-            @"length": @([self p_calculateLengthForText:newRawText])
-        });
+        self.css_textInputStateChange([self p_currentTextInputStatePayload]);
     }
     [self scrollRangeToVisible:self.selectedRange];
 }
@@ -1569,6 +1518,33 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 - (NSRange)p_getOutputSelectionRange {
     return [self p_getOutputRangeWithInputRange:self.selectedRange];
+}
+
+- (NSDictionary *)p_currentTextInputStatePayload {
+    NSString *rawText = [self p_outputText] ?: @"";
+    NSRange outputSelectionRange = [self p_getOutputSelectionRange];
+    NSInteger compositionStart = -1;
+    NSInteger compositionEnd = -1;
+    UITextRange *markedRange = self.markedTextRange;
+    if (markedRange) {
+        NSInteger inputStart = [self offsetFromPosition:self.beginningOfDocument toPosition:markedRange.start];
+        NSInteger inputEnd = [self offsetFromPosition:self.beginningOfDocument toPosition:markedRange.end];
+        if (inputStart >= 0 && inputEnd >= inputStart) {
+            NSRange outputMarkedRange =
+                [self p_getOutputRangeWithInputRange:NSMakeRange((NSUInteger)inputStart, (NSUInteger)(inputEnd - inputStart))];
+            compositionStart = (NSInteger)outputMarkedRange.location;
+            compositionEnd = (NSInteger)NSMaxRange(outputMarkedRange);
+        }
+    }
+    return @{
+        @"text": rawText,
+        @"selectionStart": @(outputSelectionRange.location),
+        @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
+        @"compositionStart": @(compositionStart),
+        @"compositionEnd": @(compositionEnd),
+        @"syncRevision": @(_textInputSyncRevision),
+        @"length": @([self p_calculateLengthForText:rawText])
+    };
 }
 
 - (NSRange)p_getOutputRangeWithInputRange:(NSRange)inputRange {

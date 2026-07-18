@@ -36,6 +36,23 @@ class TextInputCallbackArbiterTest {
     }
 
     @Test
+    fun markedCompleteStateKeepsCompositionAndConsumesFollowingLegacyEcho() {
+        val arbiter = TextInputCallbackArbiter()
+        val markedState = TextInputState(
+            text = "english",
+            selectionStart = 7,
+            selectionEnd = 7,
+            compositionStart = 0,
+            compositionEnd = 7,
+        )
+
+        val complete = arbiter.onCompleteState(markedState)
+
+        assertEquals(TextRange(0, 7), complete.composition)
+        assertNull(arbiter.onLegacyTextChange(markedState.text, markedState))
+    }
+
+    @Test
     fun legacyOnlyPlatformStillUpdatesText() {
         val arbiter = TextInputCallbackArbiter()
 
