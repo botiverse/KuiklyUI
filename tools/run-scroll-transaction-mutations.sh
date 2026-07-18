@@ -634,17 +634,32 @@ mutate_installed_phase_rollback_boundary() {
 }
 
 mutate_installed_terminal_owner_recording() {
-  test "$(grep -Fc 'markComposeWritePhaseTerminal(phaseBeforeAnimatedWrite)' core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt)" -eq 3 || return 125
+  local target=core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
+  test "$(grep -Fc 'markComposeWritePhaseTerminal(phaseBeforeAnimatedWrite)' "$target")" -eq 3 || return 125
+  # Delete exactly the three 3-line recording blocks: anchored to line starts
+  # ([ \t]* indent, NOT \s+ — a leading \s+ eats the previous line's newline
+  # and glues the next statement onto it, breaking compilation; that made the
+  # connected tests "fail" for compilation instead of behavior).
   perl -0pi -e \
-    's/\s+if \((?:result|decoded)\.installed\) \{\n\s+markComposeWritePhaseTerminal\(phaseBeforeAnimatedWrite\)\n\s+\}\n//g' \
-    core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
+    's/^[ \t]*if \((?:result|decoded)\.installed\) \{\n[ \t]*markComposeWritePhaseTerminal\(phaseBeforeAnimatedWrite\)\n[ \t]*\}\n//mg' \
+    "$target"
+  # Application count must be exactly 3 blocks: 0 additions / 9 deletions.
+  test "$(git diff --numstat -- "$target" | awk '{print $1" "$2}')" = "0 9" || return 125
   grep -Fq 'markComposeWritePhaseTerminal(phaseBeforeAnimatedWrite)' \
-    core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt && return 125
-  ./gradlew :core:testDebugUnitTest \
+    "$target" && return 125
+  # The three connected regressions must fail for BEHAVIOR, not compilation:
+  # capture the output and treat any compile error as a broken mutation setup.
+  local out status
+  out="$(./gradlew :core:testDebugUnitTest \
     --tests com.tencent.kuikly.core.views.ScrollerViewAlreadySatisfiedPhaseTest.rejectedSuccessorDoesNotReviveInstalledPredecessorAfterTerminal \
     --tests com.tencent.kuikly.core.views.ScrollerViewAlreadySatisfiedPhaseTest.rejectedLegacySuccessorDoesNotReviveInstalledPredecessorAfterTerminal \
     --tests com.tencent.kuikly.core.views.ScrollerViewAlreadySatisfiedPhaseTest.rejectedInsetSuccessorDoesNotReviveInstalledPredecessorAfterTerminal \
-    --no-build-cache --no-daemon
+    --no-build-cache --no-daemon 2>&1)"
+  status=$?
+  echo "$out" | grep -Eq "^e: |Compilation error|compileDebug.*FAILED" && return 125
+  # Behavioral kill evidence: at least one test actually ran and failed.
+  echo "$out" | grep -q "FAILED" || return 125
+  return $status
 }
 
 mutate_preinstall_immediate_phase_witness() {
