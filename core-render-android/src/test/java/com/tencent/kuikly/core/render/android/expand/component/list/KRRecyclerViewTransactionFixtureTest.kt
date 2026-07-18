@@ -89,6 +89,30 @@ class KRRecyclerViewTransactionFixtureTest {
     }
 
     @Test
+    fun contentInsetBeforeAndroidContentAttachmentReturnsNotReadyWithoutClaimingAuthority() {
+        val recyclerView = recyclerWithUnattachedContent()
+        recyclerView.setPrivateField("latestComposeWriteOperation", 1L)
+        var resultCode = -1
+
+        recyclerView.call("contentInset", contentInsetWrite(operation = 2L)) { result ->
+            resultCode = (result as Map<*, *>)["resultCode"] as Int
+        }
+
+        assertEquals(NativeScrollWriteResultCode.NotReady.wireValue, resultCode)
+        assertEquals(1L, recyclerView.privateField("latestComposeWriteOperation"))
+    }
+
+    @Test
+    fun deferredContentInsetIsNotCurrentBeforeAndroidContentAttachment() {
+        val recyclerView = recyclerWithUnattachedContent()
+
+        recyclerView.call("contentInsetWhenEndDrag", contentInsetWrite(operation = 0L), null)
+
+        val handler = recyclerView.privateField<OverScrollHandler>("overScrollHandler")
+        assertFalse(handler.contentInsetWhenEndDragIsCurrent())
+    }
+
+    @Test
     fun listReuseRestoreRemainsPendingUntilAndroidContentIsAttached() {
         val recyclerView = KRRecyclerView(RuntimeEnvironment.getApplication())
         val listView = ListView<ListAttr, ListEvent>()
@@ -197,6 +221,16 @@ class KRRecyclerViewTransactionFixtureTest {
             field.get(slot) != null
         }
     }
+
+    private fun recyclerWithUnattachedContent(): KRRecyclerView =
+        KRRecyclerView(RuntimeEnvironment.getApplication()).apply {
+            addView(KRRecyclerContentView(RuntimeEnvironment.getApplication()))
+            assertEquals(0, childCount)
+            assertTrue(layoutManager != null)
+        }
+
+    private fun contentInsetWrite(operation: Long): String =
+        "0 0 0 0 0 0 0 $operation 300 100 0 -1 0 $operation 1 0 0 0 0 0"
 
     private object ScrollerViewOffsetReflection {
         fun setCurrentOffsetY(listView: ListView<*, *>, offset: Float) {

@@ -1450,12 +1450,17 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     private fun matchesExpectedLayout(token: OffsetWriteToken?, isVertical: Boolean): Boolean {
+        val attachedContentView = getChildAt(0) ?: return false
         if (token == null || token.expectedContentSize < 0f || token.expectedViewportSize < 0f) {
             return true
         }
         val expectedContent = kuiklyRenderContext.toPxI(token.expectedContentSize)
         val expectedViewport = kuiklyRenderContext.toPxI(token.expectedViewportSize)
-        val actualContent = if (isVertical) contentView.frameHeight else contentView.frameWidth
+        val actualContent = if (isVertical) {
+            attachedContentView.frameHeight
+        } else {
+            attachedContentView.frameWidth
+        }
         val actualViewport = if (isVertical) frameHeight else frameWidth
         val tolerance = max(2, kuiklyRenderContext.toPxI(1f))
         return abs(expectedContent - actualContent) <= tolerance &&
@@ -1948,7 +1953,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             }
             contentInsetWhenEndDragIsCurrent = {
                 val manager = layoutManager
-                manager != null && canApplyOffsetWrite(token) &&
+                manager != null && isContentViewAttached && canApplyOffsetWrite(token) &&
                     matchesExpectedLayout(token, manager.canScrollVertically())
             }
         }
@@ -1971,17 +1976,12 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             return
         }
         val insetLayoutManager = layoutManager
-        if (insetLayoutManager == null ||
-            !matchesExpectedLayout(token, insetLayoutManager.canScrollVertically())) {
-            callback?.invoke(
-                scrollWriteResult(
-                    if (insetLayoutManager == null) {
-                        NativeScrollWriteResultCode.NotReady
-                    } else {
-                        NativeScrollWriteResultCode.LayoutChanged
-                    },
-                ),
-            )
+        if (insetLayoutManager == null || !isContentViewAttached) {
+            callback?.invoke(scrollWriteResult(NativeScrollWriteResultCode.NotReady))
+            return
+        }
+        if (!matchesExpectedLayout(token, insetLayoutManager.canScrollVertically())) {
+            callback?.invoke(scrollWriteResult(NativeScrollWriteResultCode.LayoutChanged))
             return
         }
         val handler = overScrollHandler ?: run {
