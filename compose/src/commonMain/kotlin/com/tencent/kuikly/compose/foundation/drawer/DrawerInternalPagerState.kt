@@ -62,8 +62,14 @@ import com.tencent.kuikly.compose.ui.unit.Density
 import com.tencent.kuikly.compose.ui.unit.dp
 import com.tencent.kuikly.compose.ui.util.fastFirstOrNull
 import com.tencent.kuikly.compose.scroller.applyScrollViewOffsetDelta
+import com.tencent.kuikly.compose.scroller.applyScrollViewContentOffset
+import com.tencent.kuikly.compose.scroller.ScrollOffsetWriteIntent
 import com.tencent.kuikly.compose.scroller.convertAnimationSpecToSpringAnimation
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
+import com.tencent.kuikly.compose.scroller.scrollOffsetWriteIntentForClaim
+import com.tencent.kuikly.compose.gestures.ScrollOffsetCapabilityClaim
+import com.tencent.kuikly.compose.gestures.ScrollOffsetOwnerToken
+import com.tencent.kuikly.compose.gestures.ScrollOffsetWriteCapabilityKind
 import com.tencent.kuikly.compose.material3.internal.identityHashCode
 import com.tencent.kuikly.core.collection.fastMutableMapOf
 import kotlin.coroutines.EmptyCoroutineContext
@@ -254,13 +260,19 @@ abstract class DrawerInternalPagerState internal constructor(
     internal var snapStartDesyncPages = 0
     private var snapTargetReachedAlignmentRequested = false
     private var snapStallAlignmentRetryRequested = false
+    private var snapOffsetCapabilityClaim: ScrollOffsetCapabilityClaim? = null
 
     internal fun markSnapAnimationStarted(
         targetContentOffset: Int,
         targetPage: Int = -1,
         targetKey: Any? = null,
-        desyncPages: Int = 0
+        desyncPages: Int = 0,
+        capabilityClaim: ScrollOffsetCapabilityClaim? = null,
     ) {
+        if (snapOffsetCapabilityClaim != capabilityClaim) {
+            kuiklyInfo.releaseScrollOffsetCapabilityClaim(snapOffsetCapabilityClaim)
+        }
+        snapOffsetCapabilityClaim = capabilityClaim
         isSnapAnimating = true
         snapTargetContentOffset = targetContentOffset
         snapStartPageCount = pageCount
@@ -316,6 +328,8 @@ abstract class DrawerInternalPagerState internal constructor(
         snapStallAlignmentRetryRequested = false
         kuiklyInfo.snapAnchorOffsetCorrection = 0
         kuiklyInfo.appleScrollViewOffsetJob?.cancel()
+        kuiklyInfo.releaseScrollOffsetCapabilityClaim(snapOffsetCapabilityClaim)
+        snapOffsetCapabilityClaim = null
     }
 
     // --- Scroll position (using prefix sums) ---
@@ -449,11 +463,18 @@ abstract class DrawerInternalPagerState internal constructor(
         @AndroidXIntRange(from = 0) page: Int,
         @FloatRange(from = -0.5, to = 0.5) pageOffsetFraction: Float = 0.0f
     ) {
+        val capability = kuiklyInfo.beginScrollOffsetWriteCapability(
+            ScrollOffsetWriteCapabilityKind.Mutation,
+        )
         clearSnapAnimationState()
         if (isScrollInProgress) {
             pagerLayoutInfoState.value.coroutineScope.launch { stopScroll() }
         }
-        snapToItem(page.coerceInPageRange(), pageOffsetFraction, forceRemeasure = false)
+        try {
+            snapToItem(page.coerceInPageRange(), pageOffsetFraction, forceRemeasure = false)
+        } finally {
+            kuiklyInfo.endScrollOffsetWriteCapability(capability)
+        }
     }
 
     suspend fun animateScrollToPage(
@@ -479,15 +500,46 @@ abstract class DrawerInternalPagerState internal constructor(
 
         val finalTargetOffset = targetOffset
 
-        markSnapAnimationStarted(finalTargetOffset.toInt())
-
-        kuiklyInfo.run {
-            val targetOffsetDp = if (isVertical()) {
-                Offset(scrollView?.curOffsetX ?: 0f, max(0f, targetOffset / getDensity() - 0.01f))
-            } else {
-                Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView?.curOffsetY ?: 0f)
+        scrollableState.scroll(MutatePriority.Default) {
+            kuiklyInfo.run {
+                val targetOffsetDp = if (isVertical()) {
+                    Offset(scrollView?.curOffsetX ?: 0f, max(0f, targetOffset / getDensity() - 0.01f))
+                } else {
+                    Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView?.curOffsetY ?: 0f)
+                }
+                captureScrollOffsetOwnerToken()?.let { ownerToken ->
+                    val capabilityClaim = claimCurrentScrollOffsetWriteCapability(
+                        ScrollOffsetWriteCapabilityKind.Mutation,
+                        ownerToken,
+                    ) ?: return@let
+                    val accepted = applyScrollViewContentOffset(
+                        ownerToken = ownerToken,
+                        offsetX = targetOffsetDp.x,
+                        offsetY = targetOffsetDp.y,
+                        animated = true,
+                        intent = ScrollOffsetWriteIntent.MutationOwnedProgrammatic,
+                        reason = "drawer_animate_scroll_to_page",
+                        capabilityClaim = capabilityClaim,
+                        anchorValidator = {
+                            targetPage in 0 until pageCount &&
+                            finalTargetOffset.toInt() in 0..maxScrollOffset.toInt()
+                        },
+                        onCommitResult = { committed ->
+                            if (committed) {
+                                markSnapAnimationStarted(
+                                    finalTargetOffset.toInt(),
+                                    capabilityClaim = capabilityClaim,
+                                )
+                            } else {
+                                releaseScrollOffsetCapabilityClaim(capabilityClaim)
+                            }
+                        },
+                    )
+                    if (!accepted) {
+                        releaseScrollOffsetCapabilityClaim(capabilityClaim)
+                    }
+                }
             }
-            scrollView?.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
         }
     }
 
@@ -612,10 +664,12 @@ abstract class DrawerInternalPagerState internal constructor(
         delayMs: Long,
         layoutSize: Int = currentLayoutMainAxisSize()
     ) {
+        val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return
         val scheduledOrientation = layoutInfo.orientation
         val scheduledContentOffset = kuiklyInfo.contentOffset
         val scheduledComposeOffset = currentAbsoluteScrollOffset().toInt()
         val scheduledLayoutGeneration = alignmentLayoutGeneration
+        val scheduledCapabilityClaim = snapOffsetCapabilityClaim
         kuiklyInfo.run {
             appleScrollViewOffsetJob?.cancel()
             appleScrollViewOffsetJob = scope?.launch {
@@ -625,7 +679,9 @@ abstract class DrawerInternalPagerState internal constructor(
                     scheduledOrientation,
                     scheduledContentOffset,
                     scheduledComposeOffset,
-                    scheduledLayoutGeneration
+                    scheduledLayoutGeneration,
+                    ownerToken,
+                    scheduledCapabilityClaim,
                 )
             }
         }
@@ -641,13 +697,32 @@ abstract class DrawerInternalPagerState internal constructor(
         scheduledOrientation: Orientation,
         scheduledContentOffset: Int,
         scheduledComposeOffset: Int,
-        scheduledLayoutGeneration: Int
+        scheduledLayoutGeneration: Int,
+        ownerToken: ScrollOffsetOwnerToken,
+        capabilityClaim: ScrollOffsetCapabilityClaim?,
     ) {
         val contentOffsetInt = scrollableState.kuiklyInfo.contentOffset
 
-        if (scheduledLayoutGeneration != alignmentLayoutGeneration) return
+        if (scheduledLayoutGeneration != alignmentLayoutGeneration ||
+            !kuiklyInfo.isCurrentScrollOffsetOwner(ownerToken)
+        ) return
+        if (capabilityClaim != snapOffsetCapabilityClaim) return
+        if (capabilityClaim != null &&
+            !kuiklyInfo.isCurrentScrollOffsetCapabilityClaim(capabilityClaim)
+        ) {
+            if (snapOffsetCapabilityClaim == capabilityClaim) clearSnapAnimationState()
+            return
+        }
+        val writeIntent = scrollOffsetWriteIntentForClaim(capabilityClaim)
 
-        if (handleUnreachedSnapTarget(contentOffsetInt, scheduledContentOffset, layoutSize)) return
+        if (handleUnreachedSnapTarget(
+                contentOffsetInt,
+                scheduledContentOffset,
+                layoutSize,
+                ownerToken,
+                capabilityClaim,
+            )
+        ) return
 
         val itemsChangedDuringSnap =
             isSnapAnimating && snapStartPageCount != 0 && pageCount != snapStartPageCount
@@ -660,15 +735,29 @@ abstract class DrawerInternalPagerState internal constructor(
             }
             val relocatedTargetOffset = pageBoundaryOffset(relocatedTarget).toInt()
             updateScrollViewContentSize(layoutSize)
-            scrollPosition.requestPositionAndForgetLastKnownKey(relocatedTarget, 0f)
             val delta = relocatedTargetOffset - contentOffsetInt
-            if (delta != 0) {
-                applyScrollViewOffsetDelta(delta)
-            } else {
+            val commitRelocatedTarget = {
+                scrollPosition.requestPositionAndForgetLastKnownKey(relocatedTarget, 0f)
                 kuiklyInfo.composeOffset = relocatedTargetOffset.toFloat()
+                kuiklyInfo.snapAnchorOffsetCorrection = 0
+                clearSnapTrackingAfterAlignment()
             }
-            kuiklyInfo.snapAnchorOffsetCorrection = 0
-            clearSnapTrackingAfterAlignment()
+            if (delta == 0) {
+                commitRelocatedTarget()
+            } else {
+                applyScrollViewOffsetDelta(
+                    delta,
+                    ownerToken = ownerToken,
+                    intent = writeIntent,
+                    reason = "drawer_relocated_target",
+                    capabilityClaim = capabilityClaim,
+                    anchorValidator = {
+                        relocatedTarget in 0 until pageCount &&
+                            relocatedTargetOffset in 0..maxScrollOffset.toInt()
+                    },
+                    onCommitted = commitRelocatedTarget,
+                )
+            }
             return
         }
 
@@ -681,19 +770,36 @@ abstract class DrawerInternalPagerState internal constructor(
         val needFix = !isScrollInProgress && contentOffsetInt != composeOffsetInt
         updateScrollViewContentSize(layoutSize)
 
-        if (alignComposePositionToNativeBoundaryIfNeeded(composeOffsetInt, contentOffsetInt)) return
+        if (alignComposePositionToNativeBoundaryIfNeeded(
+                composeOffsetInt,
+                contentOffsetInt,
+                ownerToken,
+                writeIntent,
+                capabilityClaim,
+            )
+        ) return
 
+        val commitNativeFix = {
+            if (positionCorrupted) {
+                scrollPosition.requestPositionAndForgetLastKnownKey(correctTargetPage, 0f)
+                kuiklyInfo.composeOffset = correctTargetOffset.toFloat()
+            }
+            if (isSnapAnimating) clearSnapTrackingAfterAlignment()
+        }
         if (needFix) {
             val delta = composeOffsetInt - contentOffsetInt
-            applyScrollViewOffsetDelta(delta)
+            applyScrollViewOffsetDelta(
+                delta,
+                ownerToken = ownerToken,
+                intent = writeIntent,
+                reason = "drawer_fix_native_offset",
+                capabilityClaim = capabilityClaim,
+                anchorValidator = { composeOffsetInt in 0..maxScrollOffset.toInt() },
+                onCommitted = commitNativeFix,
+            )
+            return
         }
-
-        if (positionCorrupted) {
-            scrollPosition.requestPositionAndForgetLastKnownKey(correctTargetPage, 0f)
-            kuiklyInfo.composeOffset = correctTargetOffset.toFloat()
-        }
-
-        if (isSnapAnimating) clearSnapTrackingAfterAlignment()
+        commitNativeFix()
     }
 
     private fun updateScrollViewContentSize(layoutSize: Int) {
@@ -717,13 +823,23 @@ abstract class DrawerInternalPagerState internal constructor(
         val composeOffset = currentAbsoluteScrollOffset().toInt()
         val nativeOffset = kuiklyInfo.contentOffset
         if (abs(composeOffset - nativeOffset) > SNAP_TARGET_OFFSET_TOLERANCE) {
-            applyScrollViewOffsetDelta(composeOffset - nativeOffset)
+            val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return
+            applyScrollViewOffsetDelta(
+                composeOffset - nativeOffset,
+                ownerToken = ownerToken,
+                intent = ScrollOffsetWriteIntent.NonForcedAlignment,
+                reason = "drawer_fix_observed_offset",
+                anchorValidator = { composeOffset in 0..maxScrollOffset.toInt() },
+            )
         }
     }
 
     private fun alignComposePositionToNativeBoundaryIfNeeded(
         composeOffset: Int,
-        contentOffset: Int
+        contentOffset: Int,
+        ownerToken: ScrollOffsetOwnerToken,
+        writeIntent: ScrollOffsetWriteIntent,
+        capabilityClaim: ScrollOffsetCapabilityClaim?,
     ): Boolean {
         val composeOffsetOnBoundary = isPageBoundaryOffset(composeOffset)
         val currentPageSizeWS = pageSizeWithSpacingForPage(currentPage)
@@ -761,7 +877,20 @@ abstract class DrawerInternalPagerState internal constructor(
 
         if (!isPageBoundaryOffset(contentOffset)) {
             val delta = targetBoundary - contentOffset
-            applyScrollViewOffsetDelta(delta)
+            applyScrollViewOffsetDelta(
+                delta,
+                ownerToken = ownerToken,
+                intent = writeIntent,
+                reason = "drawer_fix_boundary_offset",
+                capabilityClaim = capabilityClaim,
+                anchorValidator = {
+                    targetPage in 0 until pageCount && targetBoundary in 0..maxScrollOffset.toInt()
+                },
+                onCommitted = {
+                    scrollPosition.requestPositionAndForgetLastKnownKey(targetPage, 0f)
+                },
+            )
+            return true
         }
         scrollPosition.requestPositionAndForgetLastKnownKey(targetPage, 0f)
         return true
@@ -777,12 +906,16 @@ abstract class DrawerInternalPagerState internal constructor(
         snapTargetReachedAlignmentRequested = false
         snapStallAlignmentRetryRequested = false
         kuiklyInfo.snapAnchorOffsetCorrection = 0
+        kuiklyInfo.releaseScrollOffsetCapabilityClaim(snapOffsetCapabilityClaim)
+        snapOffsetCapabilityClaim = null
     }
 
     private fun handleUnreachedSnapTarget(
         contentOffset: Int,
         scheduledContentOffset: Int,
-        layoutSize: Int
+        layoutSize: Int,
+        ownerToken: ScrollOffsetOwnerToken,
+        capabilityClaim: ScrollOffsetCapabilityClaim?,
     ): Boolean {
         if (!isSnapAnimating || hasSnapReachedTarget(contentOffset)) {
             snapStallAlignmentRetryRequested = false
@@ -805,10 +938,27 @@ abstract class DrawerInternalPagerState internal constructor(
         }
         val fallbackOffset = pageBoundaryOffset(fallbackPage).toInt()
         updateScrollViewContentSize(layoutSize)
-        scrollPosition.requestPositionAndForgetLastKnownKey(fallbackPage, 0f)
         val delta = fallbackOffset - contentOffset
-        if (delta != 0) applyScrollViewOffsetDelta(delta) else kuiklyInfo.composeOffset = fallbackOffset.toFloat()
-        clearSnapTrackingAfterAlignment()
+        val commitFallback = {
+            scrollPosition.requestPositionAndForgetLastKnownKey(fallbackPage, 0f)
+            kuiklyInfo.composeOffset = fallbackOffset.toFloat()
+            clearSnapTrackingAfterAlignment()
+        }
+        if (delta == 0) {
+            commitFallback()
+        } else {
+            applyScrollViewOffsetDelta(
+                delta,
+                ownerToken = ownerToken,
+                intent = scrollOffsetWriteIntentForClaim(capabilityClaim),
+                reason = "drawer_fallback_offset",
+                capabilityClaim = capabilityClaim,
+                anchorValidator = {
+                    fallbackPage in 0 until pageCount && fallbackOffset in 0..maxScrollOffset.toInt()
+                },
+                onCommitted = commitFallback,
+            )
+        }
         return true
     }
 

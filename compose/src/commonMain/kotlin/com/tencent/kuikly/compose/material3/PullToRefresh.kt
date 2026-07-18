@@ -32,6 +32,8 @@ import com.tencent.kuikly.compose.foundation.layout.height
 import com.tencent.kuikly.compose.foundation.layout.padding
 import com.tencent.kuikly.compose.foundation.lazy.LazyListScope
 import com.tencent.kuikly.compose.foundation.lazy.LazyListState
+import com.tencent.kuikly.compose.gestures.DeferredScrollOffsetRetryRequest
+import com.tencent.kuikly.compose.gestures.ScrollOffsetOperationToken
 import com.tencent.kuikly.compose.scroller.isAtTop
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
 import com.tencent.kuikly.compose.ui.Alignment
@@ -43,6 +45,11 @@ import com.tencent.kuikly.compose.ui.text.style.TextAlign
 import com.tencent.kuikly.compose.ui.unit.Dp
 import com.tencent.kuikly.compose.ui.unit.dp
 import com.tencent.kuikly.compose.ui.unit.sp
+import com.tencent.kuikly.core.views.ScrollOffsetCommitToken
+import com.tencent.kuikly.core.views.ScrollWriteReplayDisposition
+import com.tencent.kuikly.core.views.ScrollWriteReplayPolicy
+import com.tencent.kuikly.core.views.ScrollWriteResult
+import com.tencent.kuikly.core.views.ScrollWriteResultCode
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -50,11 +57,179 @@ import kotlin.math.abs
 
 // Set true to trace offset / state in Xcode console while debugging pull-to-refresh.
 private const val DEBUG_PULL_TO_REFRESH = false
+private const val PullToRefreshInsetRetryOperation = "pull_to_refresh_inset"
+
+private class PullToRefreshTerminalState {
+    var delivered: Boolean = false
+}
 
 private inline fun pullToRefreshLog(message: () -> String) {
     if (DEBUG_PULL_TO_REFRESH) {
         println("[PullToRefresh] ${message()}")
     }
+}
+
+private fun LazyListState.setPullToRefreshContentInset(
+    top: Float,
+    animated: Boolean,
+) {
+    val coordinator = kuiklyInfo.deferredScrollOffsetAlignmentCoordinator
+    val info = kuiklyInfo
+    val ownerToken = info.captureScrollOffsetOwnerToken() ?: return
+    val request = coordinator.beginRetryOperation(
+        PullToRefreshInsetRetryOperation,
+        ownerToken.scrollView.nativeInteractionEpoch,
+    )
+    val operation = info.beginScrollOffsetOperation(ownerToken) ?: run {
+        coordinator.completeRetryOperation(request)
+        return
+    }
+    applyPullToRefreshContentInset(
+        top,
+        animated,
+        request,
+        operation,
+        attempt = 1,
+        terminalState = PullToRefreshTerminalState(),
+    )
+}
+
+private fun LazyListState.applyPullToRefreshContentInset(
+    top: Float,
+    animated: Boolean,
+    request: DeferredScrollOffsetRetryRequest,
+    operationToken: ScrollOffsetOperationToken,
+    attempt: Int,
+    terminalState: PullToRefreshTerminalState,
+) {
+    val info = kuiklyInfo
+    val coordinator = info.deferredScrollOffsetAlignmentCoordinator
+    fun finish() {
+        if (terminalState.delivered) return
+        terminalState.delivered = true
+        info.completeScrollWriteInvalidationTerminal(operationToken.semanticOperationId)
+        info.cancelScrollWriteTimers(operationToken.semanticOperationId)
+        coordinator.completeRetryOperation(request)
+    }
+
+    info.registerScrollWriteInvalidationTerminal(operationToken.semanticOperationId, ::finish)
+    if (!coordinator.isCurrent(request) || !info.isLatestScrollOffsetOperation(operationToken)) {
+        finish()
+        return
+    }
+    val ownerToken = operationToken.ownerToken
+    var attemptTerminalHandled = false
+
+    fun finishOrReplay(result: ScrollWriteResult) {
+        if (attemptTerminalHandled) return
+        attemptTerminalHandled = true
+        if (!coordinator.isCurrent(request)) {
+            finish()
+            return
+        }
+        val latest = info.isLatestScrollOffsetOperation(operationToken)
+        val effectiveResult = when {
+            result.committed && info.isCurrentScrollOffsetOperation(operationToken) { true } -> result
+            !latest || result.committed -> result.copy(code = ScrollWriteResultCode.Stale)
+            else -> result
+        }
+        if (effectiveResult.committed) {
+            finish()
+            return
+        }
+        val decision = ScrollWriteReplayPolicy.decide(effectiveResult, attempt)
+        val retry = retry@{ enforceStartAckDeadline: Boolean ->
+            if (!coordinator.isCurrent(request)) return@retry
+            info.cancelScrollWriteTimers(operationToken.semanticOperationId)
+            val next = info.beginScrollOffsetRetry(
+                operationToken,
+                enforceStartAckDeadline = enforceStartAckDeadline,
+            ) ?: run {
+                finish()
+                return@retry
+            }
+            applyPullToRefreshContentInset(
+                top = top,
+                animated = animated,
+                request = request,
+                operationToken = next,
+                attempt = decision.nextAttempt,
+                terminalState = terminalState,
+            )
+        }
+        when (decision.disposition) {
+            ScrollWriteReplayDisposition.None -> {
+                if (effectiveResult.code == ScrollWriteResultCode.RollbackFailed) {
+                    info.quarantineAndCanonicalResync(ownerToken)
+                }
+                finish()
+            }
+            ScrollWriteReplayDisposition.ReplanImmediately -> {
+                if (info.canonicalResyncScrollState(ownerToken)) retry(true) else finish()
+            }
+            ScrollWriteReplayDisposition.WaitForInteractionTerminal -> {
+                coordinator.requestRetryAfterScrollEnd(
+                    request = request,
+                    onInvalidated = ::finish,
+                ) { retryRequest ->
+                    if (coordinator.isCurrent(retryRequest)) retry(false)
+                }
+                info.scheduleInteractionWatchdog(operationToken) {
+                    coordinator.discardPendingRetryOperation(request)
+                    if (info.canonicalResyncScrollState(ownerToken)) retry(false) else finish()
+                }
+            }
+            ScrollWriteReplayDisposition.WaitForRevision -> {
+                val view = ownerToken.scrollView
+                val revisionAlreadyAdvanced =
+                    view.nativeInteractionEpoch > operationToken.nativeInteractionEpoch ||
+                        view.nativeLayoutRevision > operationToken.layoutRevision ||
+                        view.nativeInsetRevision > operationToken.insetRevision
+                if (revisionAlreadyAdvanced) {
+                    retry(true)
+                } else {
+                    info.awaitScrollWriteRevision(operationToken) {
+                        info.cancelScrollWriteTimers(operationToken.semanticOperationId)
+                        retry(true)
+                    }
+                    info.scheduleRetryDeadline(operationToken) {
+                        finish()
+                    }
+                }
+            }
+        }
+    }
+
+    ownerToken.scrollView.setContentInset(
+        top = top,
+        animated = animated,
+        writeToken = ScrollOffsetCommitToken(
+            generation = ownerToken.nativeWriteGeneration,
+            requiresNativeIdle = true,
+            operationGeneration = operationToken.attemptGeneration,
+            expectedContentSize = operationToken.expectedContentSize / info.getDensity(),
+            expectedViewportSize = operationToken.expectedViewportSize / info.getDensity(),
+            bindingGeneration = ownerToken.bindingGeneration,
+            semanticOperationId = operationToken.semanticOperationId,
+            attemptGeneration = operationToken.attemptGeneration,
+            nativeInteractionEpoch = operationToken.nativeInteractionEpoch,
+            layoutRevision = operationToken.layoutRevision,
+            anchorRevision = operationToken.anchorRevision,
+            rangeRevision = operationToken.rangeRevision,
+            insetRevision = operationToken.insetRevision,
+        ),
+        onCommitResultDetailed = ::finishOrReplay,
+    )
+}
+
+private fun LazyListState.setPullToRefreshContentInsetWhenEndDrag(top: Float) {
+    val info = kuiklyInfo
+    val ownerToken = info.captureScrollOffsetOwnerToken() ?: return
+    val armToken = info.beginEndDragInsetArm(ownerToken) ?: return
+    ownerToken.scrollView.setContentInsetWhenEndDrag(
+        top = top,
+        writeToken = armToken,
+    )
 }
 
 /**
@@ -333,9 +508,9 @@ internal fun PullToRefreshItem(
                     state.updatePullState(PullState.IDLE)
                     state.updateProgress(0f)
                     val scrollViewOnLeave = scrollState.kuiklyInfo.scrollView
-                    scrollViewOnLeave?.setContentInsetWhenEndDrag(top = 0f)
+                    scrollState.setPullToRefreshContentInsetWhenEndDrag(top = 0f)
                     if (scrollViewOnLeave?.isDragging != true) {
-                        scrollViewOnLeave?.setContentInset(top = 0f, animated = false)
+                        scrollState.setPullToRefreshContentInset(top = 0f, animated = false)
                     }
                 }
                 return@collectLatest
@@ -363,7 +538,7 @@ internal fun PullToRefreshItem(
                     val pullStarted = state.startPullToRefresh(
                         snapshot = snapshot,
                         setEndDragInset = { inset ->
-                            scrollView?.setContentInsetWhenEndDrag(top = inset)
+                            scrollState.setPullToRefreshContentInsetWhenEndDrag(top = inset)
                         }
                     )
                     if (pullStarted) {
@@ -381,9 +556,9 @@ internal fun PullToRefreshItem(
                                     "pullDistance=$pullDistance progress=$progress"
                             }
                             state.updatePullState(PullState.IDLE)
-                            scrollView?.setContentInsetWhenEndDrag(top = 0f)
+                            scrollState.setPullToRefreshContentInsetWhenEndDrag(top = 0f)
                         } else {
-                            scrollView?.setContentInsetWhenEndDrag(
+                            scrollState.setPullToRefreshContentInsetWhenEndDrag(
                                 top = snapshot.endDragInset
                             )
                         }
@@ -397,10 +572,10 @@ internal fun PullToRefreshItem(
                         state.releasePullToRefresh(
                             snapshot = snapshot,
                             clearEndDragInset = {
-                                scrollView?.setContentInsetWhenEndDrag(top = 0f)
+                                scrollState.setPullToRefreshContentInsetWhenEndDrag(top = 0f)
                             },
                             clearCurrentInset = {
-                                scrollView?.setContentInset(top = 0f, animated = false)
+                                scrollState.setPullToRefreshContentInset(top = 0f, animated = false)
                             },
                             onRefresh = updatedOnRefresh
                         )
@@ -424,21 +599,24 @@ internal fun PullToRefreshItem(
             PullState.REFRESHING -> {
                 if (holdRefreshInset) {
                     pullToRefreshLog { "apply inset REFRESHING top=$refreshThresholdLogical animated=true" }
-                    scrollView?.setContentInset(top = refreshThresholdLogical, animated = true)
+                    scrollState.setPullToRefreshContentInset(
+                        top = refreshThresholdLogical,
+                        animated = true,
+                    )
                 } else {
                     pullToRefreshLog { "skip inset REFRESHING holdRefreshInset=false" }
-                    scrollView?.setContentInsetWhenEndDrag(top = 0f)
-                    scrollView?.setContentInset(top = 0f, animated = false)
+                    scrollState.setPullToRefreshContentInsetWhenEndDrag(top = 0f)
+                    scrollState.setPullToRefreshContentInset(top = 0f, animated = false)
                 }
             }
             PullState.IDLE -> {
                 // Never apply contentInset while dragging:
                 // - iOS: animated inset also animates contentOffset back to bounds
                 // - Android: non-animated inset calls setFinalTranslation and snaps overscroll to 0
-                scrollView?.setContentInsetWhenEndDrag(top = 0f)
+                scrollState.setPullToRefreshContentInsetWhenEndDrag(top = 0f)
                 if (!isDragging) {
                     pullToRefreshLog { "apply inset IDLE top=0 animated=true isDragging=false" }
-                    scrollView?.setContentInset(top = 0f, animated = true)
+                    scrollState.setPullToRefreshContentInset(top = 0f, animated = true)
                 } else {
                     pullToRefreshLog { "defer inset IDLE reset until drag end" }
                 }
@@ -456,7 +634,7 @@ internal fun PullToRefreshItem(
             .collect { isDragging ->
                 if (!isDragging && state.pullState == PullState.IDLE) {
                     pullToRefreshLog { "drag end: apply inset IDLE top=0 animated=true" }
-                    scrollState.kuiklyInfo.scrollView?.setContentInset(top = 0f, animated = true)
+                    scrollState.setPullToRefreshContentInset(top = 0f, animated = true)
                 }
             }
     }

@@ -92,6 +92,12 @@ internal fun ScrollableState.calculateAndUpdateContentSize() {
     } else {
         kuiklyInfo.currentContentSize = newContentSize
     }
+    if (oldContentSize != kuiklyInfo.currentContentSize) {
+        logScrollDiagnostic(
+            "content_size_update",
+            "old=$oldContentSize calculated=$newContentSize committed=${kuiklyInfo.currentContentSize}"
+        )
+    }
     kuiklyInfo.updateContentSizeToRender()
 }
 
@@ -275,7 +281,28 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
         return
     }
 
-    if (isScrolling && kuiklyInfo.scrollView?.isDragging != true) {
+    val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return
+    val immediateWriteContext = ScrollOffsetWriteContext(
+        intent = ScrollOffsetWriteIntent.NonForcedAlignment,
+        isComposeScrolling = isScrolling || isScrollInProgress,
+        nativeScrollPhase = ownerToken.scrollView.nativeScrollPhase,
+        isCurrentOwnerToken = kuiklyInfo.isCurrentScrollOffsetOwner(ownerToken),
+        isAnchorValid = needsTopExpand || needsScrollViewPullBack,
+    )
+    if (!shouldApplyScrollOffsetWrite(immediateWriteContext)) {
+        val coordinator = kuiklyInfo.deferredScrollOffsetAlignmentCoordinator
+        coordinator.requestRetryAfterScrollEnd(
+            key = StartAlignmentRetryOperation,
+            interactionEpoch = ownerToken.scrollView.nativeInteractionEpoch,
+        ) { retryRequest ->
+            if (coordinator.isCurrent(retryRequest)) {
+                this@tryExpandStartSize.tryExpandStartSizeNoScroll()
+            }
+        }
+        logScrollDiagnostic(
+            "immediate_alignment_skipped",
+            "nativePhase=${ownerToken.scrollView.nativeScrollPhase}"
+        )
         return
     }
 
@@ -286,74 +313,148 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
         val minDelta = (ScrollableStateConstants.DEFAULT_CONTENT_SIZE * density).toInt()
         delta = max(delta ?: minDelta, minDelta)
 
-        val littleDelta = (ScrollableStateConstants.SCROLL_THRESHOLD * density).toInt()
-        val maxDelta = kuiklyInfo.currentContentSize - kuiklyInfo.viewportSize - kuiklyInfo.contentOffset
-
-        if ((delta + littleDelta) > maxDelta) {
-            // 不够直接扩容offset，先扩容contentSize
-            kuiklyInfo.currentContentSize += (delta - maxDelta + minDelta)
-            kuiklyInfo.updateContentSizeToRender()
-        }
-
-        if (!kuiklyInfo.scrollView!!.isDragging) {
-            // 让滑动停下来
-            applyScrollViewOffsetDelta(littleDelta)
-        }
-        kuiklyInfo.offsetDirty = true
-        applyScrollViewOffsetDelta(delta)
+        applyScrollViewOffsetDelta(
+                delta,
+                ownerToken = ownerToken,
+                intent = ScrollOffsetWriteIntent.NonForcedAlignment,
+                reason = "expand_start_backfill",
+                anchorValidator = {
+                    kuiklyInfo.contentOffset <= 0 &&
+                        !isComposeAtTopForScrollSync() &&
+                        kuiklyInfo.offsetDirty
+                },
+                onCommitted = { kuiklyInfo.offsetDirty = true },
+            )
     } else if (offset > 0 && isComposeAtTopForScrollSync()) {
         // compose 到顶了，但是scrollview没到顶
-        applyScrollViewOffsetDelta(-offset)
-        kuiklyInfo.offsetDirty = false
+        applyScrollViewOffsetDelta(
+                -offset,
+                ownerToken = ownerToken,
+                intent = ScrollOffsetWriteIntent.NonForcedAlignment,
+                reason = "expand_start_pullback",
+                anchorValidator = {
+                    kuiklyInfo.contentOffset > 0 && isComposeAtTopForScrollSync()
+                },
+                onCommitted = { kuiklyInfo.offsetDirty = false },
+            )
     }
 }
 
 internal fun ScrollableState.tryExpandStartSizeNoScroll(forceExpand: Boolean = false) {
     if (this is PagerState || this is DrawerInternalPagerState) return
-    val scrollInProgress = { this@tryExpandStartSizeNoScroll.isScrollInProgress }
+    val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return
+    logScrollDiagnostic("alignment_schedule", "force=$forceExpand")
+    val scrollInProgress = {
+        val inProgress = this@tryExpandStartSizeNoScroll.isScrollInProgress
+        logScrollDiagnostic("alignment_progress_read", "force=$forceExpand value=$inProgress")
+        inProgress
+    }
     kuiklyInfo.run {
         scheduleDeferredScrollOffsetAlignment(
             coordinator = deferredScrollOffsetAlignmentCoordinator,
-            forceExpand = forceExpand,
-            isScrollInProgress = scrollInProgress,
+            contextProvider = {
+                ScrollOffsetWriteContext(
+                    intent = ScrollOffsetWriteIntent.NonForcedAlignment,
+                    isComposeScrolling = scrollInProgress(),
+                    nativeScrollPhase = ownerToken.scrollView.nativeScrollPhase,
+                    isCurrentOwnerToken = isCurrentScrollOffsetOwner(ownerToken),
+                    isAnchorValid = viewportSize > 0,
+                )
+            },
             cancelPendingAlignment = { it.cancel(ScrollViewOffsetAlignmentCancellation) },
             launchAlignment = { alignment -> scope?.launch { alignment() } },
             awaitAlignmentWindow = { delay(150) },
-            applyAlignment = applyAlignment@{ isCurrent ->
+            retryAfterScrollEnd = {
+                this@tryExpandStartSizeNoScroll.tryExpandStartSizeNoScroll()
+            },
+            applyAlignment = applyAlignment@{ isCurrent, requestRetry ->
+                logScrollDiagnostic("alignment_apply_enter", "force=$forceExpand current=${isCurrent()}")
+                val intent = ScrollOffsetWriteIntent.NonForcedAlignment
+                val currentOwner = isCurrent() && isCurrentScrollOffsetOwner(ownerToken)
+                val writeContext = ScrollOffsetWriteContext(
+                    intent = intent,
+                    isComposeScrolling = isScrollInProgress,
+                    nativeScrollPhase = ownerToken.scrollView.nativeScrollPhase,
+                    isCurrentOwnerToken = currentOwner,
+                    isAnchorValid = viewportSize > 0,
+                )
+                if (!shouldApplyScrollOffsetWrite(writeContext)) {
+                    if (currentOwner) {
+                        requestRetry()
+                    }
+                    logScrollDiagnostic(
+                        "alignment_apply_rejected",
+                        "force=$forceExpand current=$currentOwner"
+                    )
+                    return@applyAlignment
+                }
                 val minDelta = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
                 val epsilon = 0.5 * getDensity()  // 使用 0.5dp 作为误差值
                 val reachBtm = contentOffset + viewportSize - currentContentSize >= -epsilon
 
-                if (contentOffset <= 0 && !isComposeAtTopForScrollSync() && (forceExpand || scrollView?.isDragging != true)) {
+                if (contentOffset <= 0 && !isComposeAtTopForScrollSync() && scrollView?.isDragging != true) {
                     // 整体把offset 加一下
                     var delta = calculateBackExpandSize(contentOffset)
                     delta = max(delta ?: minDelta, minDelta)
+                    val previousContentSize = currentContentSize
                     val maxDelta = currentContentSize - viewportSize - contentOffset
                     if (delta > maxDelta) {
-                        // 不够直接扩容offset，先扩容contentSize
                         currentContentSize += (delta - maxDelta + minDelta)
                         updateContentSizeToRender()
                     }
+                    val expandedContentSize = currentContentSize
                     if (pageData?.isOhOs == true) {
                         if (!shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
                                 forceExpand = forceExpand,
-                                isScrollInProgress = scrollInProgress,
-                                isCurrent = isCurrent,
+                                contextProvider = {
+                                    writeContext.copy(
+                                        isComposeScrolling = scrollInProgress(),
+                                        nativeScrollPhase = ownerToken.scrollView.nativeScrollPhase,
+                                        isCurrentOwnerToken = isCurrent() &&
+                                            isCurrentScrollOffsetOwner(ownerToken),
+                                    )
+                                },
                                 awaitRefreshWindow = {
                                     // 鸿蒙扩容后不会立刻刷新，也没有刷新 API，华为建议添加 delay。
                                     delay(25)
                                 }
                             )
                         ) {
+                            if (currentContentSize == expandedContentSize) {
+                                currentContentSize = previousContentSize
+                                updateContentSizeToRender()
+                            }
+                            if (isCurrent()) {
+                                requestRetry()
+                            }
                             return@applyAlignment
                         }
                     }
-                    applyScrollViewOffsetDelta(delta)
-                    offsetDirty = true
+                    applyScrollViewOffsetDelta(
+                            delta,
+                            ownerToken = ownerToken,
+                            intent = intent,
+                            reason = "deferred_expand_start_backfill",
+                            anchorValidator = {
+                                contentOffset <= 0 && !isComposeAtTopForScrollSync()
+                            },
+                            onCommitted = { offsetDirty = true },
+                            onCommitResult = { committed -> if (!committed) requestRetry() },
+                            rollbackContentSize = previousContentSize,
+                        )
                 } else if (contentOffset > 0 && isComposeAtTopForScrollSync()) {
                     // compose 到顶了，但是scrollview没到顶
-                    applyScrollViewOffsetDelta(-contentOffset)
-                    offsetDirty = false
+                    applyScrollViewOffsetDelta(
+                            -contentOffset,
+                            ownerToken = ownerToken,
+                            intent = intent,
+                            reason = "deferred_expand_start_pullback",
+                            anchorValidator = {
+                                contentOffset > 0 && isComposeAtTopForScrollSync()
+                            },
+                            onCommitted = { offsetDirty = false },
+                            onCommitResult = { committed -> if (!committed) requestRetry() },
+                        )
                 } else if (isAtTop() && realContentSize == null && lastItemVisible() && scrollView?.isDragging != true) {
                     // 更新当前的contentSize大小
                     currentContentSize = calculateContentSize()
@@ -363,63 +464,89 @@ internal fun ScrollableState.tryExpandStartSizeNoScroll(forceExpand: Boolean = f
                     currentContentSize += minDelta
                     updateContentSizeToRender()
                 }
-            }
+                logScrollDiagnostic("alignment_apply_exit", "force=$forceExpand current=${isCurrent()}")
+            },
+            interactionEpochProvider = { ownerToken.scrollView.nativeInteractionEpoch },
         )
     }
 }
 
 internal fun <T> scheduleDeferredScrollOffsetAlignment(
     coordinator: DeferredScrollOffsetAlignmentCoordinator<T>,
-    forceExpand: Boolean,
-    isScrollInProgress: () -> Boolean,
+    contextProvider: () -> ScrollOffsetWriteContext,
     cancelPendingAlignment: (T) -> Unit,
     launchAlignment: (suspend () -> Unit) -> T?,
     awaitAlignmentWindow: suspend () -> Unit,
-    applyAlignment: suspend (isCurrent: () -> Boolean) -> Unit
+    retryAfterScrollEnd: () -> Unit,
+    applyAlignment: suspend (
+        isCurrent: () -> Boolean,
+        requestRetryAfterScrollEnd: () -> Unit,
+    ) -> Unit,
+    interactionEpochProvider: () -> Long? = { null },
 ) {
     coordinator.replacePendingAlignment(
+        retryOperationKey = StartAlignmentRetryOperation,
         cancelPendingAlignment = cancelPendingAlignment,
         launchAlignment = { request ->
             launchAlignment {
-                if (
-                    shouldApplyDeferredScrollOffsetAlignmentAfterWindow(
-                        forceExpand = forceExpand,
-                        isScrollInProgress = isScrollInProgress,
-                        awaitAlignmentWindow = awaitAlignmentWindow
-                    ) && coordinator.isCurrent(request)
-                ) {
-                    applyAlignment { coordinator.isCurrent(request) }
+                val shouldApply = shouldApplyDeferredScrollOffsetAlignmentAfterWindow(
+                    contextProvider = contextProvider,
+                    awaitAlignmentWindow = awaitAlignmentWindow,
+                )
+                if (!coordinator.isCurrent(request)) return@launchAlignment
+                if (!shouldApply) {
+                    if (contextProvider().intent == ScrollOffsetWriteIntent.NonForcedAlignment) {
+                        coordinator.requestRetryAfterScrollEnd(
+                            request = request,
+                            key = StartAlignmentRetryOperation,
+                            interactionEpoch = interactionEpochProvider(),
+                        ) { retryRequest ->
+                            if (coordinator.isCurrent(retryRequest)) {
+                                retryAfterScrollEnd()
+                            }
+                        }
+                    }
+                    return@launchAlignment
                 }
+                applyAlignment(
+                    { coordinator.isCurrent(request) },
+                    {
+                        coordinator.requestRetryAfterScrollEnd(
+                            request = request,
+                            key = StartAlignmentRetryOperation,
+                            interactionEpoch = interactionEpochProvider(),
+                        ) { retryRequest ->
+                            if (coordinator.isCurrent(retryRequest)) {
+                                retryAfterScrollEnd()
+                            }
+                        }
+                    },
+                )
             }
         }
     )
 }
 
 internal suspend fun shouldApplyDeferredScrollOffsetAlignmentAfterWindow(
-    forceExpand: Boolean,
-    isScrollInProgress: () -> Boolean,
-    awaitAlignmentWindow: suspend () -> Unit
+    contextProvider: () -> ScrollOffsetWriteContext,
+    awaitAlignmentWindow: suspend () -> Unit,
 ): Boolean {
     awaitAlignmentWindow()
-    // Native dragging is already false during settling, while Compose still owns an active
-    // scroll. Scroll end clears that state and schedules alignment again.
-    return shouldApplyDeferredScrollOffsetAlignment(isScrollInProgress(), forceExpand)
+    return shouldApplyDeferredScrollOffsetAlignment(contextProvider())
 }
 
 internal fun shouldApplyDeferredScrollOffsetAlignment(
-    isScrollInProgress: Boolean,
-    forceExpand: Boolean
-): Boolean = forceExpand || !isScrollInProgress
+    context: ScrollOffsetWriteContext,
+): Boolean = shouldApplyScrollOffsetWrite(context)
 
 internal suspend fun shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
     forceExpand: Boolean,
-    isScrollInProgress: () -> Boolean,
-    isCurrent: () -> Boolean,
+    contextProvider: () -> ScrollOffsetWriteContext,
     awaitRefreshWindow: suspend () -> Unit
 ): Boolean {
     awaitRefreshWindow()
-    return isCurrent() && shouldApplyDeferredScrollOffsetAlignment(
-        isScrollInProgress = isScrollInProgress(),
-        forceExpand = forceExpand
-    )
+    val context = contextProvider()
+    return context.isCurrentOwnerToken &&
+        context.intent == ScrollOffsetWriteIntent.NonForcedAlignment &&
+        shouldApplyDeferredScrollOffsetAlignment(context)
 }
