@@ -189,7 +189,9 @@ jobs:
           tools/ohos-renderer-tests/run-scroll-replacement-policy-test.sh
 
   ohos-native:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # KuiklyUI is a personal repository, so organization-scoped Blacksmith runners never pick up
+    # these jobs. Keep the existing pinned HarmonyOS container on the official hosted runner.
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
     timeout-minutes: 60
@@ -201,6 +203,8 @@ jobs:
         with:
           ref: ${{ env.EXPECTED_HEAD_SHA }}
           fetch-depth: 0
+      - name: Trust the mounted workspace inside the job container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Sync OHOS dependency metadata
         working-directory: ohosApp
         run: |
@@ -230,6 +234,8 @@ jobs:
           fetch-depth: 0
       - name: Audit every scroll writer and prove fail-closed behavior
         run: python3 tools/check-scroll-writer-allowlist.py --mutation-test
+      - name: Reject stale native callbacks retained by Compose node initialization
+        run: python3 tools/check-compose-node-event-freshness.py --self-test
   mutation-common-android:
     runs-on: ubuntu-latest
     # 46 mutation groups, each a full gradle run; cold-cache worst case >60min
@@ -263,7 +269,7 @@ jobs:
         run: tools/run-scroll-transaction-mutations.sh ios
 
   mutation-ohos:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
     timeout-minutes: 30
@@ -275,6 +281,8 @@ jobs:
         with:
           ref: ${{ env.EXPECTED_HEAD_SHA }}
           fetch-depth: 0
+      - name: Trust the mounted workspace inside the job container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Sync OHOS dependency metadata
         working-directory: ohosApp
         run: |

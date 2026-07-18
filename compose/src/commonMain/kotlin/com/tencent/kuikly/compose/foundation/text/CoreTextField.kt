@@ -24,11 +24,11 @@ import androidx.compose.runtime.currentCompositeKeyHash
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import com.tencent.kuikly.compose.KuiklyApplier
 import com.tencent.kuikly.compose.extension.SetEventElement
 import com.tencent.kuikly.compose.extension.SetPropElement
+import com.tencent.kuikly.compose.extension.updatedNodeEvent
 import com.tencent.kuikly.compose.foundation.interaction.Interaction
 import com.tencent.kuikly.compose.foundation.interaction.MutableInteractionSource
 import com.tencent.kuikly.compose.foundation.layout.Box
@@ -78,6 +78,7 @@ import com.tencent.kuikly.compose.ui.unit.dp
 import com.tencent.kuikly.compose.ui.unit.isSpecified
 import com.tencent.kuikly.compose.ui.util.fastRoundToInt
 import com.tencent.kuikly.core.views.AutoHeightTextAreaView
+import com.tencent.kuikly.core.views.InputEventHandlerFn
 import com.tencent.kuikly.core.views.LengthLimitType
 import com.tencent.kuikly.compose.foundation.text.selection.LocalTextSelectionColors
 import com.tencent.kuikly.core.views.TextAreaAttr
@@ -195,14 +196,6 @@ internal fun CoreTextField(
 
     val autoHeightTextAreaView = remember(singleLineNew) { AutoHeightTextAreaView(singleLineNew) }
     val kuiklyKeyboardController = keyboardController as? KuiklySoftwareKeyboardController
-    // ComposeNode.factory installs the native event callbacks only once for a retained node. Keep
-    // every value read by those long-lived callbacks behind an updated state holder so prewarm or
-    // keepalive recomposition cannot leave the handler enforcing its initial disabled/read-only
-    // state after the visible page becomes editable.
-    val currentEnabled = rememberUpdatedState(enabled)
-    val currentReadOnly = rememberUpdatedState(readOnly)
-    val currentKuiklyKeyboardController = rememberUpdatedState(kuiklyKeyboardController)
-    val currentFocusManager = rememberUpdatedState(focusManager)
     DisposableEffect(autoHeightTextAreaView, kuiklyKeyboardController) {
         onDispose {
             kuiklyKeyboardController?.unregisterInput(autoHeightTextAreaView)
@@ -377,6 +370,55 @@ internal fun CoreTextField(
     val (propsAndEvents, others) = remember(modifier) { modifier.splitByPropOrEvent() }
     val combinedModifier = others.then(focusModifier)
 
+    // ComposeNode.factory retains these native callbacks for the node lifetime. The stable wrapper
+    // prevents a prewarmed disabled/read-only composition from becoming the callback's permanent
+    // policy after the same node is activated, and also refreshes the reverse transition.
+    val inputFocusEvent: InputEventHandlerFn = updatedNodeEvent { params ->
+        if (params.focusIntentOnly) {
+            if (enabled && !readOnly) {
+                val intentDecision =
+                    kuiklyKeyboardController?.onNativeFocusIntent(autoHeightTextAreaView)
+                if (
+                    intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
+                    intentDecision == null
+                ) {
+                    focusRequester.focusIfAttached()
+                }
+            }
+        } else {
+            val nativeFocusDecision = kuiklyKeyboardController?.onNativeFocus(
+                autoHeightTextAreaView,
+                params.focusRequestId,
+            )
+            if (!enabled || readOnly) {
+                kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
+            } else {
+                when (nativeFocusDecision) {
+                    InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
+                    null -> {
+                        // Native focus is only an intent. Keep the native editor as first responder
+                        // only after FocusOwner commits the request.
+                        if (!focusRequester.focusIfAttached()) {
+                            kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
+                        }
+                    }
+                    InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+                    InputFocusTargetReducer.NativeFocusDecision.IgnoreStale -> Unit
+                }
+            }
+        }
+    }
+    val inputBlurEvent: InputEventHandlerFn = updatedNodeEvent { params ->
+        if (
+            kuiklyKeyboardController?.onNativeBlur(
+                autoHeightTextAreaView,
+                params.focusRequestId,
+            ) == InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear
+        ) {
+            focusManager.clearFocus()
+        }
+    }
+
     Box(modifier = pointerModifier.then(combinedModifier), propagateMinConstraints = true) {
         decorationBox {
             ComposeNode<ComposeUiNode, KuiklyApplier>(
@@ -385,57 +427,8 @@ internal fun CoreTextField(
                     KNode(textView) {
                         getViewAttr().autofocus(false)
                         getViewAttr().enablePinyinCallback(true)
-                        getViewEvent().inputFocus { params ->
-                            val eventEnabled = currentEnabled.value
-                            val eventReadOnly = currentReadOnly.value
-                            val eventKeyboardController = currentKuiklyKeyboardController.value
-                            if (params.focusIntentOnly) {
-                                if (!eventEnabled || eventReadOnly) {
-                                    return@inputFocus
-                                }
-                                val intentDecision =
-                                    eventKeyboardController?.onNativeFocusIntent(autoHeightTextAreaView)
-                                if (
-                                    intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
-                                    intentDecision == null
-                                ) {
-                                    focusRequester.focusIfAttached()
-                                }
-                                return@inputFocus
-                            }
-                            val nativeFocusDecision = eventKeyboardController?.onNativeFocus(
-                                autoHeightTextAreaView,
-                                params.focusRequestId,
-                            )
-                            if (!eventEnabled || eventReadOnly) {
-                                eventKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
-                                return@inputFocus
-                            }
-                            when (nativeFocusDecision) {
-                                InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
-                                null -> {
-                                    // Native focus is only an intent. Keep the native editor as
-                                    // first responder only after FocusOwner commits the request.
-                                    // requestFocus() returns Unit, so it cannot close captured /
-                                    // disabled / lifecycle rejection races.
-                                    if (!focusRequester.focusIfAttached()) {
-                                        eventKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
-                                    }
-                                }
-                                InputFocusTargetReducer.NativeFocusDecision.Confirmed,
-                                InputFocusTargetReducer.NativeFocusDecision.IgnoreStale -> Unit
-                            }
-                        }
-                        getViewEvent().inputBlur { params ->
-                            if (
-                                currentKuiklyKeyboardController.value?.onNativeBlur(
-                                    autoHeightTextAreaView,
-                                    params.focusRequestId,
-                                ) == InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear
-                            ) {
-                                currentFocusManager.value.clearFocus()
-                            }
-                        }
+                        getViewEvent().inputFocus(inputFocusEvent)
+                        getViewEvent().inputBlur(inputBlurEvent)
 
                     }
                 },
