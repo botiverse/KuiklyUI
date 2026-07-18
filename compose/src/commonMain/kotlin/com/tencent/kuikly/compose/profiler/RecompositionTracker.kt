@@ -106,7 +106,9 @@ internal class RecompositionTracker {
      * traceEventEnd 精确路径查此缓存，避免依赖已被覆盖的 prevValue。
      * 每帧结束时（onFrameEnd）清空。
      */
+    /** apply 线程写入、context 线程读取，与 events 同族共享，须加锁 */
     private val stateChangeCache = mutableMapOf<Int, String>()
+    private val stateChangeCacheLock = createSynchronizedObject()
 
     /**
      * State 身份注册表。
@@ -272,7 +274,7 @@ internal class RecompositionTracker {
         this.frameCounter = 0L
         this.flushedFrameCounter = 0L
         synchronized(eventsLock) { events.clear() }
-        currentFrameStateChanges.clear()
+        synchronized(stateChangeCacheLock) { currentFrameStateChanges.clear() }
         stateChangeAccumulator.clear()
         composableAccumulator.clear()
         stateIdentityRegistry.clear()
@@ -313,8 +315,8 @@ internal class RecompositionTracker {
         synchronized(eventsLock) { events.clear() }
         frameCounter = 0L
         flushedFrameCounter = 0L
-        currentFrameStateChanges.clear()
-        stateChangeCache.clear()
+        synchronized(stateChangeCacheLock) { currentFrameStateChanges.clear() }
+        synchronized(stateChangeCacheLock) { stateChangeCache.clear() }
         stateChangeAccumulator.clear()
         composableAccumulator.clear()
         stateIdentityRegistry.clear()
@@ -387,7 +389,7 @@ internal class RecompositionTracker {
         currentFrameSampled = shouldSampleFrame()
         if (!currentFrameSampled) return false
 
-        currentFrameStateChanges.clear()
+        synchronized(stateChangeCacheLock) { currentFrameStateChanges.clear() }
         currentFrameRecomposedCount = 0
         val event = RecompositionFrameStartEvent(
             timestampMs = DateTime.currentTimestamp(),
@@ -421,7 +423,7 @@ internal class RecompositionTracker {
         flushCurrentFrameEvents()
         currentFrameRecomposedCount = 0
         currentFrameSampled = false
-        stateChangeCache.clear()
+        synchronized(stateChangeCacheLock) { stateChangeCache.clear() }
     }
 
     /**
@@ -522,14 +524,15 @@ internal class RecompositionTracker {
                 // 查 stateChangeCache 获取 apply callback 里已格式化好的 prev→now 字符串
                 triggerStates = stateObjects.map { state ->
                     val hash = com.tencent.kuikly.compose.material3.internal.identityHashCode(state)
-                    stateChangeCache[hash] ?: stateIdentityRegistry.formatState(state)
+                    synchronized(stateChangeCacheLock) { stateChangeCache[hash] }
+                        ?: stateIdentityRegistry.formatState(state)
                 }
             } else {
                 // Forced recomposition or initial composition — use sentinel from observer
                 triggerStates = compositionObserver.getCurrentScopeTriggerStates() ?: emptyList()
             }
         } else {
-            triggerStates = currentFrameStateChanges.toList()
+            triggerStates = synchronized(stateChangeCacheLock) { currentFrameStateChanges.toList() }
         }
 
         // === 参数变更检测（解析编译器 $dirty bitmask） ===
@@ -713,7 +716,7 @@ internal class RecompositionTracker {
 
                 // 缓存格式化结果，供后续 traceEventEnd 精确路径使用
                 val hash = com.tencent.kuikly.compose.material3.internal.identityHashCode(obj)
-                stateChangeCache[hash] = stateKey
+                synchronized(stateChangeCacheLock) { stateChangeCache[hash] = stateKey }
             }
             // Update lastSeen value for each changed state after formatting,
             // so next apply can show the correct prev value.
@@ -777,7 +780,7 @@ internal class RecompositionTracker {
 
     private fun onStateChanged(stateKey: String) {
         val now = DateTime.currentTimestamp()
-        currentFrameStateChanges.add(stateKey)
+        synchronized(stateChangeCacheLock) { currentFrameStateChanges.add(stateKey) }
 
         // 已有记录的直接更新；新 key 需检查上限（防止无限积累）
         if (stateChangeAccumulator.containsKey(stateKey)) {
