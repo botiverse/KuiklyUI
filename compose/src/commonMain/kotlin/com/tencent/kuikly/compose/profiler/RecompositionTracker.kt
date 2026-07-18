@@ -123,6 +123,14 @@ internal class RecompositionTracker {
     private val traceStackLock = createSynchronizedObject()
 
     /**
+     * events 缓冲区锁。events 会在多个线程被读写：
+     * Kuikly context 线程（onFrameEnd/flush）与 Snapshot apply 线程（apply observer 内
+     * addEvent/flush），不加锁时 flushCurrentFrameEvents 的 subList 快照会抛
+     * ConcurrentModificationException（Hands 280564ed）。
+     */
+    private val eventsLock = createSynchronizedObject()
+
+    /**
      * Overlay 子树过滤深度计数器。
      * 当 traceEventStart 检测到当前 info 属于 Overlay 内部 composable（匹配 overlayPrefixes）时，
      * 计数器递增；其所有子 composable 的 traceStart/End 也不做任何记录，直到对应的 traceEnd 将计数器恢复。
@@ -263,7 +271,7 @@ internal class RecompositionTracker {
         this.sessionId = "rcp-${startTimestampMs}-${Random.nextInt(10000)}"
         this.frameCounter = 0L
         this.flushedFrameCounter = 0L
-        events.clear()
+        synchronized(eventsLock) { events.clear() }
         currentFrameStateChanges.clear()
         stateChangeAccumulator.clear()
         composableAccumulator.clear()
@@ -302,7 +310,7 @@ internal class RecompositionTracker {
      * 重置所有采集数据。
      */
     fun reset() {
-        events.clear()
+        synchronized(eventsLock) { events.clear() }
         frameCounter = 0L
         flushedFrameCounter = 0L
         currentFrameStateChanges.clear()
@@ -397,7 +405,9 @@ internal class RecompositionTracker {
         if (!currentFrameSampled) return
 
         val now = DateTime.currentTimestamp()
-        val frameStart = events.lastOrNull { it is RecompositionFrameStartEvent } as? RecompositionFrameStartEvent
+        val frameStart = synchronized(eventsLock) {
+            events.lastOrNull { it is RecompositionFrameStartEvent }
+        } as? RecompositionFrameStartEvent
         val durationMs = if (frameStart != null) now - frameStart.timestampMs else 0L
 
         val endEvent = RecompositionFrameEndEvent(
@@ -645,18 +655,23 @@ internal class RecompositionTracker {
      * the first flush, the second call finds no FrameStartEvent and outputs nothing.
      */
     private fun flushCurrentFrameEvents() {
-        val lastStartIndex = events.indexOfLast { it is RecompositionFrameStartEvent }
-        if (lastStartIndex < 0) return
-        val frameEvents = events.subList(lastStartIndex, events.size).toList()
+        // 锁内只取快照并移除已 flush 事件；strategy 回调放锁外，避免回调里
+        // 再进 tracker（如同帧二次 flush / 写文件）造成重入死锁。
+        val frameEvents = synchronized(eventsLock) {
+            val lastStartIndex = events.indexOfLast { it is RecompositionFrameStartEvent }
+            if (lastStartIndex < 0) return
+            val snapshot = events.subList(lastStartIndex, events.size).toList()
+            // Remove flushed events so a second flush call for the same frame outputs nothing
+            while (events.size > lastStartIndex) {
+                events.removeLast()
+            }
+            snapshot
+        }
         if (frameEvents.any { it is ComposableRecomposedEvent }) {
             flushedFrameCounter++
             for (strategy in outputStrategies) {
                 strategy.onFrameComplete(frameEvents)
             }
-        }
-        // Remove flushed events so a second flush call for the same frame outputs nothing
-        while (events.size > lastStartIndex) {
-            events.removeLast()
         }
     }
 
@@ -667,10 +682,12 @@ internal class RecompositionTracker {
     }
 
     private fun addEvent(event: RecompositionEvent) {
-        events.addLast(event)
-        // 缓冲区溢出时丢弃最旧事件（O(1)）
-        while (events.size > config.maxEventBufferSize) {
-            events.removeFirst()
+        synchronized(eventsLock) {
+            events.addLast(event)
+            // 缓冲区溢出时丢弃最旧事件（O(1)）
+            while (events.size > config.maxEventBufferSize) {
+                events.removeFirst()
+            }
         }
     }
 
@@ -708,7 +725,9 @@ internal class RecompositionTracker {
             // At this point all traceEventStart/End calls for this apply batch are complete.
             if (currentFrameRecomposedCount > 0 && currentFrameSampled) {
                 val now = DateTime.currentTimestamp()
-                val frameStart = events.lastOrNull { it is RecompositionFrameStartEvent } as? RecompositionFrameStartEvent
+                val frameStart = synchronized(eventsLock) {
+                    events.lastOrNull { it is RecompositionFrameStartEvent }
+                } as? RecompositionFrameStartEvent
                 val durationMs = if (frameStart != null) now - frameStart.timestampMs else 0L
                 addEvent(RecompositionFrameEndEvent(
                     timestampMs = now,
