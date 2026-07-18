@@ -324,6 +324,11 @@ internal fun CoreTextField(
         focusRequester = focusRequester,
         interactionSource = interactionSource
     ) {
+        println(
+            "[KuiklyTextFocusTrace][common] event=focusChanged pager=${autoHeightTextAreaView.pagerId} " +
+                "nativeRef=${autoHeightTextAreaView.nativeRef} focused=${it.isFocused} enabled=$enabled readOnly=$readOnly " +
+                "attached=${focusRequester.hasAttachedNodes()} previousHasFocus=$hasFocus"
+        )
         if (hasFocus == it.isFocused) {
             return@textFieldFocusModifier
         }
@@ -361,6 +366,10 @@ internal fun CoreTextField(
         state,
         focusRequester,
         readOnly,
+        traceLabel = {
+            "pager=${autoHeightTextAreaView.pagerId} nativeRef=${autoHeightTextAreaView.nativeRef} " +
+                "enabled=$enabled readOnly=$readOnly"
+        },
 //        offsetMapping,
     )
 
@@ -377,6 +386,12 @@ internal fun CoreTextField(
                         getViewAttr().autofocus(false)
                         getViewAttr().enablePinyinCallback(true)
                         getViewEvent().inputFocus { params ->
+                            println(
+                                "[KuiklyTextFocusTrace][common] event=inputFocus pager=${autoHeightTextAreaView.pagerId} " +
+                                    "nativeRef=${autoHeightTextAreaView.nativeRef} requestId=${params.focusRequestId} " +
+                                    "intentOnly=${params.focusIntentOnly} enabled=$enabled readOnly=$readOnly " +
+                                    "attached=${focusRequester.hasAttachedNodes()}"
+                            )
                             if (params.focusIntentOnly) {
                                 if (!enabled || readOnly) {
                                     return@inputFocus
@@ -387,7 +402,11 @@ internal fun CoreTextField(
                                     intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
                                     intentDecision == null
                                 ) {
-                                    focusRequester.focusIfAttached()
+                                    val approved = focusRequester.focusIfAttached()
+                                    println(
+                                        "[KuiklyTextFocusTrace][common] event=inputFocusIntentApproval " +
+                                            "nativeRef=${autoHeightTextAreaView.nativeRef} approved=$approved"
+                                    )
                                 }
                                 return@inputFocus
                             }
@@ -406,7 +425,12 @@ internal fun CoreTextField(
                                     // first responder only after FocusOwner commits the request.
                                     // requestFocus() returns Unit, so it cannot close captured /
                                     // disabled / lifecycle rejection races.
-                                    if (!focusRequester.focusIfAttached()) {
+                                    val approved = focusRequester.focusIfAttached()
+                                    println(
+                                        "[KuiklyTextFocusTrace][common] event=inputFocusApproval " +
+                                            "nativeRef=${autoHeightTextAreaView.nativeRef} decision=$nativeFocusDecision approved=$approved"
+                                    )
+                                    if (!approved) {
                                         kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
                                     }
                                 }
@@ -415,6 +439,10 @@ internal fun CoreTextField(
                             }
                         }
                         getViewEvent().inputBlur { params ->
+                            println(
+                                "[KuiklyTextFocusTrace][common] event=inputBlur pager=${autoHeightTextAreaView.pagerId} " +
+                                    "nativeRef=${autoHeightTextAreaView.nativeRef} requestId=${params.focusRequestId}"
+                            )
                             if (
                                 kuiklyKeyboardController?.onNativeBlur(
                                     autoHeightTextAreaView,

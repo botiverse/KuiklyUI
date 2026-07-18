@@ -69,25 +69,34 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     private var keyboardHidden = false
 
     override fun show() {
+        val target = focusReducer.desiredView ?: focusReducer.observedView
+        target?.let { trace("show", it) }
         keyboardHidden = false
-        scheduleReconcile(focusReducer.desiredView ?: focusReducer.observedView)
+        target?.let { trace("showUnhidden", it) }
+        scheduleReconcile(target)
     }
 
     override fun hide() {
-        keyboardHidden = true
         val target = focusReducer.desiredView ?: focusReducer.observedView
+        target?.let { trace("hide", it) }
+        keyboardHidden = true
         target?.let(focusReducer::onBlurRequested)
+        target?.let { trace("hideAuthorityRevoked", it) }
         scheduleReconcile(target)
     }
 
     internal fun startInput(view: AutoHeightTextAreaView) {
+        trace("startInput", view)
         keyboardHidden = false
         execute(focusReducer.start(view))
+        trace("startInputReduced", view)
         scheduleReconcile(view)
     }
 
     internal fun stopInput(view: AutoHeightTextAreaView) {
+        trace("stopInput", view)
         execute(focusReducer.stop(view))
+        trace("stopInputReduced", view)
         scheduleReconcile(view)
     }
 
@@ -95,7 +104,9 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
         view: AutoHeightTextAreaView,
         requestId: Long?,
     ): InputFocusTargetReducer.NativeFocusDecision {
+        trace("onNativeFocus requestId=$requestId", view)
         val decision = focusReducer.onNativeFocus(view, requestId)
+        trace("onNativeFocus decision=$decision", view)
         if (decision == InputFocusTargetReducer.NativeFocusDecision.IgnoreStale) {
             // The callback proves that native focus actually landed, even though the request no
             // longer belongs to the current generation. Do not publish the detached/old editor as
@@ -108,40 +119,58 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
 
     internal fun onNativeFocusIntent(
         view: AutoHeightTextAreaView,
-    ): InputFocusTargetReducer.NativeFocusDecision =
-        focusReducer.onNativeFocusIntent(view)
+    ): InputFocusTargetReducer.NativeFocusDecision {
+        trace("onNativeFocusIntent", view)
+        return focusReducer.onNativeFocusIntent(view).also { decision ->
+            trace("onNativeFocusIntent decision=$decision", view)
+        }
+    }
 
     internal fun onNativeBlur(
         view: AutoHeightTextAreaView,
         requestId: Long?,
     ): InputFocusTargetReducer.NativeBlurDecision {
+        trace("onNativeBlur requestId=$requestId", view)
         val decision = focusReducer.onNativeBlur(view, requestId)
+        trace("onNativeBlur decision=$decision", view)
         scheduleReconcile(view)
         return decision
     }
 
     internal fun rejectNativeFocus(view: AutoHeightTextAreaView) {
+        trace("rejectNativeFocus", view)
         focusReducer.rejectNativeFocus(view)
         view.blur(focusReducer.generation)
+        trace("rejectNativeFocusBlurSent", view)
     }
 
     internal fun unregisterInput(view: AutoHeightTextAreaView) {
+        trace("unregisterInput", view)
         execute(focusReducer.unregister(view))
+        trace("unregisterInputReduced", view)
     }
 
     private fun scheduleReconcile(anchor: AutoHeightTextAreaView?) {
         val pagerId = anchor?.pagerId ?: return
-        if (reconcileScheduled) return
+        if (reconcileScheduled) {
+            trace("scheduleReconcileSkipped keyboardHidden=$keyboardHidden", anchor)
+            return
+        }
+        trace("scheduleReconcile keyboardHidden=$keyboardHidden", anchor)
         reconcileScheduled = true
         setTimeout(pagerId) {
             reconcileScheduled = false
+            anchor?.let { trace("reconcileRun keyboardHidden=$keyboardHidden", it) }
             if (!keyboardHidden || focusReducer.desiredView == null) {
                 execute(focusReducer.reconcile())
             }
             if (keyboardHidden) {
                 focusReducer.observedView?.let { observedView ->
+                    trace("hiddenBlur", observedView)
                     focusReducer.onBlurRequested(observedView)
+                    trace("hiddenBlurAuthorityRevoked", observedView)
                     observedView.blur(focusReducer.generation)
+                    trace("hiddenBlurSent", observedView)
                 }
             }
         }
@@ -152,12 +181,15 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     }
 
     private fun execute(command: InputFocusTargetReducer.Command<AutoHeightTextAreaView>?) {
+        command?.let { trace("execute ${it::class.simpleName} generation=${it.generation}", it.view) }
         when (command) {
             is InputFocusTargetReducer.Command.Focus ->
                 executeFocus(command)
             is InputFocusTargetReducer.Command.Blur -> {
                 focusReducer.onBlurRequested(command.view)
+                trace("executeBlurAuthorityRevoked generation=${command.generation}", command.view)
                 command.view.blur(command.generation)
+                trace("executeBlurSent generation=${command.generation}", command.view)
             }
             is InputFocusTargetReducer.Command.CancelPendingFocus ->
                 command.view.cancelPendingFocus(command.generation)
@@ -168,12 +200,27 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     private fun executeFocus(
         command: InputFocusTargetReducer.Command.Focus<AutoHeightTextAreaView>,
     ) {
+        trace("executeFocus generation=${command.generation}", command.view)
         command.view.focus(command.generation)
         setTimeout(command.view.pagerId, FocusCompletionTimeoutMs) {
-            if (focusReducer.onFocusRequestTimeout(command.view, command.generation)) {
+            val shouldRetry =
+                focusReducer.onFocusRequestTimeout(command.view, command.generation)
+            trace(
+                "focusTimeout generation=${command.generation} shouldRetry=$shouldRetry",
+                command.view,
+            )
+            if (shouldRetry) {
                 scheduleReconcile(command.view)
             }
         }
+    }
+
+    private fun trace(event: String, view: AutoHeightTextAreaView) {
+        println(
+            "[KuiklyTextFocusTrace][common] event=$event keyboardHidden=$keyboardHidden " +
+                "pager=${view.pagerId} nativeRef=${view.nativeRef} " +
+                focusReducer.debugSnapshot(view)
+        )
     }
 
     private companion object {

@@ -40,6 +40,7 @@ internal fun Modifier.textFieldPointer(
     state: LegacyTextFieldState,
     focusRequester: FocusRequester,
     readOnly: Boolean,
+    traceLabel: () -> String = { "" },
 //    offsetMapping: OffsetMapping
 ): Modifier = Modifier.defaultTextFieldPointer(
 //    manager,
@@ -48,6 +49,7 @@ internal fun Modifier.textFieldPointer(
     state,
     focusRequester,
     readOnly,
+    traceLabel,
 //    offsetMapping,
 )
 
@@ -59,10 +61,15 @@ internal fun Modifier.defaultTextFieldPointer(
     state: LegacyTextFieldState,
     focusRequester: FocusRequester,
     readOnly: Boolean,
+    traceLabel: () -> String,
 //    offsetMapping: OffsetMapping
 ) = this
 //    .updateSelectionTouchMode { state.isInTouchMode = it }
     .tapPressTextFieldModifier(interactionSource, enabled) { offset ->
+        println(
+            "[KuiklyTextFocusTrace][common] event=pointerTap ${traceLabel()} " +
+                "stateHasFocus=${state.hasFocus} attached=${focusRequester.hasAttachedNodes()} offset=$offset"
+        )
         requestFocusAndShowKeyboardIfNeeded(state, focusRequester, !readOnly)
         if (state.hasFocus && enabled) {
 //            if (state.handleState != HandleState.Selection) {

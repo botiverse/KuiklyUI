@@ -24,6 +24,21 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 NSString *const KRVFontFamilyKey = @"fontFamily";
 NSString *const KRVFontContextParamKey = @"contextParam";
 
+static void KRTextFieldFocusTrace(KRTextFieldView *view, NSString *event, NSString *detail) {
+    NSLog(
+        @"[KuiklyTextFocusTrace][native] event=%@ field=%p first=%d window=%p super=%p enabled=%d userInteraction=%d textLength=%lu %@",
+        event,
+        view,
+        view.isFirstResponder,
+        view.window,
+        view.superview,
+        view.enabled,
+        view.userInteractionEnabled,
+        (unsigned long)view.text.length,
+        detail ?: @""
+    );
+}
+
 /*
  * @brief 暴露给Kotlin侧调用的多行输入框组件
  */
@@ -122,6 +137,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
         _props = [NSMutableDictionary new];
         self.css_autoHideKeyboardOnImeAction = [NSNumber numberWithInt: 1];     // 保持原有能力，默认是关闭关闭软键盘
         [self addTarget:self action:@selector(onTextFeildTextChanged:) forControlEvents:UIControlEventEditingChanged];
+        KRTextFieldFocusTrace(self, @"init", @"");
     }
     return self;
 }
@@ -137,6 +153,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 #pragma mark - dealloc
 
 - (void)dealloc {
+    KRTextFieldFocusTrace(self, @"dealloc", @"");
     if (_didAddKeyboardNotification) {
         [[NSNotificationCenter defaultCenter] removeObserver:self];
     }
@@ -301,6 +318,11 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     NSString *rawRequestId = args[KRC_PARAM_KEY];
     NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
     NSUInteger requestEpoch = ++_focusRequestEpoch;
+    KRTextFieldFocusTrace(
+        self,
+        @"css_focus",
+        [NSString stringWithFormat:@"requestId=%@ epoch=%lu", requestId, (unsigned long)requestEpoch]
+    );
     _pendingFocusRequestId = requestId;
     _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -308,13 +330,17 @@ NSString *const KRVFontContextParamKey = @"contextParam";
         // legacy focus(nil) followed by blur/cancel would otherwise compare nil == nil and revive
         // a stale first responder on the next main-queue drain.
         if (requestEpoch != self->_focusRequestEpoch) {
+            KRTextFieldFocusTrace(self, @"css_focus_cancelled", [NSString stringWithFormat:@"epoch=%lu", (unsigned long)requestEpoch]);
             return;
         }
         if (self.isFirstResponder) {
+            KRTextFieldFocusTrace(self, @"css_focus_already_first", [NSString stringWithFormat:@"epoch=%lu", (unsigned long)requestEpoch]);
             self->_pendingFocusRequestId = nil;
             return;
         }
-        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
+        BOOL focused = [self becomeFirstResponder];
+        KRTextFieldFocusTrace(self, @"css_focus_result", [NSString stringWithFormat:@"epoch=%lu result=%d", (unsigned long)requestEpoch, focused]);
+        if (!focused && requestEpoch == self->_focusRequestEpoch) {
             self->_pendingFocusRequestId = nil;
         }
     });
@@ -324,6 +350,11 @@ NSString *const KRVFontContextParamKey = @"contextParam";
     ++_focusRequestEpoch;
     NSString *rawRequestId = args[KRC_PARAM_KEY];
     _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    KRTextFieldFocusTrace(
+        self,
+        @"css_blur",
+        [NSString stringWithFormat:@"requestId=%@ epoch=%lu", _pendingBlurRequestId, (unsigned long)_focusRequestEpoch]
+    );
     _pendingFocusRequestId = nil;
     if (!self.isFirstResponder || ![self resignFirstResponder]) {
         _pendingBlurRequestId = nil;
@@ -332,6 +363,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 
 - (void)css_cancelPendingFocus:(NSDictionary *)args {
     ++_focusRequestEpoch;
+    KRTextFieldFocusTrace(self, @"css_cancelPendingFocus", [NSString stringWithFormat:@"epoch=%lu", (unsigned long)_focusRequestEpoch]);
     _pendingFocusRequestId = nil;
 }
 
@@ -439,6 +471,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 
 - (BOOL)becomeFirstResponder {
     BOOL result = [super becomeFirstResponder];
+    KRTextFieldFocusTrace(self, @"becomeFirstResponder", [NSString stringWithFormat:@"result=%d", result]);
 #if !TARGET_OS_OSX
     if (result && _cursorColor && _selectionColor) {
         if (@available(iOS 17.0, *)) {
@@ -453,6 +486,49 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 #endif
     return result;
 }
+
+- (BOOL)resignFirstResponder {
+    BOOL result = [super resignFirstResponder];
+    KRTextFieldFocusTrace(self, @"resignFirstResponder", [NSString stringWithFormat:@"result=%d", result]);
+    return result;
+}
+
+#if !TARGET_OS_OSX
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    KRTextFieldFocusTrace(self, @"didMoveToWindow", @"");
+}
+
+- (void)didMoveToSuperview {
+    [super didMoveToSuperview];
+    KRTextFieldFocusTrace(self, @"didMoveToSuperview", @"");
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    BOOL inside = [super pointInside:point withEvent:event];
+    KRTextFieldFocusTrace(
+        self,
+        @"pointInside",
+        [NSString stringWithFormat:@"point=(%.1f,%.1f) bounds=%@ result=%d", point.x, point.y, NSStringFromCGRect(self.bounds), inside]
+    );
+    return inside;
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    KRTextFieldFocusTrace(
+        self,
+        @"hitTest",
+        [NSString stringWithFormat:@"point=(%.1f,%.1f) hit=%p hitClass=%@", point.x, point.y, hit, hit ? NSStringFromClass(hit.class) : @"nil"]
+    );
+    return hit;
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    KRTextFieldFocusTrace(self, @"touchesBegan", [NSString stringWithFormat:@"touchCount=%lu", (unsigned long)touches.count]);
+    [super touchesBegan:touches withEvent:event];
+}
+#endif
 
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -531,6 +607,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {  // 聚焦
+    KRTextFieldFocusTrace(self, @"textFieldDidBeginEditing", [NSString stringWithFormat:@"pendingFocusRequestId=%@", _pendingFocusRequestId]);
     _pendingBlurRequestId = nil;
     if (self.css_inputFocus) {
         NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
@@ -543,6 +620,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {  // 失焦
+    KRTextFieldFocusTrace(self, @"textFieldDidEndEditing", [NSString stringWithFormat:@"pendingBlurRequestId=%@", _pendingBlurRequestId]);
     _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
         NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
