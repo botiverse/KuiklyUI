@@ -204,13 +204,24 @@ jobs:
           ref: ${{ env.EXPECTED_HEAD_SHA }}
           fetch-depth: 0
       - name: Trust the mounted workspace inside the job container
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Sync OHOS dependency metadata
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "Kuikly CI"
+          git config --global user.email "kuikly-ci@users.noreply.github.com"
+      - name: Prepare OHOS native dependency metadata
         working-directory: ohosApp
         run: |
           export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
           ohpm install --all
           hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+          hvigorw assembleHar \
+            --mode module \
+            -p module=render@default \
+            -p product=default \
+            -p buildMode=debug \
+            --analyze=normal \
+            --parallel \
+            --no-daemon
       - name: Fresh arm64 production libkuikly compile and link
         shell: bash
         run: |
@@ -282,13 +293,24 @@ jobs:
           ref: ${{ env.EXPECTED_HEAD_SHA }}
           fetch-depth: 0
       - name: Trust the mounted workspace inside the job container
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Sync OHOS dependency metadata
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "Kuikly CI"
+          git config --global user.email "kuikly-ci@users.noreply.github.com"
+      - name: Prepare OHOS native dependency metadata
         working-directory: ohosApp
         run: |
           export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
           ohpm install --all
           hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+          hvigorw assembleHar \
+            --mode module \
+            -p module=render@default \
+            -p product=default \
+            -p buildMode=debug \
+            --analyze=normal \
+            --parallel \
+            --no-daemon
       - name: Kill OHOS production current-operation mutation
         run: tools/run-scroll-transaction-mutations.sh ohos
 
