@@ -28,6 +28,7 @@ class KRContextSchedulerInternal {
  public:
     virtual ~KRContextSchedulerInternal() = default;
     virtual void ScheduleTask(int delayMs, const KRSchedulerTask &task) = 0;
+    virtual void ScheduleIdleTask(const KRSchedulerTask &task) = 0;
     virtual void ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) = 0;
     virtual void DirectRunOnMainThread(bool isSync, const KRSchedulerTask &task) = 0;
 
@@ -37,6 +38,7 @@ class KRContextSchedulerInternal {
 class KRContextSchedulerMultiThreaded : public KRContextSchedulerInternal {
  public:
     void ScheduleTask(int delayMs, const KRSchedulerTask &task) override;
+    void ScheduleIdleTask(const KRSchedulerTask &task) override;
     void ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) override;
     void DirectRunOnMainThread(bool isSync, const KRSchedulerTask &task) override;
     bool IsCurrentOnContextThread() override;
@@ -85,6 +87,15 @@ void KRContextSchedulerMultiThreaded::DirectRunOnMainThread(bool isSync, const K
 
 void KRContextSchedulerMultiThreaded::ScheduleTask(int delayMs, const KRSchedulerTask &task) {
     GetContextThread()->DispatchAsync(task, delayMs);
+}
+
+void KRContextSchedulerMultiThreaded::ScheduleIdleTask(const KRSchedulerTask &task) {
+    auto *contextThread = GetContextThread();
+    contextThread->DispatchIdle([contextThread, task]() {
+        KRMainThread::RunOnMainThreadWhenIdle([contextThread, task]() {
+            contextThread->DispatchIdle(task);
+        });
+    });
 }
 
 void KRContextSchedulerMultiThreaded::ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) {
@@ -191,6 +202,7 @@ bool KRContextSchedulerMultiThreaded::IsCurrentOnContextThread() {
 class KRContextSchedulerSingleThreaded : public KRContextSchedulerInternal {
  public:
     void ScheduleTask(int delayMs, const KRSchedulerTask &task) override;
+    void ScheduleIdleTask(const KRSchedulerTask &task) override;
     void ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) override;
     void DirectRunOnMainThread(bool isSync, const KRSchedulerTask &task) override;
     bool IsCurrentOnContextThread() override;
@@ -208,6 +220,10 @@ void KRContextSchedulerSingleThreaded::DirectRunOnMainThread(bool isSync, const 
 
 void KRContextSchedulerSingleThreaded::ScheduleTask(int delayMs, const KRSchedulerTask &task) {
     KRMainThread::RunOnMainThread(task, delayMs);
+}
+
+void KRContextSchedulerSingleThreaded::ScheduleIdleTask(const KRSchedulerTask &task) {
+    KRMainThread::RunOnMainThreadWhenIdle(task);
 }
 
 void KRContextSchedulerSingleThreaded::ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) {
@@ -244,6 +260,9 @@ std::shared_ptr<KRContextSchedulerInternal> KRContextScheduler::GetInstance() {
 
 void KRContextScheduler::ScheduleTask(int delayMs, const KRSchedulerTask &task) {
     GetInstance()->ScheduleTask(delayMs, task);
+}
+void KRContextScheduler::ScheduleIdleTask(const KRSchedulerTask &task) {
+    GetInstance()->ScheduleIdleTask(task);
 }
 void KRContextScheduler::ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) {
     GetInstance()->ScheduleTaskOnMainThread(sync, task);

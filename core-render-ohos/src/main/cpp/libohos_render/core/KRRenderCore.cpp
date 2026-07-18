@@ -50,6 +50,11 @@ void com_tencent_kuikly_ScheduleContextTask(const char *pagerId, void (*onSchedu
         0, [instanceId = std::string(pagerId), onSchedule]() { onSchedule(instanceId.c_str()); });
 }
 
+void com_tencent_kuikly_ScheduleContextIdleTask(const char *pagerId, void (*onSchedule)(const char *pagerId)) {
+    KRContextScheduler::ScheduleIdleTask(
+        [instanceId = std::string(pagerId), onSchedule]() { onSchedule(instanceId.c_str()); });
+}
+
 bool com_tencent_kuikly_IsCurrentOnContextThread(const char *pagerId) {
     return KRContextScheduler::IsCurrentOnContextThread();
 }

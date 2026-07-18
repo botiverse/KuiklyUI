@@ -46,6 +46,13 @@ class KRThread {
     void DispatchAsync(std::function<void()> task, int delayMilliseconds = 0);
 
     /**
+     * Executes one bounded speculative task only after the immediate queue has
+     * drained. Idle tasks run at background QoS and yield to newly queued
+     * normal work between callbacks.
+     */
+    void DispatchIdle(std::function<void()> task);
+
+    /**
      * @brief 在当前调用线程上"直跑"任务，与 worker 线程协调互斥；
      *        若长时间拿不到 mutex 则降级为 DispatchAsync。沿用旧语义。
      */
@@ -122,6 +129,7 @@ class KRThread {
     //   OnAsync 在 loop 线程上起 timer。
     std::mutex m_queueMutex;
     std::queue<std::function<void()>> m_pending;
+    std::queue<std::function<void()>> m_idlePending;
     std::queue<std::unique_ptr<PendingTimer>> m_pendingTimers;
 
     // ---- 任务执行权 / 同步主任务标志 ----
