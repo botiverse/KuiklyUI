@@ -126,11 +126,14 @@ bool KRView::SetProp(const std::string &prop_key, const KRAnyValue &prop_value,
         if (prop_value->toBool()) {
             if (!super_touch_handler_) {
                 super_touch_handler_ = std::make_shared<SuperTouchHandler>();
+                // enable transition：让下一个 action 把 type 重算为 SELF。
+                // 否则缓存的 NONE/PARENT 会让 SELF 分支永不进入，capture 静默失效。
+                // 仅在新建 handler 的 transition 重置，避免扰动进行中的 gesture。
+                parent_super_touch_handler_.reset();
+                super_touch_type_ = UNKNOWN;
             }
         } else {
-            if (super_touch_handler_) {
-                super_touch_handler_ = nullptr;
-            }
+            ResetSuperTouchState();
         }
         didHand = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameHitTestModeOhos)) {
@@ -422,9 +425,7 @@ bool KRView::ResetProp(const std::string &prop_key) {
         }
         didHande = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameSuperTouch)) {
-        native_dispatch_capture_requested_ = false;
-        native_dispatch_captured_gesture_ = false;
-        super_touch_handler_ = nullptr;
+        ResetSuperTouchState();
         didHande = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameHitTestModeOhos)) {
         target_hit_test_mode = ARKUI_HIT_TEST_MODE_DEFAULT;
@@ -452,6 +453,17 @@ bool KRView::ResetProp(const std::string &prop_key) {
         didHande = IKRRenderViewExport::ResetProp(prop_key);
     }
     return didHande;
+}
+
+void KRView::ResetSuperTouchState() {
+    if (super_touch_handler_) {
+        super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+        super_touch_handler_ = nullptr;
+    }
+    native_dispatch_capture_requested_ = false;
+    native_dispatch_captured_gesture_ = false;
+    parent_super_touch_handler_.reset();
+    super_touch_type_ = UNKNOWN;
 }
 
 void KRView::ProcessTouchEvent(ArkUI_NodeEvent *event) {
@@ -483,30 +495,35 @@ void KRView::ProcessTouchEvent(ArkUI_NodeEvent *event) {
                 super_touch_handler_->SetNativeTouchConsumer(shared_from_this());
             }
         }
+        // 必须先消费/清掉 child 写入的 action marker；capture 命中也不能跳过清理，
+        // 否则 stale marker 会在下一 gesture 的同 action 被误吞。
+        bool should_stop = handled;
+        if (super_touch_handler_->GetStopPropagation(action)) {
+            should_stop = true;
+            super_touch_handler_->SetStopPropagation(action, false);
+        }
         if (native_dispatch_captured_gesture_) {
             if (action == UI_TOUCH_EVENT_ACTION_UP || action == UI_TOUCH_EVENT_ACTION_CANCEL) {
                 native_dispatch_captured_gesture_ = false;
-                if (super_touch_handler_) {
-                    super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
-                }
+                super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
             }
             kuikly::util::StopPropagation(event);
             return;
         }
-        if (super_touch_handler_->GetStopPropagation(action)) {
+        // capture miss / inactive capture 的唯一 fall-through 点（upstream #1508
+        // handled-first 语义：handled 或 child marker 任一即停，不再依赖 stop_propagation_）。
+        if (should_stop) {
             kuikly::util::StopPropagation(event);
-            super_touch_handler_->SetStopPropagation(action, false);
         }
     } else if (handled) {
-        if (stop_propagation_) {
-            if (super_touch_type_ == PARENT) {
-                auto parent_super_touch_handler = parent_super_touch_handler_.lock();
-                if (parent_super_touch_handler) {
-                    parent_super_touch_handler->SetStopPropagation(action, true);
-                }
-            } else if (super_touch_type_ == NONE) {
-                kuikly::util::StopPropagation(event);
+        // upstream #1508：基于 touch 是否被消费决定是否冒泡，而不是 stop_propagation_。
+        if (super_touch_type_ == PARENT) {
+            auto parent_super_touch_handler = parent_super_touch_handler_.lock();
+            if (parent_super_touch_handler) {
+                parent_super_touch_handler->SetStopPropagation(action, true);
             }
+        } else if (super_touch_type_ == NONE) {
+            kuikly::util::StopPropagation(event);
         }
     }
 }
