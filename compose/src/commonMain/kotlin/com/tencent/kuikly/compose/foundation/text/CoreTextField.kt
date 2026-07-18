@@ -24,6 +24,7 @@ import androidx.compose.runtime.currentCompositeKeyHash
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import com.tencent.kuikly.compose.KuiklyApplier
 import com.tencent.kuikly.compose.extension.SetEventElement
@@ -194,6 +195,14 @@ internal fun CoreTextField(
 
     val autoHeightTextAreaView = remember(singleLineNew) { AutoHeightTextAreaView(singleLineNew) }
     val kuiklyKeyboardController = keyboardController as? KuiklySoftwareKeyboardController
+    // ComposeNode.factory installs the native event callbacks only once for a retained node. Keep
+    // every value read by those long-lived callbacks behind an updated state holder so prewarm or
+    // keepalive recomposition cannot leave the handler enforcing its initial disabled/read-only
+    // state after the visible page becomes editable.
+    val currentEnabled = rememberUpdatedState(enabled)
+    val currentReadOnly = rememberUpdatedState(readOnly)
+    val currentKuiklyKeyboardController = rememberUpdatedState(kuiklyKeyboardController)
+    val currentFocusManager = rememberUpdatedState(focusManager)
     DisposableEffect(autoHeightTextAreaView, kuiklyKeyboardController) {
         onDispose {
             kuiklyKeyboardController?.unregisterInput(autoHeightTextAreaView)
@@ -377,12 +386,15 @@ internal fun CoreTextField(
                         getViewAttr().autofocus(false)
                         getViewAttr().enablePinyinCallback(true)
                         getViewEvent().inputFocus { params ->
+                            val eventEnabled = currentEnabled.value
+                            val eventReadOnly = currentReadOnly.value
+                            val eventKeyboardController = currentKuiklyKeyboardController.value
                             if (params.focusIntentOnly) {
-                                if (!enabled || readOnly) {
+                                if (!eventEnabled || eventReadOnly) {
                                     return@inputFocus
                                 }
                                 val intentDecision =
-                                    kuiklyKeyboardController?.onNativeFocusIntent(autoHeightTextAreaView)
+                                    eventKeyboardController?.onNativeFocusIntent(autoHeightTextAreaView)
                                 if (
                                     intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
                                     intentDecision == null
@@ -391,12 +403,12 @@ internal fun CoreTextField(
                                 }
                                 return@inputFocus
                             }
-                            val nativeFocusDecision = kuiklyKeyboardController?.onNativeFocus(
+                            val nativeFocusDecision = eventKeyboardController?.onNativeFocus(
                                 autoHeightTextAreaView,
                                 params.focusRequestId,
                             )
-                            if (!enabled || readOnly) {
-                                kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
+                            if (!eventEnabled || eventReadOnly) {
+                                eventKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
                                 return@inputFocus
                             }
                             when (nativeFocusDecision) {
@@ -407,7 +419,7 @@ internal fun CoreTextField(
                                     // requestFocus() returns Unit, so it cannot close captured /
                                     // disabled / lifecycle rejection races.
                                     if (!focusRequester.focusIfAttached()) {
-                                        kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
+                                        eventKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
                                     }
                                 }
                                 InputFocusTargetReducer.NativeFocusDecision.Confirmed,
@@ -416,12 +428,12 @@ internal fun CoreTextField(
                         }
                         getViewEvent().inputBlur { params ->
                             if (
-                                kuiklyKeyboardController?.onNativeBlur(
+                                currentKuiklyKeyboardController.value?.onNativeBlur(
                                     autoHeightTextAreaView,
                                     params.focusRequestId,
                                 ) == InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear
                             ) {
-                                focusManager.clearFocus()
+                                currentFocusManager.value.clearFocus()
                             }
                         }
 
