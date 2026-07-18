@@ -750,7 +750,7 @@ mutate_ios_direct_inset_scroll_end() {
   grep -Fq '_css_scrollEnd(eventParams);' \
     core-render-ios/Extension/Components/KRScrollView.m || return 125
   perl -0pi -e \
-    's/(self\.contentInset = contentInset;\n            _nativeInsetRevision \+= 1;\n)            NSDictionary \*eventParams = \[self p_generateEventBaseParams\];\n(            dispatch_block_t terminal = \[self p_finalizeScrollWrite:operation\n                                                          resultCode:KRScrollWriteResultCodeCommitted\];\n)            if \(_css_scrollEnd\) \{\n                _css_scrollEnd\(eventParams\);\n            \}\n/$1$2/' \
+    's/(self\.contentInset = contentInset;\n            _nativeInsetRevision \+= 1;\n)            NSDictionary \*eventParams = \[self p_generateEventBaseParams\];\n(            dispatch_block_t terminal = \[self p_finalizeScrollWrite:operation\n                                                          resultCode:KRScrollWriteResultCodeCommitted\];\n)            if \(_css_scrollEnd && eventParams\) \{\n                _css_scrollEnd\(eventParams\);\n            \}\n/$1$2/' \
     core-render-ios/Extension/Components/KRScrollView.m
   git diff --quiet -- core-render-ios/Extension/Components/KRScrollView.m && return 125
   KR_SKIP_ACTIVE_OPERATION_END_TEST=1 KR_SKIP_ANIMATED_COMPLETION_END_TEST=1 \
