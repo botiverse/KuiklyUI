@@ -41,6 +41,9 @@ class KRMainThread {
      */
     static void RunOnMainThreadForNextLoop(std::function<void()> task);
 
+    /** Run one bounded task after two stable main-loop turns with no immediate work. */
+    static void RunOnMainThreadWhenIdle(std::function<void()> task);
+
     /**
      * @brief 当前调用线程是否为 ArkTS 主线程（即 Export 时记录的 loop 线程）。
      *        仅在 Export 完成后返回值才有意义；未初始化时一律返回 false。
