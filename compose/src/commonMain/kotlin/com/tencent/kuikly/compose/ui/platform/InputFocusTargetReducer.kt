@@ -89,7 +89,7 @@ internal class InputFocusTargetReducer<T : Any> {
         return commands
     }
 
-    internal fun reconcile(): Command<T>? {
+    internal fun reconcile(reassertCurrentFocus: Boolean = false): Command<T>? {
         val target = desiredView
         if (target == null) {
             val active = observedView ?: return null
@@ -98,7 +98,19 @@ internal class InputFocusTargetReducer<T : Any> {
             pendingBlurView = active
             return Command.Blur(active, generation)
         }
-        if (observedView === target) return null
+        if (observedView === target) {
+            return if (reassertCurrentFocus) {
+                // Focus is already owned by this editor, but the platform keyboard may have been
+                // dismissed independently (for example Android Back hides IME without clearing
+                // EditText focus). Reissuing the generation-scoped native focus command lets the
+                // renderer show the keyboard without changing logical focus ownership.
+                completionAuthorityView = target
+                completionAuthorityGeneration = generation
+                Command.Focus(target, generation)
+            } else {
+                null
+            }
+        }
         if (pendingFocusView === target && pendingFocusGeneration == generation) return null
         if (focusAttemptCount >= MaxFocusAttemptsPerGeneration) return null
         pendingFocusView = target

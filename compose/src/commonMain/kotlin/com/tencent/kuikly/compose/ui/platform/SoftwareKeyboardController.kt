@@ -67,14 +67,17 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     private val focusReducer = InputFocusTargetReducer<AutoHeightTextAreaView>()
     private var reconcileScheduled = false
     private var keyboardHidden = false
+    private var keyboardShowRequested = false
 
     override fun show() {
         keyboardHidden = false
+        keyboardShowRequested = true
         scheduleReconcile(focusReducer.desiredView ?: focusReducer.observedView)
     }
 
     override fun hide() {
         keyboardHidden = true
+        keyboardShowRequested = false
         val target = focusReducer.desiredView ?: focusReducer.observedView
         target?.let(focusReducer::onBlurRequested)
         scheduleReconcile(target)
@@ -135,8 +138,15 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
         reconcileScheduled = true
         setTimeout(pagerId) {
             reconcileScheduled = false
+            val reassertCurrentFocus = keyboardShowRequested
+            keyboardShowRequested = false
             if (!keyboardHidden || focusReducer.desiredView == null) {
-                execute(focusReducer.reconcile())
+                execute(
+                    focusReducer.reconcile(
+                        reassertCurrentFocus =
+                            reassertCurrentFocus && focusReducer.desiredView != null,
+                    ),
+                )
             }
             if (keyboardHidden) {
                 focusReducer.observedView?.let { observedView ->
