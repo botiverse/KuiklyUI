@@ -117,6 +117,82 @@ class InputFocusTargetReducerTest {
     }
 
     @Test
+    fun currentGenerationCompletionSurvivesEarlierUserFocusConfirmation() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("native-tap-then-programmatic-confirmation")
+
+        reducer.start(view)
+        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+
+        // A native tap can report focus without a request id after Compose has already issued its
+        // generation-scoped focus command. This confirms the same desired target and consumes the
+        // pending slot, but the later programmatic completion is still current authority.
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+            reducer.onNativeFocus(view, requestId = null),
+        )
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+            reducer.onNativeFocus(view, request.generation),
+        )
+        assertSame(view, reducer.observedView)
+        assertNull(reducer.reconcile())
+    }
+
+    @Test
+    fun lateCurrentGenerationCompletionSurvivesRetryTimeout() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("late-current-completion")
+
+        reducer.start(view)
+        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        assertTrue(reducer.onFocusRequestTimeout(view, request.generation))
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+            reducer.onNativeFocus(view, request.generation),
+        )
+        assertSame(view, reducer.observedView)
+        assertNull(reducer.reconcile())
+    }
+
+    @Test
+    fun currentGenerationCompletionCannotReviveAfterProgrammaticBlur() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("programmatically-blurred")
+
+        reducer.start(view)
+        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        reducer.onBlurRequested(view)
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
+            reducer.onNativeFocus(view, request.generation),
+        )
+        assertNull(reducer.observedView)
+    }
+
+    @Test
+    fun currentGenerationCompletionCannotReviveAfterUserBlurIntent() {
+        val reducer = InputFocusTargetReducer<View>()
+        val view = View("user-blurred")
+
+        reducer.start(view)
+        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        reducer.onNativeFocus(view, requestId = null)
+        assertEquals(
+            InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear,
+            reducer.onNativeBlur(view, requestId = null),
+        )
+
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
+            reducer.onNativeFocus(view, request.generation),
+        )
+        assertNull(reducer.observedView)
+    }
+
+    @Test
     fun nativeFocusFailureRetryIsBoundedWithinOneGeneration() {
         val reducer = InputFocusTargetReducer<View>()
         val view = View("permanently-unavailable")
@@ -287,7 +363,19 @@ class InputFocusTargetReducerTest {
         reducer.onNativeBlur(view, requestId = reducer.generation)
 
         assertSame(view, reducer.desiredView)
-        assertSame(view, assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile()).view)
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
+            reducer.onNativeFocus(view, focus.generation),
+        )
+        assertNull(reducer.observedView)
+
+        val refocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
+        assertSame(view, refocus.view)
+        assertEquals(
+            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
+            reducer.onNativeFocus(view, refocus.generation),
+        )
+        assertSame(view, reducer.observedView)
     }
 
     @Test

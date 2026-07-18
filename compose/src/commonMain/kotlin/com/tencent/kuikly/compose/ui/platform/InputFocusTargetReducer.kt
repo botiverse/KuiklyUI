@@ -64,6 +64,8 @@ internal class InputFocusTargetReducer<T : Any> {
 
     private var pendingFocusView: T? = null
     private var pendingFocusGeneration: Long? = null
+    private var completionAuthorityView: T? = null
+    private var completionAuthorityGeneration: Long? = null
     private var focusAttemptCount = 0
     private var pendingBlurView: T? = null
 
@@ -72,7 +74,9 @@ internal class InputFocusTargetReducer<T : Any> {
         generation += 1
         desiredView = view
         focusAttemptCount = 0
-        return cancelSupersededPendingFocus(view)
+        val commands = cancelSupersededPendingFocus(view)
+        revokeCompletionAuthority()
+        return commands
     }
 
     internal fun stop(view: T): List<Command<T>> {
@@ -80,7 +84,9 @@ internal class InputFocusTargetReducer<T : Any> {
         generation += 1
         desiredView = null
         focusAttemptCount = 0
-        return cancelSupersededPendingFocus(null)
+        val commands = cancelSupersededPendingFocus(null)
+        revokeCompletionAuthority()
+        return commands
     }
 
     internal fun reconcile(): Command<T>? {
@@ -88,6 +94,7 @@ internal class InputFocusTargetReducer<T : Any> {
         if (target == null) {
             val active = observedView ?: return null
             if (pendingBlurView === active) return null
+            onBlurRequested(active)
             pendingBlurView = active
             return Command.Blur(active, generation)
         }
@@ -96,6 +103,8 @@ internal class InputFocusTargetReducer<T : Any> {
         if (focusAttemptCount >= MaxFocusAttemptsPerGeneration) return null
         pendingFocusView = target
         pendingFocusGeneration = generation
+        completionAuthorityView = target
+        completionAuthorityGeneration = generation
         focusAttemptCount += 1
         pendingBlurView = null
         return Command.Focus(target, generation)
@@ -103,12 +112,18 @@ internal class InputFocusTargetReducer<T : Any> {
 
     internal fun onNativeFocus(view: T, requestId: Long?): NativeFocusDecision {
         if (requestId != null) {
-            val matchesCurrentRequest =
+            // A request id identifies the logical focus generation, not one transport attempt.
+            // The pending slot may already have been consumed by an earlier user/native focus
+            // observation for this same target, or released by a retry timeout, before the
+            // programmatic completion crosses the bridge. Completion authority therefore lives
+            // independently from the retry slot, but is revoked by blur intent so a late callback
+            // cannot revive an editor after the keyboard or user dismissed it.
+            val matchesCurrentGeneration =
                 requestId == generation &&
                     desiredView === view &&
-                    pendingFocusView === view &&
-                    pendingFocusGeneration == requestId
-            if (!matchesCurrentRequest) {
+                    completionAuthorityView === view &&
+                    completionAuthorityGeneration == requestId
+            if (!matchesCurrentGeneration) {
                 return NativeFocusDecision.IgnoreStale
             }
             observedView = view
@@ -150,10 +165,7 @@ internal class InputFocusTargetReducer<T : Any> {
         val shouldClearComposeFocus = requestId == null && desiredView === view
         if (observedView === view) observedView = null
         if (pendingBlurView === view) pendingBlurView = null
-        if (requestId != null && pendingFocusView === view && pendingFocusGeneration == requestId) {
-            pendingFocusView = null
-            pendingFocusGeneration = null
-        }
+        onBlurRequested(view)
         return if (shouldClearComposeFocus) {
             NativeBlurDecision.RequestComposeClear
         } else {
@@ -173,6 +185,7 @@ internal class InputFocusTargetReducer<T : Any> {
             pendingFocusView = null
             pendingFocusGeneration = null
         }
+        revokeCompletionAuthority(view)
         if (observedView === view) {
             // Disposal removes the common callback surface immediately, but the native editor can
             // still be first responder until it is explicitly blurred. Clear the observation only
@@ -186,7 +199,25 @@ internal class InputFocusTargetReducer<T : Any> {
     }
 
     internal fun rejectNativeFocus(view: T) {
+        onBlurRequested(view)
         if (observedView === view) observedView = null
+    }
+
+    /**
+     * Revokes permission for an in-flight native completion before an explicit blur is sent.
+     *
+     * Blur can preserve [desiredView] (for example, SoftwareKeyboardController.hide()), so the
+     * logical generation alone cannot distinguish an obsolete completion from one that is still
+     * allowed to establish native focus. A later [reconcile] call may emit a fresh Focus command
+     * in the same generation, which reopens authority for hide -> show recovery.
+     */
+    internal fun onBlurRequested(view: T) {
+        revokeCompletionAuthority(view)
+        if (pendingFocusView === view) {
+            pendingFocusView = null
+            pendingFocusGeneration = null
+        }
+        if (desiredView === view) focusAttemptCount = 0
     }
 
     /**
@@ -214,6 +245,12 @@ internal class InputFocusTargetReducer<T : Any> {
         pendingFocusView = null
         pendingFocusGeneration = null
         return listOf(Command.CancelPendingFocus(pending, generation))
+    }
+
+    private fun revokeCompletionAuthority(view: T? = null) {
+        if (view != null && completionAuthorityView !== view) return
+        completionAuthorityView = null
+        completionAuthorityGeneration = null
     }
 
     private companion object {
