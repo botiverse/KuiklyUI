@@ -208,6 +208,11 @@ internal class InputFocusTargetReducer<T : Any> {
             focusAttemptCount < MaxFocusAttemptsPerGeneration
     }
 
+    internal fun debugSnapshot(view: T): String =
+        "generation=$generation desiredSelf=${desiredView === view} observedSelf=${observedView === view} " +
+            "pendingFocusSelf=${pendingFocusView === view} pendingFocusGeneration=$pendingFocusGeneration " +
+            "pendingBlurSelf=${pendingBlurView === view} focusAttemptCount=$focusAttemptCount"
+
     private fun cancelSupersededPendingFocus(nextView: T?): List<Command<T>> {
         val pending = pendingFocusView ?: return emptyList()
         if (pending === nextView) return emptyList()

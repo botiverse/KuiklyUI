@@ -79,13 +79,17 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     }
 
     internal fun startInput(view: AutoHeightTextAreaView) {
+        trace("startInput", view)
         keyboardHidden = false
         execute(focusReducer.start(view))
+        trace("startInputReduced", view)
         scheduleReconcile(view)
     }
 
     internal fun stopInput(view: AutoHeightTextAreaView) {
+        trace("stopInput", view)
         execute(focusReducer.stop(view))
+        trace("stopInputReduced", view)
         scheduleReconcile(view)
     }
 
@@ -93,7 +97,9 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
         view: AutoHeightTextAreaView,
         requestId: Long?,
     ): InputFocusTargetReducer.NativeFocusDecision {
+        trace("onNativeFocus requestId=$requestId", view)
         val decision = focusReducer.onNativeFocus(view, requestId)
+        trace("onNativeFocus decision=$decision", view)
         if (decision == InputFocusTargetReducer.NativeFocusDecision.IgnoreStale) {
             // The callback proves that native focus actually landed, even though the request no
             // longer belongs to the current generation. Do not publish the detached/old editor as
@@ -106,25 +112,35 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
 
     internal fun onNativeFocusIntent(
         view: AutoHeightTextAreaView,
-    ): InputFocusTargetReducer.NativeFocusDecision =
-        focusReducer.onNativeFocusIntent(view)
+    ): InputFocusTargetReducer.NativeFocusDecision {
+        trace("onNativeFocusIntent", view)
+        return focusReducer.onNativeFocusIntent(view).also { decision ->
+            trace("onNativeFocusIntent decision=$decision", view)
+        }
+    }
 
     internal fun onNativeBlur(
         view: AutoHeightTextAreaView,
         requestId: Long?,
     ): InputFocusTargetReducer.NativeBlurDecision {
+        trace("onNativeBlur requestId=$requestId", view)
         val decision = focusReducer.onNativeBlur(view, requestId)
+        trace("onNativeBlur decision=$decision", view)
         scheduleReconcile(view)
         return decision
     }
 
     internal fun rejectNativeFocus(view: AutoHeightTextAreaView) {
+        trace("rejectNativeFocus", view)
         focusReducer.rejectNativeFocus(view)
         view.blur(focusReducer.generation)
+        trace("rejectNativeFocusBlurSent", view)
     }
 
     internal fun unregisterInput(view: AutoHeightTextAreaView) {
+        trace("unregisterInput", view)
         execute(focusReducer.unregister(view))
+        trace("unregisterInputReduced", view)
     }
 
     private fun scheduleReconcile(anchor: AutoHeightTextAreaView?) {
@@ -133,6 +149,7 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
         reconcileScheduled = true
         setTimeout(pagerId) {
             reconcileScheduled = false
+            anchor?.let { trace("reconcileRun keyboardHidden=$keyboardHidden", it) }
             if (!keyboardHidden || focusReducer.desiredView == null) {
                 execute(focusReducer.reconcile())
             }
@@ -147,6 +164,7 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     }
 
     private fun execute(command: InputFocusTargetReducer.Command<AutoHeightTextAreaView>?) {
+        command?.let { trace("execute ${it::class.simpleName} generation=${it.generation}", it.view) }
         when (command) {
             is InputFocusTargetReducer.Command.Focus ->
                 executeFocus(command)
@@ -161,12 +179,21 @@ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
     private fun executeFocus(
         command: InputFocusTargetReducer.Command.Focus<AutoHeightTextAreaView>,
     ) {
+        trace("executeFocus generation=${command.generation}", command.view)
         command.view.focus(command.generation)
         setTimeout(command.view.pagerId, FocusCompletionTimeoutMs) {
             if (focusReducer.onFocusRequestTimeout(command.view, command.generation)) {
+                trace("focusTimeoutRetry generation=${command.generation}", command.view)
                 scheduleReconcile(command.view)
             }
         }
+    }
+
+    private fun trace(event: String, view: AutoHeightTextAreaView) {
+        println(
+            "[KuiklyTextFocusTrace][common] event=$event pager=${view.pagerId} nativeRef=${view.nativeRef} " +
+                focusReducer.debugSnapshot(view)
+        )
     }
 
     private companion object {
