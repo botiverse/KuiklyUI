@@ -63,10 +63,6 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
     private var accumulatedWheelDelta: Double = 0.0
     // Wheel scroll reset timer
     private var wheelResetTimer: Int? = null
-    private var programmaticScrollStartTimer: Int? = null
-    private var programmaticScrollEndTimer: Int? = null
-    private var programmaticScrollSequence = 0L
-    private var programmaticScrollCompletion: ((Boolean) -> Unit)? = null
 
     // Set element position using transform
     private fun setElementPosition(x: Float, y: Float) {
@@ -210,10 +206,7 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
             }
 
             // Perform scroll animation
-            listElement.nativeScrollPhase = 2
-            handlePagerScrollTo(scrollOffsetX, scrollOffsetY, true) { committed ->
-                if (committed) finishProgrammaticScroll()
-            }
+            handlePagerScrollTo(scrollOffsetX, scrollOffsetY, true)
 
             // Notify callbacks
             val offsetMap = listElement.updateOffsetMap(abs(currentTranslateX), abs(currentTranslateY), isDragging)
@@ -257,8 +250,6 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
      */
     private fun handlePagerStartCommon(event: Event) {
         isDragging = 1
-        listElement.nativeScrollPhase = 1
-        cancelProgrammaticScroll()
         // 针对safari浏览器没有 TouchEvent
         if (event.isTouchEventOrNull() != null) {
             lastTouchEvent = event as TouchEvent
@@ -402,12 +393,9 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
      */
     private fun handlePagerEndCommon(event: Event) {
         if (!isTouchMove) {
-            isDragging = 0
-            listElement.nativeScrollPhase = 0
             return
         }
         isDragging = 0
-        listElement.nativeScrollPhase = 2
         isTouchMove = false
         val deltaY = touchEndY - touchStartY
         val deltaX = touchEndX - touchStartX
@@ -429,9 +417,7 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
             pageIndex = newPageIndex
             event.stopPropagation()
         }
-        handlePagerScrollTo(scrollOffsetX, scrollOffsetY, true) { committed ->
-            if (committed) finishProgrammaticScroll()
-        }
+        handlePagerScrollTo(scrollOffsetX, scrollOffsetY, true)
         val offsetMap = listElement.updateOffsetMap(abs(currentTranslateX), abs(currentTranslateY), isDragging)
         listElement.willDragEndEventCallback?.invoke(offsetMap)
         listElement.dragEndEventCallback?.invoke(offsetMap)
@@ -489,49 +475,21 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
     /**
      * Handle paging scroll to specified position
      */
-    fun handlePagerScrollTo(
-        scrollOffsetX: Float,
-        scrollOffsetY: Float,
-        isAnimation: Boolean,
-        delay: Int = PAGING_SCROLL_DELAY,
-        completion: ((Boolean) -> Unit)? = null,
-    ): Boolean {
-        val replacementSequence = programmaticScrollSequence + 1L
-        cancelProgrammaticScroll()
-        if (programmaticScrollSequence != replacementSequence) {
-            completion?.invoke(false)
-            return false
-        }
-        val sequence = programmaticScrollSequence
-        programmaticScrollCompletion = completion
-        programmaticScrollStartTimer = kuiklyWindow.setTimeout({
-            programmaticScrollStartTimer = null
-            if (sequence != programmaticScrollSequence) return@setTimeout
+    fun handlePagerScrollTo(scrollOffsetX: Float, scrollOffsetY: Float, isAnimation: Boolean) {
+        kuiklyWindow.setTimeout({
             if (isAnimation) {
                 ele.style.transition = "transform ${PAGING_SCROLL_ANIMATION_TIME}ms"
             }
             setElementPosition(scrollOffsetX, scrollOffsetY)
-            if (!isAnimation) {
-                completeProgrammaticScroll(true)
-                return@setTimeout
-            }
-            programmaticScrollEndTimer = kuiklyWindow.setTimeout({
-                programmaticScrollEndTimer = null
-                if (sequence != programmaticScrollSequence) return@setTimeout
+        }, PAGING_SCROLL_DELAY)
+        if (isAnimation) {
+            kuiklyWindow.setTimeout({
                 ele.style.transition = ""
-                completeProgrammaticScroll(true)
             }, PAGING_SCROLL_ANIMATION_TIME)
-        }, delay)
-        return true
+        }
     }
 
-    fun setContentOffset(
-        offsetX: Float,
-        offsetY: Float,
-        animate: Boolean,
-        completion: (Boolean) -> Unit,
-        isCurrent: () -> Boolean = { true },
-    ): Boolean {
+    fun setContentOffset(offsetX: Float, offsetY: Float, animate: Boolean) {
         val elementHeight = ele.offsetHeight.toFloat()
         val elementWidth = ele.offsetWidth.toFloat()
         if (scrollDirection == KRListConst.SCROLL_DIRECTION_COLUMN && elementHeight > 0) {
@@ -548,27 +506,16 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
         ele.classList.add(PAGE_LIST_CLASS)
         val offsetMap = listElement.updateOffsetMap(offsetX, offsetY, isDragging)
         listElement.willDragEndEventCallback?.invoke(offsetMap)
-        if (!isCurrent()) {
-            completion(false)
-            return false
-        }
         listElement.dragEndEventCallback?.invoke(offsetMap)
-        if (!isCurrent()) {
-            completion(false)
-            return false
-        }
         listElement.scrollEventCallback?.invoke(offsetMap)
-        if (!isCurrent()) {
-            completion(false)
-            return false
+        if (animate) {
+            handlePagerScrollTo(-offsetX, -offsetY, animate)
+        } else {
+            // wait index changed
+            kuiklyWindow.setTimeout({
+                handlePagerScrollTo(-offsetX, -offsetY, animate)
+            }, CONTENT_OFFSET_DELAY)
         }
-        val scheduled = handlePagerScrollTo(
-            -offsetX,
-            -offsetY,
-            animate,
-            if (animate) PAGING_SCROLL_DELAY else CONTENT_OFFSET_DELAY,
-            completion,
-        )
         // This is to handle nested PageLists. After sliding the inner PageList,
         // clicking the outer PageList needs to hide the overflow position of the inner node
         // Implementation is not very elegant, pending refactoring with reference to swiper logic
@@ -583,7 +530,6 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
                 }
             }
         }
-        return scheduled
     }
 
     private fun modifyOverflowIfPageList(element: HTMLElement, isVisible: Boolean) {
@@ -616,37 +562,11 @@ class H5ListPagingHelper(private val ele: HTMLElement, private var listElement: 
      * Clean up resources when helper is destroyed
      */
     fun destroy() {
-        cancelProgrammaticScroll()
         // Clear wheel reset timer
         wheelResetTimer?.let {
             kuiklyWindow.clearTimeout(it)
         }
         wheelResetTimer = null
-    }
-
-    fun cancelProgrammaticScroll() {
-        val completion = programmaticScrollCompletion
-        programmaticScrollCompletion = null
-        programmaticScrollSequence += 1L
-        programmaticScrollStartTimer?.let { kuiklyWindow.clearTimeout(it) }
-        programmaticScrollStartTimer = null
-        programmaticScrollEndTimer?.let { kuiklyWindow.clearTimeout(it) }
-        programmaticScrollEndTimer = null
-        ele.style.transition = ""
-        completion?.invoke(false)
-    }
-
-    private fun completeProgrammaticScroll(committed: Boolean) {
-        val completion = programmaticScrollCompletion
-        programmaticScrollCompletion = null
-        completion?.invoke(committed)
-    }
-
-    private fun finishProgrammaticScroll() {
-        listElement.nativeScrollPhase = 0
-        listElement.scrollEndEventCallback?.invoke(
-            listElement.updateOffsetMap(abs(currentTranslateX), abs(currentTranslateY), isDragging)
-        )
     }
 
     companion object {

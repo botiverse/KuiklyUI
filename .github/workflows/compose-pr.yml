@@ -89,7 +89,7 @@ jobs:
             :compose:testDebugUnitTest \
             :core-render-android:testDebugUnitTest \
             --no-build-cache --no-daemon
-      - name: Require nonzero tests per module
+      - name: Require successful JVM suites and report module counts
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -104,7 +104,12 @@ jobs:
                   failures += int(suite.attrib.get("failures", "0"))
                   errors += int(suite.attrib.get("errors", "0"))
               print(f"{module}: tests={tests} failures={failures} errors={errors}")
-              if tests == 0 or failures or errors:
+              # The safe pre-transaction core tree has no JVM test sources, so
+              # :core:testDebugUnitTest is intentionally NO-SOURCE. Compose and
+              # Android renderer both have real suites and must stay nonzero.
+              if module != "core" and tests == 0:
+                  raise SystemExit(1)
+              if failures or errors:
                   raise SystemExit(1)
           PY
       - name: Upload JVM evidence
@@ -139,10 +144,6 @@ jobs:
         run: ./gradlew :demo:generateDummyFramework --no-build-cache --no-daemon
       - name: Install locked Pods
         run: bundle exec pod install --project-directory=iosApp --deployment
-      - name: Run production transaction fixtures
-        run: |
-          tools/ios-renderer-tests/run-scroll-animation-policy-test.sh
-          tools/ios-renderer-tests/run-scroll-view-transaction-fixture.sh
       - name: Compile Kotlin Native main and tests
         run: |
           ./gradlew \
@@ -174,19 +175,6 @@ jobs:
           path: |
             build/ios-renderer.log
             build/ios-renderer.xcresult
-
-  ohos-renderer-policy:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.EXPECTED_HEAD_SHA }}
-      - name: Run production C++ transaction fixtures
-        run: |
-          tools/ohos-renderer-tests/run-pending-callback-slot-policy-test.sh
-          tools/ohos-renderer-tests/run-current-operation-arbiter-fixture.sh
-          tools/ohos-renderer-tests/run-scroll-replacement-policy-test.sh
 
   ohos-native:
     # KuiklyUI is a personal repository, so organization-scoped Blacksmith runners never pick up
@@ -235,7 +223,7 @@ jobs:
           name: ohos-native-${{ env.EXPECTED_HEAD_SHA }}
           path: build/ohos-evidence
 
-  allowlist:
+  source-contracts:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -243,76 +231,12 @@ jobs:
         with:
           ref: ${{ env.EXPECTED_HEAD_SHA }}
           fetch-depth: 0
-      - name: Audit every scroll writer and prove fail-closed behavior
-        run: python3 tools/check-scroll-writer-allowlist.py --mutation-test
       - name: Reject stale native callbacks retained by Compose node initialization
         run: python3 tools/check-compose-node-event-freshness.py --self-test
-  mutation-common-android:
-    runs-on: ubuntu-latest
-    # 46 mutation groups, each a full gradle run; cold-cache worst case >60min
-    # (observed twice). 120 gives headroom; split into a matrix if it ever
-    # exceeds this again.
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.EXPECTED_HEAD_SHA }}
-          fetch-depth: 0
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Kill common and Android production mutations
-        run: tools/run-scroll-transaction-mutations.sh common-android
-
-  mutation-ios:
-    runs-on: macos-14
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.EXPECTED_HEAD_SHA }}
-          fetch-depth: 0
-      - name: Select Xcode 16.2
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
-      - name: Kill iOS production current-operation mutation
-        run: tools/run-scroll-transaction-mutations.sh ios
-
-  mutation-ohos:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
-    timeout-minutes: 30
-    env:
-      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
-      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.EXPECTED_HEAD_SHA }}
-          fetch-depth: 0
-      - name: Trust the mounted workspace inside the job container
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global user.name "Kuikly CI"
-          git config --global user.email "kuikly-ci@users.noreply.github.com"
-      - name: Prepare OHOS native dependency metadata
-        working-directory: ohosApp
-        run: |
-          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
-          ohpm install --all
-          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
-          hvigorw assembleHar \
-            --mode module \
-            -p module=render@default \
-            -p product=default \
-            -p buildMode=debug \
-            --analyze=normal \
-            --parallel \
-            --no-daemon
-      - name: Kill OHOS production current-operation mutation
-        run: tools/run-scroll-transaction-mutations.sh ohos
+      - name: Preserve active user motion when RecyclerView enters dragging
+        run: python3 tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
+      - name: Reject non-finite iOS scroll event values
+        run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
 
   exact-matrix:
     if: always()
@@ -321,12 +245,8 @@ jobs:
       - identity-diff
       - common-core-android
       - ios-renderer
-      - ohos-renderer-policy
       - ohos-native
-      - allowlist
-      - mutation-common-android
-      - mutation-ios
-      - mutation-ohos
+      - source-contracts
     steps:
       - name: Require every exact-bound gate
         env:

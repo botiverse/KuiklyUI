@@ -69,15 +69,12 @@ internal class OverScrollHandler(
      * 内容边距inset
      */
     var contentInsetWhenEndDrag: KRRecyclerContentViewContentInset? = null
-    var contentInsetWhenEndDragIsCurrent: () -> Boolean = { true }
     var forceOverScroll = false
 
     var overScrolling = false
     var overScrollX: Float = 0f
     var overScrollY: Float = 0f
     private var hadBeginDrag = false
-    private var bounceAnimator: ValueAnimator? = null
-    private var bounceGeneration = 0L
 
     /**
      * 累加 translation 的浮点真值源。
@@ -121,7 +118,6 @@ internal class OverScrollHandler(
 
     /** Reset transient state for Compose DSL reuse. */
     fun prepareForComposeReuse() {
-        cancelActiveBounce()
         dragging = false
         downing = false
         hadBeginDrag = false
@@ -131,13 +127,6 @@ internal class OverScrollHandler(
         accumulatedTranslationX = 0f
         accumulatedTranslationY = 0f
         contentInsetWhenEndDrag = null
-        contentInsetWhenEndDragIsCurrent = { true }
-    }
-
-    fun cancelActiveBounce() {
-        bounceGeneration += 1L
-        bounceAnimator?.cancel()
-        bounceAnimator = null
     }
 
     /**
@@ -149,7 +138,6 @@ internal class OverScrollHandler(
             startBounceBack(contentInset)
         } else {
             setFinalTranslation(contentInset)
-            contentInset.finishCallback?.invoke()
         }
     }
 
@@ -274,42 +262,25 @@ internal class OverScrollHandler(
     }
 
     private fun startBounceBack(contentInset: KRRecyclerContentViewContentInset? = null) {
-        bounceGeneration += 1L
-        bounceAnimator?.cancel()
-        val generation = bounceGeneration
-        val finishingContentInset = contentInset ?: currentContentInsetWhenEndDrag()
         val finalOffset = getFinalOffset(contentInset)
         val startOffset = getTranslation().roundToInt().toFloat()
         val animator = ValueAnimator.ofFloat(startOffset, finalOffset)
-        bounceAnimator = animator
         animator.interpolator = DecelerateInterpolator()
         animator.duration = BOUND_BACK_DURATION
         animator.addListener(object : AnimatorListenerAdapter() {
-            private val completionGate = BounceCompletionGate(
-                generation = generation,
-                currentGeneration = { bounceGeneration },
-            )
-
-            private fun finishIfCurrent() {
-                completionGate.dispatchOnce {
-                    bounceAnimator = null
-                    hadBeginDrag = false
-                    overScrolling = false
-                    fireOverScrollAnimationCallback(finalOffset)
-                    finishingContentInset?.finishCallback?.invoke()
-                    if (generation == bounceGeneration) {
-                        overScrollEventCallback.onBounceEnd()
-                    }
-                }
-            }
-
             override fun onAnimationCancel(animation: Animator) {
-                finishIfCurrent()
+                hadBeginDrag = false
+                overScrolling = false
+                fireOverScrollAnimationCallback(finalOffset)
+                tryFireContentInsertFinish()
             }
 
             override fun onAnimationEnd(animation: Animator) {
                 super.onAnimationEnd(animation)
-                finishIfCurrent()
+                hadBeginDrag = false
+                overScrolling = false
+                fireOverScrollAnimationCallback(finalOffset)
+                tryFireContentInsertFinish()
             }
 
         })
@@ -342,8 +313,12 @@ internal class OverScrollHandler(
         fireOverScrollCallback(offsetX, offsetY)
     }
 
+    private fun tryFireContentInsertFinish() {
+        contentInsetWhenEndDrag?.finishCallback?.invoke()
+    }
+
     private fun getFinalOffset(viewContentInset: KRRecyclerContentViewContentInset?): Float {
-        val ci = viewContentInset ?: currentContentInsetWhenEndDrag()
+        val ci = viewContentInset ?: contentInsetWhenEndDrag
         val contentInset = ci ?: return 0f
         val rawOffset = if (isVertical) {
             contentInset.top
@@ -351,10 +326,6 @@ internal class OverScrollHandler(
             contentInset.left
         }
         return rawOffset.roundToInt().toFloat()
-    }
-
-    private fun currentContentInsetWhenEndDrag(): KRRecyclerContentViewContentInset? {
-        return contentInsetWhenEndDrag?.takeIf { contentInsetWhenEndDragIsCurrent() }
     }
 
     private fun setFinalTranslation(viewContentInset: KRRecyclerContentViewContentInset) {
@@ -567,20 +538,6 @@ internal fun calculateOverScrollDelta(
     return min(abs(dampedDelta) * remainingRatio, remaining) * translationOffset.signOrZero()
 }
 
-internal class BounceCompletionGate(
-    private val generation: Long,
-    private val currentGeneration: () -> Long,
-) {
-    private var dispatched = false
-
-    fun dispatchOnce(block: () -> Unit): Boolean {
-        if (dispatched || generation != currentGeneration()) return false
-        dispatched = true
-        block()
-        return true
-    }
-}
-
 private fun Float.signOrZero(): Float = when {
     this > 0f -> 1f
     this < 0f -> -1f
@@ -604,6 +561,4 @@ internal interface OverScrollEventCallback {
         overScrollStart: Boolean,
         isDragging: Boolean
     )
-
-    fun onBounceEnd()
 }

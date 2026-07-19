@@ -23,8 +23,6 @@ import com.tencent.kuikly.compose.foundation.lazy.staggeredgrid.LazyStaggeredGri
 import com.tencent.kuikly.compose.foundation.pager.PagerMeasureResult
 import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
 import com.tencent.kuikly.compose.gestures.invalidateDeferredScrollOffsetAlignmentOwnersOnReuse
-import com.tencent.kuikly.compose.scroller.ScrollOffsetWriteIntent
-import com.tencent.kuikly.compose.scroller.applyScrollViewContentOffset
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
 import com.tencent.kuikly.compose.ui.layout.LayoutNodeSubcompositionsState
 import com.tencent.kuikly.compose.ui.layout.MeasureResult
@@ -105,9 +103,8 @@ internal fun bindKuiklyInfo(
     orientation: Orientation,
 ): KuiklyScrollInfo {
     val kuiklyInfo = scrollableState.kuiklyInfo
-    kuiklyInfo.bindScrollView(sv)
+    kuiklyInfo.scrollView = sv
     kuiklyInfo.orientation = orientation
-    kuiklyInfo.isComposeScrollInProgress = { scrollableState.isScrollInProgress }
     sv.obtainRenderProps().kuiklyScrollInfo = kuiklyInfo
     sv.extProps[KuiklyInfoKey] = kuiklyInfo as Any
     return kuiklyInfo
@@ -135,7 +132,7 @@ internal fun invalidateDeferredScrollOffsetAlignmentOnReuse(
         cancelPendingAlignment = { it.cancel() }
     )
     if (old != null && old !== new) {
-        old.scrollView?.let { old.detachScrollView(it, invalidateNativeWrites = false) }
+        old.scrollView = null
     }
 }
 
@@ -162,8 +159,7 @@ internal fun restoreScrollerViewOnReuse(
     }
 
     sv.abortContentOffsetAnimate()
-    kuiklyInfo.prepareBoundScrollViewForComposeReuse(sv)
-    val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return
+    sv.prepareForComposeReuse()
 
     kuiklyInfo.ignoreScrollOffset = null
     kuiklyInfo.realContentSize = null
@@ -181,25 +177,11 @@ internal fun restoreScrollerViewOnReuse(
     val restoreOffsetY = if (kuiklyInfo.isVertical()) offsetInDp else 0f
 
     val needIgnore = oldSvOffset == null || oldSvOffset != restoreOffset
-    val ignoredRestoreOffset = if (needIgnore) {
-        IntOffset(
+    if (needIgnore) {
+        kuiklyInfo.ignoreScrollOffset = IntOffset(
             x = (restoreOffsetX * density).toInt(),
             y = (restoreOffsetY * density).toInt(),
         )
-    } else {
-        null
     }
-    kuiklyInfo.applyScrollViewContentOffset(
-        ownerToken = ownerToken,
-        offsetX = restoreOffsetX,
-        offsetY = restoreOffsetY,
-        animated = false,
-        intent = ScrollOffsetWriteIntent.StateRestore,
-        reason = "reuse_restore",
-        ignoredNativeOffset = ignoredRestoreOffset,
-        anchorValidator = {
-            val maxOffset = maxOf(0, kuiklyInfo.currentContentSize - kuiklyInfo.viewportSize)
-            restoreOffset in 0..maxOffset
-        },
-    )
+    sv.setContentOffset(restoreOffsetX, restoreOffsetY, animated = false)
 }

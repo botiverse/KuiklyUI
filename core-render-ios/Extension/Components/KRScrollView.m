@@ -29,28 +29,6 @@ typedef NS_ENUM(NSUInteger, KRSetContentOffsetAnimation) {
     KRSetContentOffsetAnimationLinear = 1,
 };
 
-typedef NS_ENUM(NSInteger, KRScrollWriteResultCode) {
-    KRScrollWriteResultCodeCommitted = 0,
-    KRScrollWriteResultCodeAlreadySatisfied = 1,
-    KRScrollWriteResultCodeBusy = 2,
-    KRScrollWriteResultCodeNotReady = 3,
-    KRScrollWriteResultCodeLayoutChanged = 4,
-    KRScrollWriteResultCodeStale = 5,
-    KRScrollWriteResultCodeReplaced = 6,
-    KRScrollWriteResultCodeCanceled = 7,
-    KRScrollWriteResultCodeDestroyed = 8,
-    KRScrollWriteResultCodeOutOfRange = 9,
-    KRScrollWriteResultCodeUnsupportedAxisOrNoLayout = 10,
-    KRScrollWriteResultCodeInterrupted = 11,
-    KRScrollWriteResultCodeAckTimeout = 12,
-    KRScrollWriteResultCodeRollbackFailed = 13,
-};
-
-typedef NS_ENUM(NSUInteger, KRScrollWriteKind) {
-    KRScrollWriteKindContentOffset,
-    KRScrollWriteKindContentInset,
-};
-
 static BOOL KRScrollEventValueIsFinite(CGFloat value) {
     return !isnan(value) && !isinf(value);
 }
@@ -67,25 +45,6 @@ static void KRLogDroppedScrollEventValue(NSString *field,
           @(value),
           action);
 }
-
-@interface KRScrollWriteOperation : NSObject
-@property (nonatomic, assign) NSUInteger nativeSequence;
-@property (nonatomic, assign) NSUInteger composeOperation;
-@property (nonatomic, assign) NSInteger generation;
-@property (nonatomic, assign) NSUInteger interactionEpoch;
-@property (nonatomic, assign) NSUInteger layoutRevision;
-@property (nonatomic, assign) NSUInteger insetRevision;
-@property (nonatomic, assign) KRScrollWriteKind kind;
-@property (nonatomic, assign) CGPoint targetOffset;
-@property (nonatomic, assign) UIEdgeInsets targetInset;
-@property (nonatomic, assign) BOOL animated;
-@property (nonatomic, assign) BOOL replacedPrevious;
-@property (nonatomic, assign) BOOL terminal;
-@property (nonatomic, copy) KuiklyRenderCallback callback;
-@end
-
-@implementation KRScrollWriteOperation
-@end
 
 /*
  * @brief 暴露给Kotlin侧调用的Scoller组件
@@ -125,46 +84,6 @@ static void KRLogDroppedScrollEventValue(NSString *field,
 /** event is scrollToTop  */
 @property (nonatomic, strong) KuiklyRenderCallback KUIKLY_PROP(scrollToTop);
 
-- (BOOL)css_contentOffsetWithParams:(NSString *)params callback:(KuiklyRenderCallback)callback;
-- (BOOL)p_matchesExpectedContentSize:(CGFloat)expectedContentSize
-                        viewportSize:(CGFloat)expectedViewportSize;
-- (BOOL)p_matchesInteractionEpoch:(NSUInteger)interactionEpoch
-                   layoutRevision:(NSUInteger)layoutRevision
-                    insetRevision:(NSUInteger)insetRevision;
-- (NSDictionary *)p_scrollWriteResult:(KRScrollWriteResultCode)resultCode;
-- (NSDictionary *)p_scrollWriteResult:(KRScrollWriteResultCode)resultCode
-                             operation:(KRScrollWriteOperation *)operation;
-- (KRScrollWriteResultCode)p_validateComposeWriteWithGeneration:(NSInteger)generation
-                                              requiresNativeIdle:(BOOL)requiresNativeIdle
-                                                       operation:(NSUInteger)operation
-                                              expectedContentSize:(CGFloat)expectedContentSize
-                                             expectedViewportSize:(CGFloat)expectedViewportSize
-                                                interactionEpoch:(NSUInteger)interactionEpoch
-                                                   layoutRevision:(NSUInteger)layoutRevision
-                                                    insetRevision:(NSUInteger)insetRevision;
-- (KRScrollWriteOperation *)p_installScrollWriteWithGeneration:(NSInteger)generation
-                                                     operation:(NSUInteger)operation
-                                              interactionEpoch:(NSUInteger)interactionEpoch
-                                                 layoutRevision:(NSUInteger)layoutRevision
-                                                  insetRevision:(NSUInteger)insetRevision
-                                                          kind:(KRScrollWriteKind)kind
-                                                      callback:(KuiklyRenderCallback)callback;
-- (dispatch_block_t)p_finalizeScrollWrite:(KRScrollWriteOperation *)operation
-                                resultCode:(KRScrollWriteResultCode)resultCode;
-- (dispatch_block_t)p_invalidateCurrentScrollWrite:(KRScrollWriteResultCode)resultCode;
-- (BOOL)p_isCurrentScrollWrite:(KRScrollWriteOperation *)operation;
-- (void)p_cancelNativeScrollMechanisms;
-- (void)p_scheduleTerminalDeadlineForOperation:(KRScrollWriteOperation *)operation
-                                    durationMs:(CGFloat)durationMs;
-- (void)p_springAnimationWithContentOffset:(CGPoint)contentOffset
-                                  duration:(CGFloat)duration
-                                   damping:(CGFloat)damping
-                                  velocity:(CGFloat)velocity
-                                     curve:(int)curve
-                                 operation:(KRScrollWriteOperation *)operation;
-- (void)p_completeOffsetAnimation:(KRScrollViewOffsetAnimator *)animator
-                       generation:(NSUInteger)generation
-                        operation:(KRScrollWriteOperation *)operation;
 
 @end
 
@@ -173,13 +92,6 @@ static void KRLogDroppedScrollEventValue(NSString *field,
     KuiklyRenderCallback _scrollEventCallback;
     /** 松手时offsetY小于insetTop设置该contentInset for 下拉刷新组件 */
     UIEdgeInsets _contentInsetWhenEndDrag;
-    NSInteger _contentInsetWhenEndDragGeneration;
-    NSUInteger _contentInsetWhenEndDragOperation;
-    CGFloat _contentInsetWhenEndDragExpectedContentSize;
-    CGFloat _contentInsetWhenEndDragExpectedViewportSize;
-    NSUInteger _contentInsetWhenEndDragInteractionEpoch;
-    NSUInteger _contentInsetWhenEndDragLayoutRevision;
-    NSUInteger _contentInsetWhenEndDragInsetRevision;
     /* wrapper self view*/
     __weak KRWrapperView *_wrapperView;
     /* 一对多代理转发 */
@@ -188,25 +100,15 @@ static void KRLogDroppedScrollEventValue(NSString *field,
     CGPoint *_targetContentOffset;
     /** is first layout */
     BOOL _didLayout;
+    /** 下次列表滚动动画结束回调 */
+    dispatch_block_t _nextEndScrollingAnimationCallback;
     /**是否正在拖拽中，因系统isDragging不准，所以独立维护**/
     BOOL _isCurrentlyDragging;
     /** displaylink驱动的offset动画器 */
     KRScrollViewOffsetAnimator *_offsetAnimator;
-    /** Invalidates stale UIKit animation completions after replacement/reuse/cancel. */
-    NSUInteger _offsetAnimationGeneration;
     /**忽略分发ScrollEvent**/
     BOOL _ignoreDispatchScrollEvent;
     KRContentOffsetAnimator *_ku_coreAnimator;
-    NSInteger _composeOffsetWriteGeneration;
-    NSUInteger _nativeWriteOperationSequence;
-    NSUInteger _latestComposeWriteOperation;
-    NSUInteger _minimumComposeWriteOperation;
-    NSUInteger _nativeInteractionEpoch;
-    NSUInteger _nativeLayoutRevision;
-    NSUInteger _nativeInsetRevision;
-    CGRect _lastRevisionBounds;
-    CGSize _lastRevisionContentSize;
-    KRScrollWriteOperation *_currentScrollWriteOperation;
 }
 @synthesize hr_rootView;
 @synthesize lastContentOffset = _lastContentOffset;
@@ -243,45 +145,39 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 
 - (void)hrv_callWithMethod:(NSString *)method params:(NSString *)params callback:(KuiklyRenderCallback)callback {
     if ([method isEqualToString:@"contentOffset"]) {
-        [self css_contentOffsetWithParams:params callback:callback];
+        [self css_contentOffsetWithParams:params];
     } else if ([method isEqualToString:@"contentInset"]) {
-        [self css_contentInsetWithParams:params callback:callback];
+        [self css_contentInsetWithParams:params];
     } else if ([method isEqualToString:@"contentInsetWhenEndDrag"]) {
         [self css_contentInsetWhenEndDragWithParams:params];
     } else if ([method isEqualToString:@"abortContentOffsetAnimate"]) {
         [self css_abortContentOffsetAnimate];
     } else if ([method isEqualToString:@"prepareForComposeReuse"]) {
-        [self css_prepareForComposeReuse:params];
+        [self css_prepareForComposeReuse];
     }
 }
 
 #pragma mark - abort animate
 
 - (void)css_abortContentOffsetAnimate {
-    dispatch_block_t terminal = [self p_invalidateCurrentScrollWrite:KRScrollWriteResultCodeCanceled];
-    _nativeWriteOperationSequence += 1;
-    [self p_cancelNativeScrollMechanisms];
-    if (terminal) terminal();
+    // 停止 KRContentOffsetAnimator 动画
+    [_ku_coreAnimator stop];
+    _ku_coreAnimator = nil;
+
+    // 停止 KRScrollViewOffsetAnimator 动画
+    [_offsetAnimator cancel];
+    _offsetAnimator = nil;
+
+    _ignoreDispatchScrollEvent = NO;
+
+    CGPoint currentOffset = self.contentOffset;
+    [self setContentOffset:currentOffset animated:NO];
+
+    _nextEndScrollingAnimationCallback = nil;
 }
 
 // Clear transient state for Compose DSL reuse. Kotlin side overwrites contentSize/contentOffset immediately after.
-- (void)css_prepareForComposeReuse:(NSString *)params {
-    NSInteger nextGeneration = params.length > 0 ? params.integerValue : _composeOffsetWriteGeneration + 1;
-    _composeOffsetWriteGeneration = nextGeneration;
-    _nativeInteractionEpoch += 1;
-    _nativeLayoutRevision += 1;
-    _nativeInsetRevision += 1;
-    dispatch_block_t terminal = [self p_invalidateCurrentScrollWrite:KRScrollWriteResultCodeDestroyed];
-    _nativeWriteOperationSequence += 1;
-    [self p_cancelNativeScrollMechanisms];
-    #if !TARGET_OS_OSX // [macOS]
-    if (self.panGestureRecognizer.state == UIGestureRecognizerStateBegan ||
-        self.panGestureRecognizer.state == UIGestureRecognizerStateChanged) {
-        self.panGestureRecognizer.enabled = NO;
-        self.panGestureRecognizer.enabled = YES;
-    }
-    #endif // [macOS]
-    _isCurrentlyDragging = NO;
+- (void)css_prepareForComposeReuse {
     // Required: ensures dispatchScrollEventWithCurOffset: fires on restored offset,
     // otherwise ignoreScrollOffset gets stuck and blocks all subsequent scrolling.
     _lastContentOffset = CGPointMake(-CGFLOAT_MAX, -CGFLOAT_MAX);
@@ -292,15 +188,6 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
         self.autoAdjustContentOffsetDisable = NO;
     }
     _contentInsetWhenEndDrag = UIEdgeInsetsZero;
-    _contentInsetWhenEndDragGeneration = _composeOffsetWriteGeneration;
-    _contentInsetWhenEndDragOperation = 0;
-    _contentInsetWhenEndDragExpectedContentSize = -1;
-    _contentInsetWhenEndDragExpectedViewportSize = -1;
-    _contentInsetWhenEndDragInteractionEpoch = _nativeInteractionEpoch;
-    _contentInsetWhenEndDragLayoutRevision = _nativeLayoutRevision;
-    _contentInsetWhenEndDragInsetRevision = _nativeInsetRevision;
-    _latestComposeWriteOperation = 0;
-    _minimumComposeWriteOperation = 0;
     // Reset nested scroll transient state.
     [self.nestedScrollCoordinator prepareForComposeReuse];
     self.shouldHaveActiveInner = NO;
@@ -309,7 +196,6 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     self.cascadeLockForNestedScroll = NO;
     self.isLockedInNestedScroll = NO;
     self.tempLastContentOffsetForMultiLayerNested = nil;
-    if (terminal) terminal();
 }
 
 #pragma mark - pubilc
@@ -332,12 +218,6 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (!CGRectEqualToRect(_lastRevisionBounds, self.bounds) ||
-        !CGSizeEqualToSize(_lastRevisionContentSize, self.contentSize)) {
-        _nativeLayoutRevision += 1;
-        _lastRevisionBounds = self.bounds;
-        _lastRevisionContentSize = self.contentSize;
-    }
     if (!_didLayout && [self.hr_rootView isKindOfClass:[KuiklyRenderView class]]) {
         _didLayout = YES;
         KuiklyRenderView *renderView = (KuiklyRenderView*)self.hr_rootView;
@@ -430,14 +310,8 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     self.lContentOffset = scrollView.contentOffset;
 
     _isCurrentlyDragging = YES;
-    _nativeInteractionEpoch += 1;
-    _nativeWriteOperationSequence += 1;
-    _minimumComposeWriteOperation = _latestComposeWriteOperation + 1;
-    _contentInsetWhenEndDrag = UIEdgeInsetsZero;
-    _contentInsetWhenEndDragOperation = 0;
-    dispatch_block_t terminal = [self p_invalidateCurrentScrollWrite:KRScrollWriteResultCodeInterrupted];
-    [self p_cancelNativeScrollMechanisms];
-    if (terminal) terminal();
+    [_ku_coreAnimator stop];
+    _ku_coreAnimator = nil;
     if (_css_dragBegin) {
         NSDictionary *eventParams = [self p_generateEventBaseParams];
         if (eventParams) {
@@ -448,28 +322,8 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 
 - (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
     _isCurrentlyDragging = NO;
-    BOOL shouldApplyEndDragInset =
-        !UIEdgeInsetsEqualToEdgeInsets(_contentInsetWhenEndDrag, UIEdgeInsetsZero) &&
-        _contentInsetWhenEndDragGeneration == _composeOffsetWriteGeneration &&
-        (_contentInsetWhenEndDragOperation == 0 ||
-         (_contentInsetWhenEndDragOperation == _latestComposeWriteOperation &&
-          _contentInsetWhenEndDragOperation >= _minimumComposeWriteOperation)) &&
-        [self p_matchesInteractionEpoch:_contentInsetWhenEndDragInteractionEpoch
-                         layoutRevision:_contentInsetWhenEndDragLayoutRevision
-                          insetRevision:_contentInsetWhenEndDragInsetRevision] &&
-        [self p_matchesExpectedContentSize:_contentInsetWhenEndDragExpectedContentSize
-                              viewportSize:_contentInsetWhenEndDragExpectedViewportSize] &&
-        scrollView.contentOffset.y < -_contentInsetWhenEndDrag.top;
-    UIEdgeInsets endDragInset = _contentInsetWhenEndDrag;
-    _contentInsetWhenEndDrag = UIEdgeInsetsZero;
-    _contentInsetWhenEndDragOperation = 0;
-    if (shouldApplyEndDragInset && !UIEdgeInsetsEqualToEdgeInsets(self.contentInset, endDragInset)) {
-        self.contentInset = endDragInset;
-        _nativeInsetRevision += 1;
-    }
     if (!decelerate) { // 滑动结束
-        BOOL animating = _currentScrollWriteOperation != nil || _offsetAnimator != nil ||
-            [_ku_coreAnimator isAnimating];
+        BOOL animating = [_ku_coreAnimator isAnimating];
         if (_css_scrollEnd && !animating) {
             NSDictionary *eventParams = [self p_generateEventBaseParams];
             if (eventParams) {
@@ -483,11 +337,17 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
             _css_dragEnd(eventParams);
         }
     }
+    if (!UIEdgeInsetsEqualToEdgeInsets(_contentInsetWhenEndDrag, UIEdgeInsetsZero)
+        && scrollView.contentOffset.y < -_contentInsetWhenEndDrag.top
+        ) {
+        UIEdgeInsets insets = _contentInsetWhenEndDrag;
+        self.contentInset = insets;
+    }
+
 }
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
-    BOOL animating = _currentScrollWriteOperation != nil || _offsetAnimator != nil ||
-        [_ku_coreAnimator isAnimating];
+    BOOL animating = [_ku_coreAnimator isAnimating];
     if (_css_scrollEnd && !animating) {
         NSDictionary *eventParams = [self p_generateEventBaseParams];
         if (eventParams) {
@@ -506,15 +366,15 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 }
 
 - (void)scrollViewDidEndScrollingAnimation:(UIScrollView *)scrollView {
-    // Compose writes use tagged KRScrollViewOffsetAnimator completions. This untagged UIKit
-    // callback is only authoritative for legacy native animations.
-    if (_currentScrollWriteOperation == nil &&
-        [KRScrollViewOffsetAnimator shouldEmitTerminalForNativePhase:[self p_nativeScrollPhase]] &&
-        _css_scrollEnd) {
+    if (_css_scrollEnd) {
         NSDictionary *eventParams = [self p_generateEventBaseParams];
         if (eventParams) {
             _css_scrollEnd(eventParams);
         }
+    }
+    if (_nextEndScrollingAnimationCallback) {
+        _nextEndScrollingAnimationCallback();
+        _nextEndScrollingAnimationCallback = nil;
     }
 }
 
@@ -630,371 +490,55 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 
 #pragma mark - css method
 
-- (BOOL)css_contentOffsetWithParams:(NSString *)params callback:(KuiklyRenderCallback)callback {
+- (void)css_contentOffsetWithParams:(NSString *)params {
     NSArray<NSString *> *points = [params componentsSeparatedByString:@" "];
-    NSInteger generation = points.count > 8 ? [points[7] integerValue] : -1;
-    BOOL requiresNativeIdle = points.count > 8 && [points[8] boolValue];
-    NSUInteger composeOperation = points.count > 9 ? (NSUInteger)[points[9] longLongValue] : 0;
-    CGFloat expectedContentSize = points.count > 10 ? [points[10] doubleValue] : -1;
-    CGFloat expectedViewportSize = points.count > 11 ? [points[11] doubleValue] : -1;
-    NSUInteger interactionEpoch = points.count > 17 ? (NSUInteger)[points[17] longLongValue] : _nativeInteractionEpoch;
-    NSUInteger layoutRevision = points.count > 18 ? (NSUInteger)[points[18] longLongValue] : _nativeLayoutRevision;
-    NSUInteger insetRevision = points.count > 21 ? (NSUInteger)[points[21] longLongValue] : _nativeInsetRevision;
-    KRScrollWriteResultCode validation = [self p_validateComposeWriteWithGeneration:generation
-                                                                  requiresNativeIdle:requiresNativeIdle
-                                                                           operation:composeOperation
-                                                                 expectedContentSize:expectedContentSize
-                                                                expectedViewportSize:expectedViewportSize
-                                                                    interactionEpoch:interactionEpoch
-                                                                       layoutRevision:layoutRevision
-                                                                        insetRevision:insetRevision];
-    if (validation != KRScrollWriteResultCodeCommitted) {
-        if (callback) callback([self p_scrollWriteResult:validation]);
-        return NO;
-    }
-    KRScrollWriteOperation *operation = [self p_installScrollWriteWithGeneration:generation
-                                                                        operation:composeOperation
-                                                                 interactionEpoch:interactionEpoch
-                                                                    layoutRevision:layoutRevision
-                                                                     insetRevision:insetRevision
-                                                                             kind:KRScrollWriteKindContentOffset
-                                                                         callback:callback];
-    if (![self p_isCurrentScrollWrite:operation]) {
-        return NO;
-    }
     BOOL animated = [points count] > 2 ? [points[2] boolValue] : NO;
-    operation.animated = animated;
     CGFloat duration = [points count] > 3 ? [points[3] floatValue] : 0;
     CGFloat damping = [points count] > 4 ? [points[4] floatValue] : 0;
     CGFloat velocity = [points count] > 5 ? [points[5] floatValue] : 0;
     BOOL curveSpecified = [points count] > 6;
     int curve = curveSpecified ? [points[6] intValue] : 0;
     CGPoint contentOffset = CGPointMake([points.firstObject doubleValue], [points[1] doubleValue]);
-    operation.targetOffset = contentOffset;
     [self p_setTargetContentOffsetIfNeed:contentOffset];
-    if (fabs(self.contentOffset.x - contentOffset.x) <= 0.5 &&
-        fabs(self.contentOffset.y - contentOffset.y) <= 0.5) {
-        dispatch_block_t terminal = [self p_finalizeScrollWrite:operation
-                                                      resultCode:KRScrollWriteResultCodeAlreadySatisfied];
-        if (terminal) terminal();
-        return YES;
-    }
     self.skipNestScrollLock = YES;
     if (damping || curveSpecified) {
-        [self p_springAnimationWithContentOffset:contentOffset
-                                        duration:duration
-                                         damping:damping
-                                        velocity:velocity
-                                           curve:curve
-                                       operation:operation];
-        return [self p_isCurrentScrollWrite:operation];
+        [self p_springAnimationWithContentOffset:contentOffset duration:duration damping:damping velocity:velocity curve:curve];
+        return ;
     }
     UIEdgeInsets newContentInsets = [self maxEdgeInsetsWithContentOffset:contentOffset];
     if (!UIEdgeInsetsEqualToEdgeInsets(self.contentInset, newContentInsets)) {
         self.contentInset = newContentInsets;
-        _nativeInsetRevision += 1;
     }
-    if (animated) {
-        [self p_springAnimationWithContentOffset:contentOffset
-                                        duration:250.0
-                                         damping:1.0
-                                        velocity:0.0
-                                           curve:KRSetContentOffsetAnimationLinear
-                                       operation:operation];
-    } else {
-        [self setContentOffset:contentOffset animated:NO];
-    }
-    if (!animated && [self p_isCurrentScrollWrite:operation]) {
-        BOOL reachedTarget = fabs(self.contentOffset.x - contentOffset.x) <= 1.0 &&
-            fabs(self.contentOffset.y - contentOffset.y) <= 1.0;
-        dispatch_block_t terminal = [self p_finalizeScrollWrite:operation
-                                                      resultCode:reachedTarget
-                                                          ? KRScrollWriteResultCodeCommitted
-                                                          : KRScrollWriteResultCodeInterrupted];
-        if (terminal) terminal();
-    }
-    return YES;
+    [self setContentOffset:contentOffset animated:animated];
 }
 
-- (BOOL)css_contentInsetWithParams:(NSString *)params callback:(KuiklyRenderCallback)callback {
+- (void)css_contentInsetWithParams:(NSString *)params {
     NSArray<NSString *> *points = [params componentsSeparatedByString:@" "];
-    NSInteger generation = points.count > 6 ? [points[5] integerValue] : -1;
-    BOOL requiresNativeIdle = points.count > 6 && [points[6] boolValue];
-    NSUInteger composeOperation = points.count > 7 ? (NSUInteger)[points[7] longLongValue] : 0;
-    CGFloat expectedContentSize = points.count > 8 ? [points[8] doubleValue] : -1;
-    CGFloat expectedViewportSize = points.count > 9 ? [points[9] doubleValue] : -1;
-    NSUInteger interactionEpoch = points.count > 15 ? (NSUInteger)[points[15] longLongValue] : _nativeInteractionEpoch;
-    NSUInteger layoutRevision = points.count > 16 ? (NSUInteger)[points[16] longLongValue] : _nativeLayoutRevision;
-    NSUInteger insetRevision = points.count > 19 ? (NSUInteger)[points[19] longLongValue] : _nativeInsetRevision;
-    KRScrollWriteResultCode validation = [self p_validateComposeWriteWithGeneration:generation
-                                                                  requiresNativeIdle:requiresNativeIdle
-                                                                           operation:composeOperation
-                                                                 expectedContentSize:expectedContentSize
-                                                                expectedViewportSize:expectedViewportSize
-                                                                    interactionEpoch:interactionEpoch
-                                                                       layoutRevision:layoutRevision
-                                                                        insetRevision:insetRevision];
-    if (validation != KRScrollWriteResultCodeCommitted) {
-        if (callback) callback([self p_scrollWriteResult:validation]);
-        return NO;
-    }
-    KRScrollWriteOperation *operation = [self p_installScrollWriteWithGeneration:generation
-                                                                        operation:composeOperation
-                                                                 interactionEpoch:interactionEpoch
-                                                                    layoutRevision:layoutRevision
-                                                                     insetRevision:insetRevision
-                                                                             kind:KRScrollWriteKindContentInset
-                                                                         callback:callback];
-    if (![self p_isCurrentScrollWrite:operation]) {
-        return NO;
-    }
     BOOL animated = [points count] > 4 ? [points[4] boolValue] : NO;
-    operation.animated = animated;
     UIEdgeInsets contentInset = UIEdgeInsetsMake([points[0] doubleValue], [points[1] doubleValue], [points[2] doubleValue], [points[3] doubleValue]);
-    operation.targetInset = contentInset;
-    if (UIEdgeInsetsEqualToEdgeInsets(self.contentInset, contentInset)) {
-        dispatch_block_t terminal = [self p_finalizeScrollWrite:operation
-                                                      resultCode:KRScrollWriteResultCodeAlreadySatisfied];
-        if (terminal) terminal();
-        return YES;
-    }
     if (animated) {
         CGPoint maxContentOffset = [self p_maxContentOffsetInContentInset:contentInset];
         if (!CGPointEqualToPoint(self.contentOffset, maxContentOffset)) {
-            operation.targetOffset = maxContentOffset;
-            [self p_springAnimationWithContentOffset:maxContentOffset
-                                            duration:250.0
-                                             damping:1.0
-                                            velocity:0.0
-                                               curve:KRSetContentOffsetAnimationLinear
-                                           operation:operation];
+            [self setContentOffset:maxContentOffset animated:YES];
+            __weak typeof(self) weakSelf = self;
+            _nextEndScrollingAnimationCallback = ^{
+                weakSelf.contentInset = contentInset;
+            };
         } else {
             self.contentInset = contentInset;
-            _nativeInsetRevision += 1;
-            NSDictionary *eventParams = [self p_generateEventBaseParams];
-            dispatch_block_t terminal = [self p_finalizeScrollWrite:operation
-                                                          resultCode:KRScrollWriteResultCodeCommitted];
-            if (_css_scrollEnd && eventParams) {
-                _css_scrollEnd(eventParams);
-            }
-            if (terminal) terminal();
         }
     } else {
         self.autoAdjustContentOffsetDisable = YES;
         self.contentInset = contentInset;
-        _nativeInsetRevision += 1;
         self.autoAdjustContentOffsetDisable = NO;
-        dispatch_block_t terminal = [self p_finalizeScrollWrite:operation
-                                                      resultCode:KRScrollWriteResultCodeCommitted];
-        if (terminal) terminal();
     }
-    return YES;
 }
     
 
 - (void)css_contentInsetWhenEndDragWithParams:(NSString *)params {
     NSArray<NSString *> *points = [params componentsSeparatedByString:@" "];
     UIEdgeInsets contentInset = UIEdgeInsetsMake([points[0] doubleValue], [points[1] doubleValue], [points[2] doubleValue], [points[3] doubleValue]);
-    NSInteger generation = points.count > 6 ? [points[5] integerValue] : _composeOffsetWriteGeneration;
-    BOOL requiresNativeIdle = points.count > 6 && [points[6] boolValue];
-    NSUInteger composeOperation = points.count > 7 ? (NSUInteger)[points[7] longLongValue] : 0;
-    CGFloat expectedContentSize = points.count > 8 ? [points[8] doubleValue] : -1;
-    CGFloat expectedViewportSize = points.count > 9 ? [points[9] doubleValue] : -1;
-    NSUInteger interactionEpoch = points.count > 15 ? (NSUInteger)[points[15] longLongValue] : _nativeInteractionEpoch;
-    NSUInteger layoutRevision = points.count > 16 ? (NSUInteger)[points[16] longLongValue] : _nativeLayoutRevision;
-    NSUInteger insetRevision = points.count > 19 ? (NSUInteger)[points[19] longLongValue] : _nativeInsetRevision;
-    KRScrollWriteResultCode validation = [self p_validateComposeWriteWithGeneration:generation
-                                                                  requiresNativeIdle:requiresNativeIdle
-                                                                           operation:composeOperation
-                                                                 expectedContentSize:expectedContentSize
-                                                                expectedViewportSize:expectedViewportSize
-                                                                    interactionEpoch:interactionEpoch
-                                                                       layoutRevision:layoutRevision
-                                                                        insetRevision:insetRevision];
-    if (validation != KRScrollWriteResultCodeCommitted) {
-        return;
-    }
-    if (composeOperation > 0) {
-        _latestComposeWriteOperation = composeOperation;
-    }
     _contentInsetWhenEndDrag = contentInset;
-    _contentInsetWhenEndDragGeneration = generation;
-    _contentInsetWhenEndDragOperation = composeOperation;
-    _contentInsetWhenEndDragExpectedContentSize = expectedContentSize;
-    _contentInsetWhenEndDragExpectedViewportSize = expectedViewportSize;
-    _contentInsetWhenEndDragInteractionEpoch = interactionEpoch;
-    _contentInsetWhenEndDragLayoutRevision = layoutRevision;
-    _contentInsetWhenEndDragInsetRevision = insetRevision;
-}
-
-- (BOOL)p_matchesExpectedContentSize:(CGFloat)expectedContentSize
-                        viewportSize:(CGFloat)expectedViewportSize {
-    if (expectedContentSize < 0 || expectedViewportSize < 0) {
-        return YES;
-    }
-    CGFloat actualContentSize = [_css_directionRow boolValue] ? self.contentSize.width : self.contentSize.height;
-    CGFloat actualViewportSize = [_css_directionRow boolValue] ? CGRectGetWidth(self.frame) : CGRectGetHeight(self.frame);
-    return fabs(actualContentSize - expectedContentSize) <= 1.0 &&
-        fabs(actualViewportSize - expectedViewportSize) <= 1.0;
-}
-
-- (BOOL)p_matchesInteractionEpoch:(NSUInteger)interactionEpoch
-                   layoutRevision:(NSUInteger)layoutRevision
-                    insetRevision:(NSUInteger)insetRevision {
-    return interactionEpoch == _nativeInteractionEpoch &&
-        layoutRevision == _nativeLayoutRevision &&
-        insetRevision == _nativeInsetRevision;
-}
-
-- (NSDictionary *)p_scrollWriteResult:(KRScrollWriteResultCode)resultCode {
-    BOOL committed = resultCode == KRScrollWriteResultCodeCommitted ||
-        resultCode == KRScrollWriteResultCodeAlreadySatisfied;
-    return @{
-        @"committed": @(committed ? 1 : 0),
-        @"resultCode": @(resultCode),
-        @"accepted": @(committed ? 1 : 0),
-        @"installed": @(committed ? 1 : 0),
-        @"replacedPrevious": @0,
-        @"nativeInteractionEpoch": @(_nativeInteractionEpoch),
-        @"layoutRevision": @(_nativeLayoutRevision),
-        @"insetRevision": @(_nativeInsetRevision),
-    };
-}
-
-- (NSDictionary *)p_scrollWriteResult:(KRScrollWriteResultCode)resultCode
-                             operation:(KRScrollWriteOperation *)operation {
-    BOOL committed = resultCode == KRScrollWriteResultCodeCommitted ||
-        resultCode == KRScrollWriteResultCodeAlreadySatisfied;
-    return @{
-        @"committed": @(committed ? 1 : 0),
-        @"resultCode": @(resultCode),
-        @"accepted": @(operation ? 1 : 0),
-        @"installed": @(operation ? 1 : 0),
-        @"replacedPrevious": @(operation.replacedPrevious ? 1 : 0),
-        @"nativeInteractionEpoch": @(_nativeInteractionEpoch),
-        @"layoutRevision": @(_nativeLayoutRevision),
-        @"insetRevision": @(_nativeInsetRevision),
-    };
-}
-
-- (KRScrollWriteResultCode)p_validateComposeWriteWithGeneration:(NSInteger)generation
-                                              requiresNativeIdle:(BOOL)requiresNativeIdle
-                                                       operation:(NSUInteger)operation
-                                             expectedContentSize:(CGFloat)expectedContentSize
-                                            expectedViewportSize:(CGFloat)expectedViewportSize
-                                                interactionEpoch:(NSUInteger)interactionEpoch
-                                                   layoutRevision:(NSUInteger)layoutRevision
-                                                    insetRevision:(NSUInteger)insetRevision {
-    if (generation >= 0 && generation != _composeOffsetWriteGeneration) {
-        return KRScrollWriteResultCodeStale;
-    }
-    if (requiresNativeIdle && [self p_nativeScrollPhase] != 0) {
-        return KRScrollWriteResultCodeBusy;
-    }
-    if (operation > 0 &&
-        (operation < _minimumComposeWriteOperation || operation < _latestComposeWriteOperation)) {
-        return KRScrollWriteResultCodeStale;
-    }
-    if (interactionEpoch != _nativeInteractionEpoch) {
-        return KRScrollWriteResultCodeInterrupted;
-    }
-    if (layoutRevision != _nativeLayoutRevision ||
-        ![self p_matchesExpectedContentSize:expectedContentSize viewportSize:expectedViewportSize]) {
-        return CGRectIsEmpty(self.bounds) ? KRScrollWriteResultCodeNotReady : KRScrollWriteResultCodeLayoutChanged;
-    }
-    if (insetRevision != _nativeInsetRevision) {
-        return KRScrollWriteResultCodeStale;
-    }
-    return KRScrollWriteResultCodeCommitted;
-}
-
-- (KRScrollWriteOperation *)p_installScrollWriteWithGeneration:(NSInteger)generation
-                                                     operation:(NSUInteger)operation
-                                              interactionEpoch:(NSUInteger)interactionEpoch
-                                                 layoutRevision:(NSUInteger)layoutRevision
-                                                  insetRevision:(NSUInteger)insetRevision
-                                                          kind:(KRScrollWriteKind)kind
-                                                      callback:(KuiklyRenderCallback)callback {
-    KRScrollWriteOperation *next = [KRScrollWriteOperation new];
-    next.nativeSequence = ++_nativeWriteOperationSequence;
-    next.composeOperation = operation;
-    next.generation = generation;
-    next.interactionEpoch = interactionEpoch;
-    next.layoutRevision = layoutRevision;
-    next.insetRevision = insetRevision;
-    next.kind = kind;
-    next.callback = callback;
-
-    KRScrollWriteOperation *previous = _currentScrollWriteOperation;
-    _currentScrollWriteOperation = next;
-    next.replacedPrevious = previous != nil;
-    if (operation > 0) {
-        _latestComposeWriteOperation = operation;
-    }
-    dispatch_block_t previousTerminal = [self p_finalizeScrollWrite:previous
-                                                          resultCode:KRScrollWriteResultCodeReplaced];
-    if (previous || kind == KRScrollWriteKindContentOffset || _offsetAnimator != nil) {
-        [self p_cancelNativeScrollMechanisms];
-    }
-    if (previousTerminal) previousTerminal();
-    return next;
-}
-
-- (dispatch_block_t)p_finalizeScrollWrite:(KRScrollWriteOperation *)operation
-                                resultCode:(KRScrollWriteResultCode)resultCode {
-    if (!operation || operation.terminal) {
-        return nil;
-    }
-    operation.terminal = YES;
-    if (_currentScrollWriteOperation == operation) {
-        _currentScrollWriteOperation = nil;
-    }
-    KuiklyRenderCallback callback = operation.callback;
-    operation.callback = nil;
-    NSDictionary *result = [self p_scrollWriteResult:resultCode operation:operation];
-    if (!callback) {
-        return nil;
-    }
-    return [^{ callback(result); } copy];
-}
-
-- (dispatch_block_t)p_invalidateCurrentScrollWrite:(KRScrollWriteResultCode)resultCode {
-    return [self p_finalizeScrollWrite:_currentScrollWriteOperation resultCode:resultCode];
-}
-
-- (BOOL)p_isCurrentScrollWrite:(KRScrollWriteOperation *)operation {
-    return operation && !operation.terminal && _currentScrollWriteOperation == operation;
-}
-
-- (void)p_cancelNativeScrollMechanisms {
-    [_ku_coreAnimator stop];
-    _ku_coreAnimator = nil;
-    [self p_invalidateOffsetAnimation];
-    _ignoreDispatchScrollEvent = NO;
-    CGPoint currentOffset = self.contentOffset;
-    [super setContentOffset:currentOffset animated:NO];
-}
-
-- (void)p_scheduleTerminalDeadlineForOperation:(KRScrollWriteOperation *)operation
-                                    durationMs:(CGFloat)durationMs {
-    CGFloat normalizedDuration = MAX(0.0, durationMs);
-    CGFloat slack = MAX(1000.0, normalizedDuration * 0.25);
-    int64_t deadline = (int64_t)((normalizedDuration + slack) * NSEC_PER_MSEC);
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, deadline), dispatch_get_main_queue(), ^{
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf || ![strongSelf p_isCurrentScrollWrite:operation]) {
-            return;
-        }
-        NSDictionary *eventParams = [strongSelf p_generateEventBaseParams];
-        dispatch_block_t terminal = [strongSelf p_finalizeScrollWrite:operation
-                                                            resultCode:KRScrollWriteResultCodeAckTimeout];
-        [strongSelf p_cancelNativeScrollMechanisms];
-        if (strongSelf->_css_scrollEnd && eventParams) {
-            strongSelf->_css_scrollEnd(eventParams);
-        }
-        if (terminal) terminal();
-    });
 }
 
 
@@ -1362,8 +906,6 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     }
     #endif // macOS]
     
-    NSUInteger sourceOperation = (!_isCurrentlyDragging && _currentScrollWriteOperation.animated)
-        ? _currentScrollWriteOperation.composeOperation : 0;
     return @{
         @"offsetX":@(_lastContentOffset.x),
         @"offsetY":@(_lastContentOffset.y),
@@ -1372,24 +914,8 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
         @"viewWidth": @(self.frame.size.width),
         @"viewHeight": @(self.frame.size.height),
         @"isDragging":@(_isCurrentlyDragging ? 1 : 0),
-        @"nativeScrollPhase":@([self p_nativeScrollPhase]),
-        @"nativeInteractionEpoch":@(_nativeInteractionEpoch),
-        @"layoutRevision":@(_nativeLayoutRevision),
-        @"insetRevision":@(_nativeInsetRevision),
-        @"sourceOperationGeneration":@(sourceOperation),
         @"touches": touchesParam,
     };
-}
-
-- (NSInteger)p_nativeScrollPhase {
-    if (_isCurrentlyDragging) {
-        return 1;
-    }
-    if (self.decelerating || _currentScrollWriteOperation != nil ||
-        _offsetAnimator != nil || [_ku_coreAnimator isAnimating]) {
-        return 2;
-    }
-    return 0;
 }
 
 - (void)p_setTargetContentOffsetIfNeed:(CGPoint)contentOffset {
@@ -1398,21 +924,12 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     }
 }
 
-- (void)p_springAnimationWithContentOffset:(CGPoint)contentOffset
-                                  duration:(CGFloat)duration
-                                   damping:(CGFloat)damping
-                                  velocity:(CGFloat)velocity
-                                     curve:(int)curve
-                                 operation:(KRScrollWriteOperation *)operation {
-    [self p_invalidateOffsetAnimation];
+- (void)p_springAnimationWithContentOffset:(CGPoint)contentOffset duration:(CGFloat)duration damping:(CGFloat)damping velocity:(CGFloat)velocity curve:(int)curve{
     [self setContentOffset:self.contentOffset animated:NO];
-    if (![self p_isCurrentScrollWrite:operation]) {
-        return;
-    }
+    [_offsetAnimator cancel];
     _offsetAnimator = [[KRScrollViewOffsetAnimator alloc] initWithScrollView:self delegate:self];
     [_offsetAnimator animateToOffset:contentOffset withVelocity:CGPointZero];
     KRScrollViewOffsetAnimator *animator = _offsetAnimator;
-    NSUInteger animationGeneration = _offsetAnimationGeneration;
     _ignoreDispatchScrollEvent = YES;
     
     switch (curve) {
@@ -1421,22 +938,18 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
             [UIView animateWithDuration:duration / 1000.0
                                   delay:0 options:(UIViewAnimationOptionCurveLinear | UIViewAnimationOptionAllowUserInteraction)
                              animations:^{
-                                            if (![self p_isCurrentScrollWrite:operation]) {
-                                                return;
-                                            }
                                             if (contentOffset.y < 0 || contentOffset.x < 0) {
-                                                UIEdgeInsets targetInset = UIEdgeInsetsMake(-contentOffset.y, -contentOffset.x, 0, 0);
-                                                if (!UIEdgeInsetsEqualToEdgeInsets(self.contentInset, targetInset)) {
-                                                    self.contentInset = targetInset;
-                                                    self->_nativeInsetRevision += 1;
-                                                }
+                                               self.contentInset = UIEdgeInsetsMake(-contentOffset.y,  -contentOffset.x , 0, 0);
                                             }
                                             [self setContentOffset:contentOffset];
                                         }
                              completion:^(BOOL finished) {
-                                            [self p_completeOffsetAnimation:animator
-                                                                generation:animationGeneration
-                                                                 operation:operation];
+                                            // OffsetAnimator samples presentationLayer via DisplayLink and is cancelled here
+                                            // without a final callback. Flush model contentOffset so Compose/Kotlin reaches target.
+                                            if (finished) {
+                                                [self dispatchScrollEventWithCurOffset:self.contentOffset];
+                                            }
+                                            [animator cancel];
                                         }];
         }
             break;
@@ -1449,73 +962,27 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
                   initialSpringVelocity:velocity
                                 options:(UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction)
                              animations:^{
-                    if (![self p_isCurrentScrollWrite:operation]) {
-                        return;
-                    }
                     if (contentOffset.y < 0 || contentOffset.x < 0) {
-                        UIEdgeInsets targetInset = UIEdgeInsetsMake(-contentOffset.y, -contentOffset.x, 0, 0);
-                        if (!UIEdgeInsetsEqualToEdgeInsets(self.contentInset, targetInset)) {
-                            self.contentInset = targetInset;
-                            self->_nativeInsetRevision += 1;
-                        }
+                       self.contentInset = UIEdgeInsetsMake(-contentOffset.y,  -contentOffset.x , 0, 0);
                     }
                     [self setContentOffset:contentOffset];
             } completion:^(BOOL finished) {
-                [self p_completeOffsetAnimation:animator
-                                      generation:animationGeneration
-                                       operation:operation];
+                // OffsetAnimator samples presentationLayer via DisplayLink and is cancelled here
+                // without a final callback. Flush model contentOffset so Compose/Kotlin reaches target.
+                if (finished) {
+                    [self dispatchScrollEventWithCurOffset:self.contentOffset];
+                }
+                [animator cancel];
             }];
         }
             break;
     }
 
     _ignoreDispatchScrollEvent = NO;
-    if ([self p_isCurrentScrollWrite:operation]) {
-        [self p_scheduleTerminalDeadlineForOperation:operation durationMs:duration];
-    }
-}
-
-- (void)p_invalidateOffsetAnimation {
-    _offsetAnimationGeneration += 1;
-    [_offsetAnimator cancel];
-    _offsetAnimator = nil;
-}
-
-- (void)p_completeOffsetAnimation:(KRScrollViewOffsetAnimator *)animator
-                       generation:(NSUInteger)generation
-                        operation:(KRScrollWriteOperation *)operation {
-    if (![KRScrollViewOffsetAnimator isCurrentAnimator:_offsetAnimator
-                                              candidate:animator
-                                      currentGeneration:_offsetAnimationGeneration
-                                   completionGeneration:generation] ||
-        ![animator claimCompletion] ||
-        ![self p_isCurrentScrollWrite:operation]) {
-        return;
-    }
-    _offsetAnimator = nil;
-    BOOL reachedTarget = fabs(self.contentOffset.x - operation.targetOffset.x) <= 1.0 &&
-        fabs(self.contentOffset.y - operation.targetOffset.y) <= 1.0;
-    if (reachedTarget && operation.kind == KRScrollWriteKindContentInset &&
-        !UIEdgeInsetsEqualToEdgeInsets(self.contentInset, operation.targetInset)) {
-        self.contentInset = operation.targetInset;
-        _nativeInsetRevision += 1;
-    }
-    NSDictionary *eventParams = [self p_generateEventBaseParams];
-    dispatch_block_t terminal = [self p_finalizeScrollWrite:operation
-                                                  resultCode:reachedTarget
-                                                      ? KRScrollWriteResultCodeCommitted
-                                                      : KRScrollWriteResultCodeInterrupted];
-    // The display link may stop before observing UIKit's final presentation frame.
-    [self dispatchScrollEventWithCurOffset:self.contentOffset];
-    if ([KRScrollViewOffsetAnimator shouldEmitTerminalForNativePhase:[self p_nativeScrollPhase]] &&
-        _css_scrollEnd && eventParams) {
-        _css_scrollEnd(eventParams);
-    }
-    if (terminal) terminal();
 }
 
 - (void)dealloc {
-    [self p_invalidateOffsetAnimation];
+    [_offsetAnimator cancel];
 }
 
 #pragma mark - KRTurboDisplayStateRestorableProtocol
@@ -1530,8 +997,6 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 }
 
 @end
-
-
 @interface KRScrollContentView ()
 @property (nonatomic, weak) id<KRScrollContentViewDelegate> delegate;
 @end
@@ -1604,7 +1069,7 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
         #endif // [macOS]
         
         if ([scrollView isKindOfClass:[KRScrollView class]]) {
-            if ([scrollView p_nativeScrollPhase] != 0) {
+            if (scrollView.isDragging) {
                 scrollView.autoAdjustContentOffsetDisable = YES;
             }
             scrollView.setContentSizeing = YES;
