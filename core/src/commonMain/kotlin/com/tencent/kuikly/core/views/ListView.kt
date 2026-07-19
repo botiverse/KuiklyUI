@@ -82,14 +82,7 @@ open class ListView<A : ListAttr, E : ListEvent> : ScrollerView<A, E>() {
 
     override fun createRenderView() {
         if (prepareForReuse) {
-            val contentOffset = transformInputSetContentOffset(curOffsetX, curOffsetY)
-            performTaskWhenRenderViewDidLoad {
-                callContentOffset(
-                    offsetX = contentOffset.first,
-                    offsetY = contentOffset.second,
-                    animated = false,
-                )
-            }
+            setContentOffset(offsetX = curOffsetX, offsetY = curOffsetY, animated = false)
         }
         super.createRenderView()
         prepareForReuse = false

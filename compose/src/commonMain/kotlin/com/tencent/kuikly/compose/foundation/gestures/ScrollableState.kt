@@ -21,7 +21,6 @@ import com.tencent.kuikly.compose.foundation.MutatorMutex
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import com.tencent.kuikly.compose.foundation.layout.PaddingValues
 import com.tencent.kuikly.compose.ui.internal.JvmDefaultWithCompatibility
@@ -166,10 +165,7 @@ fun ScrollableState(consumeScrollDelta: (Float) -> Float): ScrollableState {
 @Composable
 fun rememberScrollableState(consumeScrollDelta: (Float) -> Float): ScrollableState {
     val lambdaState = rememberUpdatedState(consumeScrollDelta)
-    val scope = rememberCoroutineScope()
-    return remember { ScrollableState { lambdaState.value.invoke(it) } }.also {
-        (it as KuiklyScrollableState).kuiklyInfo.scope = scope
-    }
+    return remember { ScrollableState { lambdaState.value.invoke(it) } }
 }
 
 /**

@@ -36,18 +36,15 @@ interface IListElement {
      */
     var hasPullToRefresh: Boolean
 
-    /** Idle=0, dragging=1, settling or programmatic animation=2. */
-    var nativeScrollPhase: Int
-
     /**
      * Scroll element to specified position
      */
-    fun setContentOffset(params: String?, callback: KuiklyRenderCallback?)
+    fun setContentOffset(params: String?)
 
     /**
      * Set content margin with animation
      */
-    fun setContentInset(params: String?, callback: KuiklyRenderCallback?)
+    fun setContentInset(params: String?)
 
     /**
      * Set padding when drag ends, i.e. translateX and Y values
@@ -108,7 +105,7 @@ interface IListElement {
      * web/miniapp scroll-view's native silent behavior on no-op scrollTo would block all
      * subsequent scroll events from reaching Compose.
      */
-    fun prepareForComposeReuse(generation: Long)
+    fun prepareForComposeReuse()
 
     /**
      * Callback to be executed when component is destroyed

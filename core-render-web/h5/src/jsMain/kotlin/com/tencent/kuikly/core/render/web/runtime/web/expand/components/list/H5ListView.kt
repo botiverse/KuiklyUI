@@ -9,12 +9,6 @@ import com.tencent.kuikly.core.render.web.const.KRListConst
 import com.tencent.kuikly.core.render.web.const.KRParamConst
 import com.tencent.kuikly.core.render.web.const.KRStyleConst
 import com.tencent.kuikly.core.render.web.expand.components.list.KRListViewContentInset
-import com.tencent.kuikly.core.render.web.expand.components.list.WebScrollWriteKind
-import com.tencent.kuikly.core.render.web.expand.components.list.WebScrollWriteOperation
-import com.tencent.kuikly.core.render.web.expand.components.list.WebScrollWriteOperationArbiter
-import com.tencent.kuikly.core.render.web.expand.components.list.WebScrollWriteResultCode
-import com.tencent.kuikly.core.render.web.expand.components.list.canApplyWebOffsetWrite
-import com.tencent.kuikly.core.render.web.expand.components.list.webScrollWriteResult
 import com.tencent.kuikly.core.render.web.ktx.KuiklyRenderCallback
 import com.tencent.kuikly.core.render.web.ktx.kuiklyDocument
 import com.tencent.kuikly.core.render.web.ktx.kuiklyWindow
@@ -34,7 +28,6 @@ import org.w3c.dom.events.MouseEvent
 import org.w3c.dom.events.WheelEvent
 import org.w3c.dom.get
 import kotlin.js.json
-import kotlin.js.Date
 import kotlin.math.abs
 import kotlin.math.absoluteValue
 
@@ -92,9 +85,6 @@ class H5ListView : IListElement {
     private var isPrePullDown = false
     // Pull-to-refresh height
     private var canPullRefreshHeight = 0f
-    private var pullRefreshComposeOperation = 0L
-    private var pullRefreshExpectedContentSize = -1f
-    private var pullRefreshExpectedViewportSize = -1f
     // Whether it contains pull-to-refresh child node
     private var hasRefreshChild = false
     // Scroll distance threshold
@@ -110,8 +100,6 @@ class H5ListView : IListElement {
     private var touchStartTime: Double = 0.0
     // Whether the wheel is rolling
     private var isWheelRolling = false
-    private var nativeScrollIngressActive = false
-    private var lastProgrammaticTerminalAt = 0.0
     // Whether the wheel is stopped
     private var wheelStopTimer: Int? = null
     // Count of clicks on the current element, used to determine whether it's a double click
@@ -121,25 +109,6 @@ class H5ListView : IListElement {
     // scroll event even if the underlying scroll position is unchanged. This compensates
     // for the browser/miniapp behavior of not dispatching `scroll` on no-op `scrollTo`.
     private var pendingFireScrollForReuse: Boolean = false
-    private var composeOffsetWriteGeneration = 0L
-    private var activeSmoothScroll: WebScrollWriteOperation? = null
-    private var smoothScrollFrameId: Int? = null
-    private var smoothScrollEndTimer: Int? = null
-    private var pendingReuseScrollEventTimer: Int? = null
-    private var insetWhenEndDragSequence = 0L
-    private var writeOperationSequence = 0L
-    private var latestComposeWriteOperation = 0L
-    private var minimumComposeWriteOperation = 0L
-    private var nativeInteractionEpoch = 0L
-    private var nativeLayoutRevision = 0L
-    private var nativeInsetRevision = 0L
-    private var lastContentWidth = -1
-    private var lastContentHeight = -1
-    private var lastViewportWidth = -1
-    private var lastViewportHeight = -1
-    private val writeArbiter = WebScrollWriteOperationArbiter()
-
-    override var nativeScrollPhase: Int = 0
 
     // real html element
     override var ele: HTMLElement = listEle.unsafeCast<HTMLElement>()
@@ -269,7 +238,6 @@ class H5ListView : IListElement {
     }
 
     override fun updateOffsetMap(offsetX: Float, offsetY: Float, isDragging: Int): MutableMap<String, Any> {
-        refreshLayoutRevision()
         offsetMap[KRParamConst.OFFSET_X] = offsetX
         offsetMap[KRParamConst.OFFSET_Y] = offsetY
         offsetMap[KRParamConst.VIEW_WIDTH] = ele.offsetWidth
@@ -277,10 +245,6 @@ class H5ListView : IListElement {
         offsetMap[KRParamConst.CONTENT_WIDTH] = ele.scrollWidth
         offsetMap[KRParamConst.CONTENT_HEIGHT] = ele.scrollHeight
         offsetMap[KRParamConst.IS_DRAGGING] = isDragging
-        offsetMap["nativeScrollPhase"] = nativeScrollPhase
-        offsetMap["nativeInteractionEpoch"] = nativeInteractionEpoch
-        offsetMap["layoutRevision"] = nativeLayoutRevision
-        offsetMap["insetRevision"] = nativeInsetRevision
         return offsetMap
     }
 
@@ -288,22 +252,8 @@ class H5ListView : IListElement {
         Log.trace(LOG_SCROLL_EVENT_BEGIN)
         // Set as dragging
         isDragging = 1
-        nativeScrollPhase = 1
-        nativeInteractionEpoch += 1L
-        writeOperationSequence += 1L
-        minimumComposeWriteOperation = latestComposeWriteOperation + 1L
-        invalidateWrite(WebScrollWriteResultCode.Interrupted)
-        pendingReuseScrollEventTimer?.let { kuiklyWindow.clearTimeout(it) }
-        pendingReuseScrollEventTimer = null
-        if (scrollEndEventTimer > 0) {
-            kuiklyWindow.clearTimeout(scrollEndEventTimer)
-            scrollEndEventTimer = 0
-        }
         // Clear pull-to-refresh height
         canPullRefreshHeight = 0f
-        pullRefreshComposeOperation = 0L
-        pullRefreshExpectedContentSize = -1f
-        pullRefreshExpectedViewportSize = -1f
         // Check if it contains pull-to-refresh child node
         hasRefreshChild = checkHasRefreshChild()
         // Reset scrolling state
@@ -376,21 +326,13 @@ class H5ListView : IListElement {
 
     internal fun handleTouchEnd() {
         isDragging = 0
-        nativeScrollPhase = if (scrollEndEventTimer > 0) 2 else 0
         // Get horizontal and vertical offset of the element during scroll event
         val offsetX = ele.scrollLeft.toFloat()
         var offsetY = ele.scrollTop.toFloat()
         if (isPrePullDown) {
             // Special handling for pull-to-refresh
             val deltaY = touchEndY - touchStartY
-            val currentPullRefreshHeight = canPullRefreshHeight.takeIf {
-                isCurrentOffsetWrite(pullRefreshComposeOperation) &&
-                    matchesExpectedLayout(
-                        pullRefreshExpectedContentSize,
-                        pullRefreshExpectedViewportSize,
-                    )
-            } ?: 0f
-            if (currentPullRefreshHeight == 0f) {
+            if (canPullRefreshHeight == 0f) {
                 // If at pull-to-refresh release but not reaching pull-to-refresh position,
                 // need to restore contentInset and scrolling
                 val contentEle = ele.firstElementChild.unsafeCast<HTMLElement?>()
@@ -408,12 +350,12 @@ class H5ListView : IListElement {
                 kuiklyWindow.setTimeout({
                     contentEle?.style?.transform = KRCssConst.EMPTY_STRING
                 }, KRListConst.IMMEDIATE_TIMEOUT)
-            } else if (deltaY > currentPullRefreshHeight) {
+            } else if (deltaY > canPullRefreshHeight) {
                 val contentEle = ele.firstElementChild.unsafeCast<HTMLElement?>()
                 contentEle?.style?.transition = buildTransition()
                 // If at pull-to-refresh release and exceeding pull-to-refresh height,
                 // need to bounce back to pull-to-refresh height before refreshing
-                contentEle?.style?.transform = buildTranslateY(currentPullRefreshHeight)
+                contentEle?.style?.transform = buildTranslateY(canPullRefreshHeight)
             }
             // If current scroll distance is 0 and starting to drag down, handle pull-to-refresh logic,
             // deltaY > 0 means pulling down
@@ -434,13 +376,6 @@ class H5ListView : IListElement {
     }
 
     private fun handleTouchScroll() {
-        if (isDragging == 0 && !isWheelRolling && activeSmoothScroll == null &&
-            !nativeScrollIngressActive) {
-            nativeScrollIngressActive = true
-            nativeInteractionEpoch += 1L
-            minimumComposeWriteOperation = latestComposeWriteOperation + 1L
-        }
-        nativeScrollPhase = if (isDragging == 1) 1 else 2
         // Get horizontal and vertical offset of the element during scroll event
         val offsetMap = updateOffsetMap(ele.scrollLeft.toFloat(), ele.scrollTop.toFloat(), isDragging)
         // Callback with offset
@@ -593,10 +528,6 @@ class H5ListView : IListElement {
                 }
                 handleTouchEnd()
             }, json(KRAttrConst.PASSIVE to true))
-            ele.addEventListener(KREventConst.TOUCH_CANCEL, {
-                isClickEvent = false
-                handleTouchEnd()
-            }, json(KRAttrConst.PASSIVE to true))
         }
 
         // If it is a precise pointing device, listen for mouse events.
@@ -708,10 +639,7 @@ class H5ListView : IListElement {
      * Set scroll end callback event
      */
     override fun setScrollEndEvent() {
-        ele.addEventListener("scrollend", {
-            finishScrollEnd()
-        }, json(KRAttrConst.PASSIVE to true))
-        // Fallback for browsers without native scrollend.
+        // scroll end event not available, simulate through other means
         ele.addEventListener(KREventConst.SCROLL, {
             // Clear existing timer first
             if (scrollEndEventTimer > 0) {
@@ -719,7 +647,9 @@ class H5ListView : IListElement {
             }
             // Reset timer
             scrollEndEventTimer = kuiklyWindow.setTimeout({
-                finishScrollEnd()
+                // Get horizontal and vertical offset of the element during scroll event
+                var offsetMap = updateOffsetMap(ele.scrollLeft.toFloat(), ele.scrollTop.toFloat(), isDragging)
+                scrollEndEventCallback?.invoke(offsetMap)
             }, KRListConst.SCROLL_END_OVERTIME)
         }, json(KRAttrConst.PASSIVE to true))
     }
@@ -727,109 +657,44 @@ class H5ListView : IListElement {
     /**
      * Scroll element to specified position
      */
-    override fun setContentOffset(params: String?, callback: KuiklyRenderCallback?) {
-        if (params == null) {
-            callback?.invoke(writeResult(WebScrollWriteResultCode.OutOfRange))
+    override fun setContentOffset(params: String?) {
+        // Don't process if no parameters
+        if (params === null) {
             return
         }
+
+        // Format scroll parameters
         val contentOffsetSplits = params.split(KRCssConst.BLANK_SEPARATOR)
         val offsetX = contentOffsetSplits[0].toFloat()
         val offsetY = contentOffsetSplits[1].toFloat()
         val animate = contentOffsetSplits[2] == KRListConst.ANIMATE_FLAG
-        val duration = contentOffsetSplits.getOrNull(3)?.toLongOrNull() ?: 0L
-        val generation = if (contentOffsetSplits.size > 8) contentOffsetSplits[7].toLong() else -1L
-        val requiresNativeIdle = contentOffsetSplits.size > 8 && contentOffsetSplits[8] == "1"
-        val composeOperation = contentOffsetSplits.getOrNull(9)?.toLong() ?: 0L
-        val expectedContentSize = contentOffsetSplits.getOrNull(10)?.toFloat() ?: -1f
-        val expectedViewportSize = contentOffsetSplits.getOrNull(11)?.toFloat() ?: -1f
-        val interactionEpoch = contentOffsetSplits.getOrNull(17)?.toLongOrNull()
-            ?: nativeInteractionEpoch
-        val layoutRevision = contentOffsetSplits.getOrNull(18)?.toLongOrNull()
-            ?: nativeLayoutRevision
-        val bindingGeneration = contentOffsetSplits.getOrNull(12)?.toLongOrNull() ?: 0L
-        val capabilityKind = contentOffsetSplits.getOrNull(13)?.toIntOrNull() ?: -1
-        val capabilityLeaseId = contentOffsetSplits.getOrNull(14)?.toLongOrNull() ?: 0L
-        val semanticOperationId = contentOffsetSplits.getOrNull(15)?.toLongOrNull() ?: 0L
-        val attemptGeneration = contentOffsetSplits.getOrNull(16)?.toLongOrNull() ?: 0L
-        val anchorRevision = contentOffsetSplits.getOrNull(19)?.toLongOrNull() ?: 0L
-        val rangeRevision = contentOffsetSplits.getOrNull(20)?.toLongOrNull() ?: 0L
-        val insetRevision = contentOffsetSplits.getOrNull(21)?.toLongOrNull()
-            ?: nativeInsetRevision
-        refreshLayoutRevision()
-        val validation = validateWrite(
-            generation, requiresNativeIdle, composeOperation,
-            interactionEpoch, layoutRevision, insetRevision,
-            expectedContentSize, expectedViewportSize,
-            offsetX.isNaN() || offsetY.isNaN(),
-        )
-        if (validation != WebScrollWriteResultCode.Committed) {
-            callback?.invoke(writeResult(validation))
+
+        if (offsetX.isNaN() || offsetY.isNaN()) {
+            // Position parameters abnormal, return
             return
         }
-        pendingReuseScrollEventTimer?.let { kuiklyWindow.clearTimeout(it) }
-        pendingReuseScrollEventTimer = null
-        val operation = installWrite(
-            WebScrollWriteKind.ContentOffset, callback, generation, composeOperation,
-            interactionEpoch, layoutRevision, insetRevision,
-            bindingGeneration, capabilityKind, capabilityLeaseId,
-            semanticOperationId, attemptGeneration, anchorRevision, rangeRevision,
-        )
-        if (!writeArbiter.isCurrent(operation)) return
-        operation.targetX = offsetX
-        operation.targetY = offsetY
-        operation.started = true
         if (pagingEnabled) {
-            val shouldRefireReuseScroll = pendingFireScrollForReuse
-            pendingFireScrollForReuse = false
-            val scheduled = listPagingHelper.setContentOffset(
-                offsetX = offsetX,
-                offsetY = offsetY,
-                animate = animate,
-                completion = { mutationCommitted ->
-                    if (!writeArbiter.isCurrent(operation)) return@setContentOffset
-                    refreshLayoutRevision()
-                    val committed = mutationCommitted && operation.generation.let {
-                        it < 0 || it == composeOffsetWriteGeneration
-                    } && operation.interactionEpoch == nativeInteractionEpoch &&
-                        operation.layoutRevision == nativeLayoutRevision &&
-                        operation.insetRevision == nativeInsetRevision &&
-                        isCurrentOffsetWrite(operation.composeOperation) &&
-                        matchesExpectedLayout(expectedContentSize, expectedViewportSize)
-                    if (shouldRefireReuseScroll && committed) {
-                        pendingReuseScrollEventTimer?.let { kuiklyWindow.clearTimeout(it) }
-                        pendingReuseScrollEventTimer = kuiklyWindow.setTimeout({
-                            pendingReuseScrollEventTimer = null
-                            val cb = scrollEventCallback ?: return@setTimeout
-                            val map = updateOffsetMap(
-                                abs(listPagingHelper.currentTranslateX),
-                                abs(listPagingHelper.currentTranslateY),
-                                isDragging,
-                            )
-                            cb.invoke(map)
-                        }, KRListConst.IMMEDIATE_TIMEOUT)
-                    }
-                    finishWrite(
-                        operation,
-                        if (committed) WebScrollWriteResultCode.Committed
-                        else WebScrollWriteResultCode.Interrupted,
-                        animate,
+            listPagingHelper.setContentOffset(offsetX, offsetY, animate)
+            // listPagingHelper.setContentOffset already invokes scrollEventCallback synchronously,
+            // but during Compose reuse the upper-layer scrollEventCallback may not yet be registered
+            // when this method runs (callback is registered later via listenScrollEvent in
+            // LaunchedEffect). Therefore we still need to async re-fire so the upper layer can
+            // clear ignoreScrollOffset.
+            if (pendingFireScrollForReuse) {
+                pendingFireScrollForReuse = false
+                kuiklyWindow.setTimeout({
+                    val cb = scrollEventCallback ?: return@setTimeout
+                    val map = updateOffsetMap(
+                        abs(listPagingHelper.currentTranslateX),
+                        abs(listPagingHelper.currentTranslateY),
+                        isDragging,
                     )
-                },
-                isCurrent = { writeArbiter.isCurrent(operation) },
-            )
-            if (!scheduled) {
-                finishWrite(operation, WebScrollWriteResultCode.UnsupportedAxisOrNoLayout, false)
-            } else if (writeArbiter.isCurrent(operation)) {
-                nativeScrollPhase = if (animate) 2 else 0
+                    cb.invoke(map)
+                }, KRListConst.IMMEDIATE_TIMEOUT)
             }
             return
         }
-        val alreadySatisfied = abs(ele.scrollLeft.toFloat() - offsetX) <= 1f &&
-            abs(ele.scrollTop.toFloat() - offsetY) <= 1f
-        if (alreadySatisfied) {
-            finishWrite(operation, WebScrollWriteResultCode.AlreadySatisfied, false)
-            return
-        }
+        // Scroll to specified distance
         ele.scrollTo(
             ScrollToOptions(
                 offsetX.toDouble(),
@@ -837,29 +702,6 @@ class H5ListView : IListElement {
                 if (animate) ScrollBehavior.SMOOTH else ScrollBehavior.AUTO
             )
         )
-        if (animate) {
-            nativeScrollPhase = 2
-            activeSmoothScroll = operation
-            scheduleSmoothTargetCheck(operation)
-            val acceptedDuration = if (duration > 0L) duration else 300L
-            val slack = kotlin.math.max(1_000L, acceptedDuration / 4L)
-            smoothScrollEndTimer = kuiklyWindow.setTimeout({
-                if (writeArbiter.isCurrent(operation)) {
-                    ele.scrollTo(ScrollToOptions(ele.scrollLeft, ele.scrollTop, ScrollBehavior.AUTO))
-                    finishWrite(operation, WebScrollWriteResultCode.AckTimeout, true)
-                }
-            }, (acceptedDuration + slack).toInt())
-        } else {
-            refreshLayoutRevision()
-            val committed = abs(ele.scrollLeft.toFloat() - offsetX) <= 1f &&
-                abs(ele.scrollTop.toFloat() - offsetY) <= 1f
-            finishWrite(
-                operation,
-                if (committed) WebScrollWriteResultCode.Committed
-                else WebScrollWriteResultCode.Interrupted,
-                false,
-            )
-        }
         // After Compose DSL reuse, the upper layer sets `ignoreScrollOffset` and expects the
         // next setContentOffset to fire a scroll event so the flag can be cleared. However,
         // when the target offset equals the current scrollTop/scrollLeft, browsers won't
@@ -867,9 +709,7 @@ class H5ListView : IListElement {
         // always triggers a scroll callback"), proactively fire one async scroll event.
         if (pendingFireScrollForReuse) {
             pendingFireScrollForReuse = false
-            pendingReuseScrollEventTimer?.let { kuiklyWindow.clearTimeout(it) }
-            pendingReuseScrollEventTimer = kuiklyWindow.setTimeout({
-                pendingReuseScrollEventTimer = null
+            kuiklyWindow.setTimeout({
                 val cb = scrollEventCallback ?: return@setTimeout
                 val map = updateOffsetMap(ele.scrollLeft.toFloat(), ele.scrollTop.toFloat(), isDragging)
                 cb.invoke(map)
@@ -885,252 +725,8 @@ class H5ListView : IListElement {
      * event even if scrollTop/scrollLeft do not change, so that the upper-layer
      * `ignoreScrollOffset` flag can be cleared.
      */
-    override fun prepareForComposeReuse(generation: Long) {
-        writeOperationSequence += 1L
-        composeOffsetWriteGeneration = generation
-        nativeInteractionEpoch += 1L
-        nativeLayoutRevision += 1L
-        nativeInsetRevision += 1L
-        latestComposeWriteOperation = 0L
-        minimumComposeWriteOperation = 0L
-        invalidateWrite(WebScrollWriteResultCode.Destroyed)
-        insetWhenEndDragSequence += 1L
-        pendingReuseScrollEventTimer?.let { kuiklyWindow.clearTimeout(it) }
-        pendingReuseScrollEventTimer = null
-        if (scrollEndEventTimer > 0) {
-            kuiklyWindow.clearTimeout(scrollEndEventTimer)
-            scrollEndEventTimer = 0
-        }
-        nativeScrollPhase = 0
-        isDragging = 0
+    override fun prepareForComposeReuse() {
         pendingFireScrollForReuse = true
-    }
-
-    private fun canApplyOffsetWrite(generation: Long, requiresNativeIdle: Boolean): Boolean {
-        return canApplyWebOffsetWrite(
-            generation,
-            requiresNativeIdle,
-            composeOffsetWriteGeneration,
-            nativeScrollPhase,
-        )
-    }
-
-    private fun claimOffsetWrite(
-        generation: Long,
-        requiresNativeIdle: Boolean,
-        composeOperation: Long,
-    ): Boolean {
-        if (!canApplyOffsetWrite(generation, requiresNativeIdle)) return false
-        if (composeOperation <= 0L) return true
-        if (composeOperation < minimumComposeWriteOperation ||
-            composeOperation < latestComposeWriteOperation) return false
-        latestComposeWriteOperation = composeOperation
-        return true
-    }
-
-    private fun validateWrite(
-        generation: Long,
-        requiresNativeIdle: Boolean,
-        composeOperation: Long,
-        interactionEpoch: Long,
-        layoutRevision: Long,
-        insetRevision: Long,
-        expectedContentSize: Float,
-        expectedViewportSize: Float,
-        outOfRange: Boolean,
-    ): WebScrollWriteResultCode {
-        if (outOfRange) return WebScrollWriteResultCode.OutOfRange
-        if (generation >= 0 && generation != composeOffsetWriteGeneration) {
-            return WebScrollWriteResultCode.Stale
-        }
-        if (requiresNativeIdle && nativeScrollPhase != 0) return WebScrollWriteResultCode.Busy
-        if (composeOperation > 0L &&
-            (composeOperation < minimumComposeWriteOperation ||
-                composeOperation < latestComposeWriteOperation)) {
-            return WebScrollWriteResultCode.Stale
-        }
-        if (interactionEpoch != nativeInteractionEpoch) return WebScrollWriteResultCode.Interrupted
-        if (layoutRevision != nativeLayoutRevision) {
-            return if (ele.offsetWidth == 0 && ele.offsetHeight == 0) {
-                WebScrollWriteResultCode.NotReady
-            } else {
-                WebScrollWriteResultCode.LayoutChanged
-            }
-        }
-        if (insetRevision != nativeInsetRevision) return WebScrollWriteResultCode.Stale
-        if (!matchesExpectedLayout(expectedContentSize, expectedViewportSize)) {
-            return if (ele.offsetWidth == 0 && ele.offsetHeight == 0) {
-                WebScrollWriteResultCode.NotReady
-            } else {
-                WebScrollWriteResultCode.LayoutChanged
-            }
-        }
-        if (composeOperation > 0L) latestComposeWriteOperation = composeOperation
-        return WebScrollWriteResultCode.Committed
-    }
-
-    private fun isCurrentOffsetWrite(composeOperation: Long): Boolean {
-        return composeOperation <= 0L ||
-            (composeOperation == latestComposeWriteOperation &&
-                composeOperation >= minimumComposeWriteOperation)
-    }
-
-    private fun matchesExpectedLayout(
-        expectedContentSize: Float,
-        expectedViewportSize: Float,
-    ): Boolean {
-        if (expectedContentSize < 0f || expectedViewportSize < 0f) return true
-        val vertical = scrollDirection == KRListConst.SCROLL_DIRECTION_COLUMN
-        val actualContentSize = if (vertical) ele.scrollHeight.toFloat() else ele.scrollWidth.toFloat()
-        val actualViewportSize = if (vertical) ele.offsetHeight.toFloat() else ele.offsetWidth.toFloat()
-        return kotlin.math.abs(actualContentSize - expectedContentSize) <= 1f &&
-            kotlin.math.abs(actualViewportSize - expectedViewportSize) <= 1f
-    }
-
-    private fun refreshLayoutRevision() {
-        val contentWidth = ele.scrollWidth
-        val contentHeight = ele.scrollHeight
-        val viewportWidth = ele.offsetWidth
-        val viewportHeight = ele.offsetHeight
-        if (lastContentWidth < 0) {
-            lastContentWidth = contentWidth
-            lastContentHeight = contentHeight
-            lastViewportWidth = viewportWidth
-            lastViewportHeight = viewportHeight
-        } else if (contentWidth != lastContentWidth || contentHeight != lastContentHeight ||
-            viewportWidth != lastViewportWidth || viewportHeight != lastViewportHeight) {
-            nativeLayoutRevision += 1L
-            lastContentWidth = contentWidth
-            lastContentHeight = contentHeight
-            lastViewportWidth = viewportWidth
-            lastViewportHeight = viewportHeight
-        }
-    }
-
-    private fun writeResult(code: WebScrollWriteResultCode): Map<String, Any> =
-        webScrollWriteResult(code, nativeInteractionEpoch, nativeLayoutRevision, nativeInsetRevision)
-
-    private fun installWrite(
-        kind: WebScrollWriteKind,
-        callback: KuiklyRenderCallback?,
-        generation: Long,
-        composeOperation: Long,
-        interactionEpoch: Long,
-        layoutRevision: Long,
-        insetRevision: Long,
-        bindingGeneration: Long = 0,
-        capabilityKind: Int = -1,
-        capabilityLeaseId: Long = 0,
-        semanticOperationId: Long = 0,
-        attemptGeneration: Long = 0,
-        anchorRevision: Long = 0,
-        rangeRevision: Long = 0,
-    ): WebScrollWriteOperation {
-        val operation = WebScrollWriteOperation(
-            sequence = ++writeOperationSequence,
-            kind = kind,
-            callback = callback,
-            generation = generation,
-            composeOperation = composeOperation,
-            interactionEpoch = interactionEpoch,
-            layoutRevision = layoutRevision,
-            insetRevision = insetRevision,
-            bindingGeneration = bindingGeneration,
-            capabilityKind = capabilityKind,
-            capabilityLeaseId = capabilityLeaseId,
-            semanticOperationId = semanticOperationId,
-            attemptGeneration = attemptGeneration,
-            anchorRevision = anchorRevision,
-            rangeRevision = rangeRevision,
-        )
-        val previous = writeArbiter.install(operation)
-        abortSmoothScroll()
-        val previousResult = previous?.callback?.let { writeResult(WebScrollWriteResultCode.Replaced) }
-        previous?.callback?.let { it.invoke(previousResult!!) }
-        return operation
-    }
-
-    private fun finishWrite(
-        operation: WebScrollWriteOperation,
-        code: WebScrollWriteResultCode,
-        fireScrollEnd: Boolean,
-    ) {
-        val callback = writeArbiter.complete(operation) ?: return
-        if (activeSmoothScroll === operation) activeSmoothScroll = null
-        smoothScrollFrameId?.let { kuiklyWindow.cancelAnimationFrame(it) }
-        smoothScrollFrameId = null
-        smoothScrollEndTimer?.let { kuiklyWindow.clearTimeout(it) }
-        smoothScrollEndTimer = null
-        if (nativeScrollPhase == 2 && isDragging == 0) nativeScrollPhase = 0
-        refreshLayoutRevision()
-        val result = writeResult(code)
-        val eventParams = updateOffsetMap(ele.scrollLeft.toFloat(), ele.scrollTop.toFloat(), isDragging)
-        if (fireScrollEnd) {
-            lastProgrammaticTerminalAt = Date.now()
-            scrollEndEventCallback?.invoke(eventParams)
-        }
-        callback.invoke(result)
-    }
-
-    private fun invalidateWrite(code: WebScrollWriteResultCode) {
-        val operation = writeArbiter.invalidate() ?: return
-        abortSmoothScroll()
-        val result = operation.callback?.let { writeResult(code) }
-        operation.callback?.let { it.invoke(result!!) }
-    }
-
-    private fun scheduleSmoothTargetCheck(operation: WebScrollWriteOperation) {
-        smoothScrollFrameId?.let { kuiklyWindow.cancelAnimationFrame(it) }
-        fun checkFrame(timestamp: Double) {
-            if (!writeArbiter.isCurrent(operation)) return
-            val reached = abs(ele.scrollLeft.toFloat() - operation.targetX) <= 1f &&
-                abs(ele.scrollTop.toFloat() - operation.targetY) <= 1f
-            operation.observedFrames = if (reached) operation.observedFrames + 1 else 0
-            if (operation.observedFrames >= 3) {
-                finishWrite(operation, WebScrollWriteResultCode.Committed, true)
-            } else {
-                smoothScrollFrameId = kuiklyWindow.requestAnimationFrame(::checkFrame)
-            }
-        }
-        smoothScrollFrameId = kuiklyWindow.requestAnimationFrame(::checkFrame)
-    }
-
-    private fun abortSmoothScroll() {
-        listPagingHelper.cancelProgrammaticScroll()
-        smoothScrollFrameId?.let { kuiklyWindow.cancelAnimationFrame(it) }
-        smoothScrollFrameId = null
-        smoothScrollEndTimer?.let { kuiklyWindow.clearTimeout(it) }
-        smoothScrollEndTimer = null
-        val ownedSmoothScroll = activeSmoothScroll != null
-        if (ownedSmoothScroll) {
-            ele.scrollTo(ScrollToOptions(ele.scrollLeft, ele.scrollTop, ScrollBehavior.AUTO))
-            if (scrollEndEventTimer > 0) {
-                kuiklyWindow.clearTimeout(scrollEndEventTimer)
-                scrollEndEventTimer = 0
-            }
-        }
-        activeSmoothScroll = null
-        if (ownedSmoothScroll && isDragging == 0) {
-            nativeScrollPhase = 0
-        }
-    }
-
-    private fun finishScrollEnd() {
-        if (scrollEndEventTimer > 0) {
-            kuiklyWindow.clearTimeout(scrollEndEventTimer)
-            scrollEndEventTimer = 0
-        }
-        val operation = activeSmoothScroll
-        if (operation != null && writeArbiter.isCurrent(operation)) {
-            scheduleSmoothTargetCheck(operation)
-            return
-        }
-        if (Date.now() - lastProgrammaticTerminalAt <= 250.0) return
-        nativeScrollIngressActive = false
-        nativeScrollPhase = 0
-        scrollEndEventCallback?.invoke(
-            updateOffsetMap(ele.scrollLeft.toFloat(), ele.scrollTop.toFloat(), isDragging)
-        )
     }
 
     /**
@@ -1152,112 +748,22 @@ class H5ListView : IListElement {
     /**
      * Set content inset with animation
      */
-    override fun setContentInset(params: String?, callback: KuiklyRenderCallback?) {
-        val contentInsetString = params ?: run {
-            callback?.invoke(writeResult(WebScrollWriteResultCode.OutOfRange))
-            return
-        }
+    override fun setContentInset(params: String?) {
+        // Inset value to set
+        val contentInsetString = params ?: return
+        // Format inset value
         val contentInset = KRListViewContentInset(contentInsetString)
-        val splits = contentInsetString.split(KRCssConst.BLANK_SEPARATOR)
-        val generation = if (splits.size > 6) splits[5].toLong() else -1L
-        val requiresNativeIdle = splits.size > 6 && splits[6] == "1"
-        val composeOperation = splits.getOrNull(7)?.toLong() ?: 0L
-        val expectedContentSize = splits.getOrNull(8)?.toFloat() ?: -1f
-        val expectedViewportSize = splits.getOrNull(9)?.toFloat() ?: -1f
-        val bindingGeneration = splits.getOrNull(10)?.toLongOrNull() ?: 0L
-        val capabilityKind = splits.getOrNull(11)?.toIntOrNull() ?: -1
-        val capabilityLeaseId = splits.getOrNull(12)?.toLongOrNull() ?: 0L
-        val semanticOperationId = splits.getOrNull(13)?.toLongOrNull() ?: 0L
-        val attemptGeneration = splits.getOrNull(14)?.toLongOrNull() ?: 0L
-        val interactionEpoch = splits.getOrNull(15)?.toLongOrNull() ?: nativeInteractionEpoch
-        val layoutRevision = splits.getOrNull(16)?.toLongOrNull() ?: nativeLayoutRevision
-        val anchorRevision = splits.getOrNull(17)?.toLongOrNull() ?: 0L
-        val rangeRevision = splits.getOrNull(18)?.toLongOrNull() ?: 0L
-        val insetRevision = splits.getOrNull(19)?.toLongOrNull() ?: nativeInsetRevision
-        refreshLayoutRevision()
-        val validation = validateWrite(
-            generation, requiresNativeIdle, composeOperation,
-            interactionEpoch, layoutRevision, insetRevision,
-            expectedContentSize, expectedViewportSize, false,
-        )
-        if (validation != WebScrollWriteResultCode.Committed) {
-            callback?.invoke(writeResult(validation))
-            return
-        }
-        val operation = installWrite(
-            WebScrollWriteKind.ContentInset, callback, generation, composeOperation,
-            interactionEpoch, layoutRevision, insetRevision,
-            bindingGeneration, capabilityKind, capabilityLeaseId,
-            semanticOperationId, attemptGeneration, anchorRevision, rangeRevision,
-        )
-        if (!writeArbiter.isCurrent(operation)) return
-        operation.started = true
+        // Complete setting asynchronously
         KuiklyRenderCoreContextScheduler.scheduleTask(KRListConst.IMMEDIATE_TIMEOUT) {
-            if (!writeArbiter.isCurrent(operation)) return@scheduleTask
-            refreshLayoutRevision()
-            if (operation.interactionEpoch != nativeInteractionEpoch) {
-                finishWrite(operation, WebScrollWriteResultCode.Interrupted, false)
-                return@scheduleTask
-            }
+            // Use animation to set inset value if needed
             val contentEle = ele.firstElementChild.unsafeCast<HTMLElement?>()
-            if (contentEle == null) {
-                finishWrite(operation, WebScrollWriteResultCode.NotReady, false)
-                return@scheduleTask
-            }
-            val targetTransform = buildTranslate(contentInset.left, contentInset.top)
-            if (contentEle.style.transform == targetTransform) {
-                finishWrite(operation, WebScrollWriteResultCode.AlreadySatisfied, false)
-                return@scheduleTask
-            }
-            contentEle.style.transition = if (contentInset.animate) {
+            contentEle?.style?.transition = if (contentInset.animate) {
                 buildTransition()
             } else {
                 KRCssConst.EMPTY_STRING
             }
-            contentEle.style.transform = targetTransform
-            if (!contentInset.animate) {
-                nativeInsetRevision += 1L
-                finishWrite(operation, WebScrollWriteResultCode.Committed, false)
-                return@scheduleTask
-            }
-            nativeScrollPhase = 2
-            var insetRevisionCommitted = false
-            fun completeIfCurrent() {
-                if (!writeArbiter.isCurrent(operation)) return
-                val committed = contentEle.style.transform == targetTransform &&
-                    (operation.generation < 0 || operation.generation == composeOffsetWriteGeneration) &&
-                    operation.interactionEpoch == nativeInteractionEpoch &&
-                    isCurrentOffsetWrite(operation.composeOperation) &&
-                    matchesExpectedLayout(expectedContentSize, expectedViewportSize)
-                if (committed && !insetRevisionCommitted) {
-                    insetRevisionCommitted = true
-                    nativeInsetRevision += 1L
-                }
-                contentEle.style.transition = KRCssConst.EMPTY_STRING
-                finishWrite(
-                    operation,
-                    if (committed) WebScrollWriteResultCode.Committed
-                    else WebScrollWriteResultCode.Interrupted,
-                    true,
-                )
-            }
-            lateinit var transitionListener: (Event) -> Unit
-            transitionListener = { event ->
-                if (event.asDynamic().propertyName == TRANSFORM_PROPERTY) {
-                    contentEle.removeEventListener("transitionend", transitionListener)
-                    completeIfCurrent()
-                }
-            }
-            contentEle.addEventListener("transitionend", transitionListener)
-            smoothScrollEndTimer = kuiklyWindow.setTimeout({
-                contentEle.removeEventListener("transitionend", transitionListener)
-                if (!writeArbiter.isCurrent(operation)) return@setTimeout
-                if (contentEle.style.transform == targetTransform) {
-                    completeIfCurrent()
-                } else {
-                    finishWrite(operation, WebScrollWriteResultCode.AckTimeout, true)
-                }
-            }, KRListConst.BOUND_BACK_DURATION.toInt() + 1_000)
+            // Set the value to complete
+            contentEle?.style?.transform = buildTranslate(contentInset.left, contentInset.top)
         }
     }
 
@@ -1269,19 +775,6 @@ class H5ListView : IListElement {
         val contentInsetString = params ?: return
         // Format inset value
         val contentInset = KRListViewContentInset(contentInsetString)
-        val splits = contentInsetString.split(KRCssConst.BLANK_SEPARATOR)
-        val generation = if (splits.size > 6) splits[5].toLong() else composeOffsetWriteGeneration
-        val requiresNativeIdle = splits.size > 6 && splits[6] == "1"
-        val composeOperation = splits.getOrNull(7)?.toLong() ?: 0L
-        val expectedContentSize = splits.getOrNull(8)?.toFloat() ?: -1f
-        val expectedViewportSize = splits.getOrNull(9)?.toFloat() ?: -1f
-        if (!claimOffsetWrite(generation, requiresNativeIdle, composeOperation) ||
-            !matchesExpectedLayout(expectedContentSize, expectedViewportSize)) return
-        pullRefreshComposeOperation = composeOperation
-        pullRefreshExpectedContentSize = expectedContentSize
-        pullRefreshExpectedViewportSize = expectedViewportSize
-        insetWhenEndDragSequence += 1L
-        val writeSequence = insetWhenEndDragSequence
         // Transform content to set
         val transform = buildTranslate(contentInset.left, contentInset.top)
         if (contentInset.top == 0f) {
@@ -1297,12 +790,6 @@ class H5ListView : IListElement {
             // web doesn't support pull bounce by default,
             // so this value is not processed, only handle the value when preparing for pull-to-refresh
             KuiklyRenderCoreContextScheduler.scheduleTask(KRListConst.BOUND_BACK_DURATION.toInt()) {
-                if (writeSequence != insetWhenEndDragSequence ||
-                    generation != composeOffsetWriteGeneration ||
-                    !isCurrentOffsetWrite(composeOperation) ||
-                    !matchesExpectedLayout(expectedContentSize, expectedViewportSize)) {
-                    return@scheduleTask
-                }
                 // Clear animation
                 val contentEle = ele.firstElementChild.unsafeCast<HTMLElement?>()
                 contentEle?.style?.transition = KRCssConst.EMPTY_STRING
@@ -1325,16 +812,6 @@ class H5ListView : IListElement {
      * Clear existing timers and resources when component is destroyed
      */
     override fun destroy() {
-        writeOperationSequence += 1L
-        minimumComposeWriteOperation = latestComposeWriteOperation + 1L
-        nativeInteractionEpoch += 1L
-        nativeLayoutRevision += 1L
-        nativeInsetRevision += 1L
-        invalidateWrite(WebScrollWriteResultCode.Destroyed)
-        insetWhenEndDragSequence += 1L
-        pendingReuseScrollEventTimer?.let { kuiklyWindow.clearTimeout(it) }
-        pendingReuseScrollEventTimer = null
-        nativeScrollPhase = 0
         // Clear all timers
         if (scrollEndEventTimer > 0) {
             kuiklyWindow.clearTimeout(scrollEndEventTimer)

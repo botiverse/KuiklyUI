@@ -48,46 +48,6 @@ internal sealed class AnimationConfig {
     ) : AnimationConfig()
 }
 
-internal class AnimationOperationSlot<T>(
-    private val cancel: (T) -> Unit,
-) {
-    private var operationSequence = 0L
-    private var current: T? = null
-
-    fun beginReplacement(): Long {
-        val operation = operationSequence + 1L
-        operationSequence = operation
-        val previous = current
-        current = null
-        previous?.let(cancel)
-        return operation
-    }
-
-    fun install(operation: Long, value: T): Boolean {
-        if (operation != operationSequence || current != null) return false
-        current = value
-        return true
-    }
-
-    fun isCurrent(operation: Long, value: T): Boolean {
-        return operation == operationSequence && current === value
-    }
-
-    fun isCurrentOperation(operation: Long): Boolean = operation == operationSequence
-
-    fun complete(operation: Long, value: T): Boolean {
-        if (!isCurrent(operation, value)) return false
-        current = null
-        return true
-    }
-
-    fun cancelCurrent() {
-        beginReplacement()
-    }
-
-    fun hasCurrent(): Boolean = current != null
-}
-
 /**
  * 滚动动画管理器
  * 支持的动画类型：
@@ -98,7 +58,7 @@ internal class KRScrollAnimationManager(
     private val recyclerView: RecyclerView
 ) {
     // 当前运行的动画
-    private val animationSlot = AnimationOperationSlot<KRScrollAnimation> { it.cancel() }
+    private var currentAnimation: KRScrollAnimation? = null
     
     // 记录当前滚动方向：true=水平，false=垂直
     private var isHorizontal: Boolean = false
@@ -109,13 +69,14 @@ internal class KRScrollAnimationManager(
     /**
      * 检查是否有动画正在运行
      */
-    fun hasRunningAnimation(): Boolean = animationSlot.hasCurrent()
+    fun hasRunningAnimation(): Boolean = currentAnimation != null
 
     /**
      * 取消动画
      */
     fun cancel() {
-        animationSlot.cancelCurrent()
+        currentAnimation?.cancel()
+        currentAnimation = null
     }
 
     /**
@@ -129,8 +90,8 @@ internal class KRScrollAnimationManager(
         velocity: Float,
         isVertical: Boolean,
         onScrollStateChange: (Int) -> Unit
-    ): Boolean {
-        return startAnimation(
+    ) {
+        startAnimation(
             dx, dy,
             AnimationConfig.Spring(duration, damping, velocity, isVertical),
             onScrollStateChange
@@ -145,8 +106,8 @@ internal class KRScrollAnimationManager(
         dy: Int,
         duration: Int,
         onScrollStateChange: (Int) -> Unit
-    ): Boolean {
-        return startAnimation(
+    ) {
+        startAnimation(
             dx, dy,
             AnimationConfig.Linear(duration),
             onScrollStateChange
@@ -161,19 +122,19 @@ internal class KRScrollAnimationManager(
         dy: Int,
         config: AnimationConfig,
         onScrollStateChange: (Int) -> Unit
-    ): Boolean {
-        val operation = animationSlot.beginReplacement()
-        if (!animationSlot.isCurrentOperation(operation)) return false
+    ) {
+        // 取消之前的动画
+        cancel()
 
         // 边界检查
-        if (dx == 0 && dy == 0) return true
+        if (dx == 0 && dy == 0) return
 
-        val layoutManager = recyclerView.layoutManager ?: return false
+        val layoutManager = recyclerView.layoutManager ?: return
         
         val actualDx = if (layoutManager.canScrollHorizontally()) dx else 0
         val actualDy = if (layoutManager.canScrollVertically()) dy else 0
 
-        if (actualDx == 0 && actualDy == 0) return false
+        if (actualDx == 0 && actualDy == 0) return
 
         // 确定滚动方向和距离
         val (distance, horizontal) = if (actualDx != 0) {
@@ -185,17 +146,15 @@ internal class KRScrollAnimationManager(
         isHorizontal = horizontal
         // 设置滚动状态
         onScrollStateChange(RecyclerView.SCROLL_STATE_SETTLING)
-        if (!animationSlot.isCurrentOperation(operation)) return false
         // 启动嵌套滚动
         startNestedScrollIfNeeded(actualDx, actualDy)
-        if (!animationSlot.isCurrentOperation(operation)) return false
         // 创建并启动动画
         val animation = when (config) {
             is AnimationConfig.Spring -> createSpringAnimation(distance, config)
             is AnimationConfig.Linear -> createLinearAnimation(distance, config)
         }
         
-        return setupAndStartAnimation(animation, distance.toFloat(), operation)
+        setupAndStartAnimation(animation, distance.toFloat())
     }
 
     /**
@@ -238,15 +197,11 @@ internal class KRScrollAnimationManager(
      * @param animation 动画实例
      * @param targetDistance 目标滚动距离（用于动画结束时修正偏差）
      */
-    private fun setupAndStartAnimation(
-        animation: KRScrollAnimation,
-        targetDistance: Float,
-        operation: Long,
-    ): Boolean {
+    private fun setupAndStartAnimation(animation: KRScrollAnimation, targetDistance: Float) {
         var consumed = 0f
 
         animation.onUpdate = { value ->
-            if (animationSlot.isCurrent(operation, animation)) {
+            if (currentAnimation === animation) {
                 val delta = value - consumed
                 val intDelta = delta.toInt()
                 
@@ -258,7 +213,7 @@ internal class KRScrollAnimationManager(
         }
 
         animation.onEnd = {
-            if (animationSlot.complete(operation, animation)) {
+            if (currentAnimation === animation) {
                 // 动画结束时，检查是否还有剩余的小数部分需要滚动
                 // 由于 delta.toInt() 会截断小数部分，可能导致最后有 0.x px 的偏差
                 // 计算剩余距离：目标距离 - 已消费的整数部分
@@ -270,13 +225,13 @@ internal class KRScrollAnimationManager(
                         scrollRecyclerView(finalDelta)
                     }
                 }
+                currentAnimation = null
                 onAnimationEnd?.invoke()
             }
         }
 
-        if (!animationSlot.install(operation, animation)) return false
+        currentAnimation = animation
         animation.start()
-        return animationSlot.isCurrentOperation(operation)
     }
 
     /**

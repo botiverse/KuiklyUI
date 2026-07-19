@@ -23,7 +23,6 @@ import com.tencent.kuikly.compose.foundation.gestures.ScrollableState
 import com.tencent.kuikly.compose.foundation.layout.PaddingValues
 import com.tencent.kuikly.compose.ui.unit.dp
 import com.tencent.kuikly.compose.scroller.applyScrollViewOffsetDelta
-import com.tencent.kuikly.compose.scroller.ScrollOffsetWriteIntent
 import com.tencent.kuikly.compose.scroller.isValidOffsetDelta
 import com.tencent.kuikly.core.views.ScrollParams
 import kotlinx.coroutines.coroutineScope
@@ -41,15 +40,7 @@ internal class KuiklyScrollableState(val onDelta: (Float) -> Float) : Scrollable
             if (delta == 0f) return 0f
 
             if (!kuiklyInfo.offsetDirty && isValidOffsetDelta(delta.toInt())) {
-                kuiklyInfo.captureScrollOffsetOwnerToken()?.let { ownerToken ->
-                    applyScrollViewOffsetDelta(
-                        delta.toInt(),
-                        ownerToken = ownerToken,
-                        intent = ScrollOffsetWriteIntent.MutationOwnedProgrammatic,
-                        reason = "scrollable_dispatch_raw_delta",
-                        anchorValidator = { isValidOffsetDelta(delta.toInt()) },
-                    )
-                }
+                applyScrollViewOffsetDelta(delta.toInt())
             } else {
                 kuiklyInfo.offsetDirty = true
             }
@@ -71,15 +62,11 @@ internal class KuiklyScrollableState(val onDelta: (Float) -> Float) : Scrollable
         block: suspend ScrollScope.() -> Unit
     ): Unit = coroutineScope {
         scrollMutex.mutateWith(scrollScope, scrollPriority) {
-            val capability = kuiklyInfo.beginScrollOffsetWriteCapability(
-                ScrollOffsetWriteCapabilityKind.Mutation,
-            )
             isScrollingState.value = true
             try {
                 block()
             } finally {
                 isScrollingState.value = false
-                kuiklyInfo.endScrollOffsetWriteCapability(capability)
             }
         }
     }
@@ -98,25 +85,12 @@ internal class KuiklyScrollableState(val onDelta: (Float) -> Float) : Scrollable
     }
 
     override fun dispatchRawDelta(delta: Float): Float {
-        val ownerToken = kuiklyInfo.captureScrollOffsetOwnerToken() ?: return 0f
-        if (!kuiklyInfo.hasCurrentScrollOffsetWriteCapability(
-                ScrollOffsetWriteCapabilityKind.Mutation,
-                ownerToken,
-            )
-        ) {
-            return 0f
-        }
+
         val consumed = onDelta(delta)
         if (consumed == 0f) return 0f
 
         if (!kuiklyInfo.offsetDirty && isValidOffsetDelta(consumed.toInt())) {
-            applyScrollViewOffsetDelta(
-                consumed.toInt(),
-                ownerToken = ownerToken,
-                intent = ScrollOffsetWriteIntent.MutationOwnedProgrammatic,
-                reason = "scrollable_consume_delta",
-                anchorValidator = { isValidOffsetDelta(consumed.toInt()) },
-            )
+            applyScrollViewOffsetDelta(consumed.toInt())
         } else {
             kuiklyInfo.offsetDirty = true
         }

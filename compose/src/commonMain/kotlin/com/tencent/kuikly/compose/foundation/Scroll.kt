@@ -22,7 +22,6 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -52,8 +51,6 @@ import com.tencent.kuikly.compose.ui.unit.Constraints
 import com.tencent.kuikly.compose.ui.unit.IntOffset
 import com.tencent.kuikly.compose.ui.unit.dp
 import com.tencent.kuikly.compose.ui.util.fastRoundToInt
-import com.tencent.kuikly.compose.scroller.ScrollOffsetWriteIntent
-import com.tencent.kuikly.compose.scroller.applyScrollViewContentOffset
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
 import com.tencent.kuikly.core.views.SpringAnimation
 
@@ -68,11 +65,8 @@ import com.tencent.kuikly.core.views.SpringAnimation
  */
 @Composable
 fun rememberScrollState(initial: Int = 0): ScrollState {
-    val scope = rememberCoroutineScope()
     return rememberSaveable(saver = ScrollState.Saver) {
         ScrollState(initial = initial)
-    }.also {
-        it.kuiklyInfo.scope = scope
     }
 }
 
@@ -185,29 +179,21 @@ class ScrollState(initial: Int) : ScrollableState {
         value: Int,
         animationSpec: AnimationSpec<Float> = SpringSpec()
     ) {
-        scroll(MutatePriority.Default) {
-            val targetValue = value.coerceIn(0, maxValue)
-            val orientation = kuiklyInfo.orientation
-            kuiklyInfo.captureScrollOffsetOwnerToken()?.let { ownerToken ->
-                val scrollView = ownerToken.scrollView
-                val density = kuiklyInfo.getDensity()
-                val curOffset = IntOffset(scrollView.contentViewOffsetX.toInt(), scrollView.contentViewOffsetY.toInt())
-                val newOffset = if (orientation == Orientation.Vertical) {
-                    IntOffset(curOffset.x, (targetValue / density).toInt())
-                } else {
-                    IntOffset((targetValue / density).toInt(), curOffset.y)
-                }
-                kuiklyInfo.applyScrollViewContentOffset(
-                    ownerToken = ownerToken,
-                    offsetX = newOffset.x.toFloat(),
-                    offsetY = newOffset.y.toFloat(),
-                    animated = true,
-                    intent = ScrollOffsetWriteIntent.MutationOwnedProgrammatic,
-                    reason = "scroll_state_animate_to",
-                    springAnimation = SpringAnimation(400, 1f, 0f),
-                    anchorValidator = { targetValue in 0..maxValue },
-                )
+        val orientation = kuiklyInfo.orientation
+        kuiklyInfo.scrollView?.run {
+            val density = kuiklyInfo.getDensity()
+            val curOffset = IntOffset(contentViewOffsetX.toInt(), contentViewOffsetY.toInt())
+            val newOffset = if (orientation == Orientation.Vertical) {
+                IntOffset(curOffset.x, (value / density).toInt())
+            } else {
+                IntOffset((value / density).toInt(), curOffset.y)
             }
+            setContentOffset(
+                newOffset.x.toFloat(),
+                newOffset.y.toFloat(),
+                true,
+                SpringAnimation(400, 1f, 0f)
+            )
         }
 
 //        this.animateScrollBy((value - this.value).toFloat(), animationSpec)

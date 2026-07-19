@@ -38,7 +38,6 @@ publishing {
 kotlin {
     js(IR) {
         moduleName = "KuiklyCore-render-web-base"
-        nodejs()
         // Output build products that support browser execution
         browser {
             webpackTask {
@@ -60,11 +59,6 @@ kotlin {
             dependencies {
                 // Import js standard library
                 implementation(kotlin("stdlib-js"))
-            }
-        }
-        val jsTest by getting {
-            dependencies {
-                implementation(kotlin("test"))
             }
         }
     }
