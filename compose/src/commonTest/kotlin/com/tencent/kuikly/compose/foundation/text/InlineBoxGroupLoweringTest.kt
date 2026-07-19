@@ -34,6 +34,31 @@ import kotlin.test.assertIs
 class InlineBoxGroupLoweringTest {
 
     @Test
+    fun stylelessClickablePreservesInheritedFontFamilyAndWeight() {
+        val builder = AnnotatedString.Builder()
+        builder.withStyle(SpanStyle(fontFamily = FontFamily.SansSerif)) {
+            append("body ")
+            withStyle(SpanStyle(fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold)) {
+                append("bold")
+            }
+        }
+        val text = builder.toAnnotatedString()
+        val clickable = LinkAnnotation.Clickable(tag = "body", linkInteractionListener = {})
+        val linked = AnnotatedString.Builder(text.length).apply {
+            append(text)
+            addLink(clickable, 0, text.length)
+        }.toAnnotatedString()
+
+        val attr = RichTextAttr()
+        attr.applyAnnotatedString(linked, density = Density(1f))
+
+        val spans = attr.getSpans().map { assertIs<TextSpan>(it) }
+        assertEquals("sans-serif", spans[0].spanPropsMap()[TextConst.FONT_FAMILY])
+        assertEquals("serif", spans[1].spanPropsMap()[TextConst.FONT_FAMILY])
+        assertEquals("700", spans[1].spanPropsMap()[TextConst.FONT_WEIGHT])
+    }
+
+    @Test
     fun inlineBoxLinkStyleStillAppliesChildTypography() {
         val box = InlineBoxSpanStyle(
             backgroundColor = Color.Yellow,
