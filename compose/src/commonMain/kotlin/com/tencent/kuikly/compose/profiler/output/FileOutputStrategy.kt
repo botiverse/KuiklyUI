@@ -23,8 +23,12 @@ import com.tencent.kuikly.compose.profiler.RecompositionOutputStrategy
 import com.tencent.kuikly.compose.profiler.RecompositionReport
 import com.tencent.kuikly.compose.profiler.ScrollContextEvent
 import com.tencent.kuikly.compose.profiler.TouchContextEvent
+import com.tencent.kuikly.compose.coroutines.internal.KuiklyContextScheduler
+import com.tencent.kuikly.compose.ui.SynchronizedObject
+import com.tencent.kuikly.compose.ui.synchronized
 import com.tencent.kuikly.core.datetime.DateTime
 import com.tencent.kuikly.core.module.FileModule
+import kotlinx.atomicfu.atomic
 
 /**
  * 文件写入输出策略。
@@ -52,14 +56,17 @@ internal class FileOutputStrategy(
         private const val APPEND_INTERVAL_MS = 2000L
     }
 
-    /** 待 append 的帧 JSON 缓冲区 */
+    /** 待 append 的帧 JSON 缓冲区（仅可在 [pendingLock] 内访问） */
     private val pendingFrames = mutableListOf<String>()
+
+    /** [pendingFrames] 的访问锁：帧完成回调可能来自任意线程 */
+    private val pendingLock = SynchronizedObject()
 
     /** 上次 append 的时间戳 */
     private var lastAppendMs: Long = 0L
 
-    /** 当前是否处于 start/stop 之间（由外部通过 setActive 控制） */
-    private var active: Boolean = false
+    /** 当前是否处于 start/stop 之间（由外部通过 activate/deactivate 控制） */
+    private val active = atomic(false)
 
     /** 当前 session ID，写入 frames 文件 header 用 */
     private var currentSessionId: String = ""
@@ -75,24 +82,24 @@ internal class FileOutputStrategy(
      * @param sessionStartMs tracker.startTimestampMs，用于过滤 start 之前的旧帧
      */
     fun activate(sessionId: String, sessionStartMs: Long) {
-        active = true
+        active.value = true
         currentSessionId = sessionId
         sessionStartTimestampMs = sessionStartMs
         lastAppendMs = DateTime.currentTimestamp()
-        pendingFrames.clear()
+        synchronized(pendingLock) { pendingFrames.clear() }
         // 写 session header，同时清空上次 session 的帧数据
         val header = "{\"type\":\"session\",\"sessionId\":\"$sessionId\",\"startTimestampMs\":$sessionStartMs}\n"
-        fileModule.writeFile(FILE_FRAMES, header) { }
+        scheduleFileWrite { fileModule.writeFile(FILE_FRAMES, header) { } }
         // 同步清空 report 文件，避免旧 report 与新 frames 属于不同 session
-        fileModule.writeFile(FILE_REPORT, "") { }
+        scheduleFileWrite { fileModule.writeFile(FILE_REPORT, "") { } }
     }
 
     /**
      * 由 RecompositionProfiler 在 stop() 时调用，停止文件写入并 flush 剩余帧数据。
      */
     fun deactivate(report: RecompositionReport) {
-        if (!active) return
-        active = false
+        if (!active.value) return
+        active.value = false
         // flush 剩余帧
         flushPendingFrames()
         // 写聚合报告
@@ -105,21 +112,29 @@ internal class FileOutputStrategy(
      */
     fun writeReport(report: RecompositionReport) {
         flushPendingFrames()
-        fileModule.writeFile(FILE_REPORT, report.toJson()) { }
+        val reportJson = report.toJson()
+        scheduleFileWrite { fileModule.writeFile(FILE_REPORT, reportJson) { } }
     }
 
     override fun onFrameComplete(events: List<RecompositionEvent>) {
-        if (!active) return
+        if (!active.value) return
         // 过滤 session start 之前产生的旧帧（多页面场景下其他页面的帧可能晚于 activate 到达）
         val frameStart = events.firstOrNull { it is RecompositionFrameStartEvent } as? RecompositionFrameStartEvent
         if (frameStart != null && frameStart.timestampMs < sessionStartTimestampMs) return
         val frameJson = buildFrameJson(events)
-        pendingFrames.add(frameJson)
         // 每 2 秒批量写入一次
         val now = DateTime.currentTimestamp()
-        if (now - lastAppendMs >= APPEND_INTERVAL_MS) {
-            flushPendingFrames()
-            lastAppendMs = now
+        val batch: String? = synchronized(pendingLock) {
+            pendingFrames.add(frameJson)
+            if (now - lastAppendMs >= APPEND_INTERVAL_MS) {
+                lastAppendMs = now
+                drainPendingFramesLocked()
+            } else {
+                null
+            }
+        }
+        batch?.let { content ->
+            scheduleFileWrite { fileModule.appendFile(FILE_FRAMES, content) { } }
         }
     }
 
@@ -133,18 +148,39 @@ internal class FileOutputStrategy(
      * 非 active 状态下忽略（Profiler 未启用时零开销由调用方的 isEnabled 门控保证）。
      */
     internal fun appendContextEvent(event: RecompositionEvent) {
-        if (!active) return
+        if (!active.value) return
         val json = buildContextEventJson(event) ?: return
-        pendingFrames.add(json)
+        synchronized(pendingLock) { pendingFrames.add(json) }
     }
 
     // ========== 内部方法 ==========
 
     private fun flushPendingFrames() {
-        if (pendingFrames.isEmpty()) return
+        val batch = synchronized(pendingLock) { drainPendingFramesLocked() } ?: return
+        scheduleFileWrite { fileModule.appendFile(FILE_FRAMES, batch) { } }
+    }
+
+    /**
+     * FileModule 必须从 Kuikly context 线程调用。帧完成回调由全局 snapshot
+     * observer 触发，可能落在主线程（例如新 ComposeView attach）；直接写文件会
+     * 触发 KuiklyRenderJvmContextHandler.callNative 的非主线程断言。
+     *
+     * KuiklyContextScheduler 不仅切换线程，还会恢复正确的 pager context；通用后台
+     * dispatcher 无法提供这个保证。调度器会按 pager 保持任务提交顺序，因此
+     * session header、frame append 与 report write 不会乱序。
+     */
+    private fun scheduleFileWrite(block: () -> Unit) {
+        KuiklyContextScheduler.runOnKuiklyThread(fileModule.pagerId) { cancelled ->
+            if (!cancelled) block()
+        }
+    }
+
+    /** 调用方必须持有 [pendingLock]；返回 null 表示缓冲为空无需写入。 */
+    private fun drainPendingFramesLocked(): String? {
+        if (pendingFrames.isEmpty()) return null
         val batch = pendingFrames.joinToString("\n")
         pendingFrames.clear()
-        fileModule.appendFile(FILE_FRAMES, batch) { }
+        return batch
     }
 
     private fun buildFrameJson(events: List<RecompositionEvent>): String {
