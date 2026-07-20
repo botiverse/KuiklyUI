@@ -5,10 +5,25 @@ import androidx.compose.runtime.NonRestartableComposable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
 import com.tencent.kuikly.compose.coil3.AsyncImagePainter.State
+import com.tencent.kuikly.compose.ui.KuiklyPainter
+import com.tencent.kuikly.compose.ui.graphics.ImageBitmap
 import com.tencent.kuikly.compose.ui.graphics.painter.Painter
 import com.tencent.kuikly.compose.ui.platform.LocalActivity
-import com.tencent.kuikly.compose.ui.KuiklyPainter
 import kotlinx.coroutines.flow.StateFlow
+
+/**
+ * Load [model] through the same shared image cache used by [rememberAsyncImagePainter] and expose
+ * the decoded bitmap to Canvas consumers. The returned bitmap can initially report a zero size;
+ * its observable cache status updates the composition when decoding completes.
+ */
+@Composable
+fun rememberAsyncImageBitmap(model: String?): ImageBitmap? {
+    val source = model?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val activity = LocalActivity.current
+    return remember(activity, source) {
+        activity.imageCacheManager.loadImage(source)
+    }
+}
 
 /**
  * Return an [AsyncImagePainter] that executes an [ImageRequest] asynchronously and renders the result.
