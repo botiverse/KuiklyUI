@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ComposeNode
 import androidx.compose.runtime.ComposeNodeLifecycleCallback
 import androidx.compose.runtime.CompositionContext
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ReusableComposeNode
 import androidx.compose.runtime.ReusableComposition
@@ -403,6 +404,15 @@ fun SubcomposeLayout(
         }
 
         scrollViewRef?.listenScrollEvent()
+    }
+
+    DisposableEffect(scrollViewRef, scrollableState) {
+        val boundScrollView = scrollViewRef
+        onDispose {
+            if (scrollableState.kuiklyInfo.scrollView === boundScrollView) {
+                scrollableState.kuiklyInfo.scrollView = null
+            }
+        }
     }
 
     ReusableComposeNode<KNode<*>, KuiklyApplier>(
