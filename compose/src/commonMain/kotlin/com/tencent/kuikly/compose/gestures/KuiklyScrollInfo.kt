@@ -31,6 +31,30 @@ import com.tencent.kuikly.core.views.ScrollerView
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+
+internal class ScrollViewBindingGate<T : Any> {
+    private val binding = MutableStateFlow<T?>(null)
+
+    var current: T? = null
+        private set
+
+    fun update(value: T?) {
+        current = value
+        binding.value = value
+    }
+
+    suspend fun <R> withCurrentBinding(block: (T) -> R): R {
+        while (true) {
+            val candidate = binding.filterNotNull().first()
+            if (current === candidate) {
+                return block(candidate)
+            }
+        }
+    }
+}
 
 internal class DeferredScrollOffsetAlignmentCoordinator<T>(
     private val pendingAlignment: () -> T?,
@@ -86,6 +110,9 @@ class KuiklyScrollInfo {
         private const val SCROLL_BOTTOM_THRESHOLD = 100
         private const val DEFAULT_DENSITY = 3f
     }
+
+    private val scrollViewBinding =
+        ScrollViewBindingGate<ScrollerView<ScrollerAttr, ScrollerEvent>>()
 
     /**
      * Scroll offset that needs to be ignored
@@ -147,10 +174,15 @@ class KuiklyScrollInfo {
     var scrollView: ScrollerView<ScrollerAttr, ScrollerEvent>? = null
         set(value) {
             field = value
+            scrollViewBinding.update(value)
             if (hasPullToRefresh && value != null) {
                 updatePullToRefreshOnScrollView(value, true)
             }
         }
+
+    internal suspend fun <R> withCurrentScrollViewBinding(
+        block: (ScrollerView<ScrollerAttr, ScrollerEvent>) -> R
+    ): R = scrollViewBinding.withCurrentBinding(block)
 
     /**
      * Scroll orientation
