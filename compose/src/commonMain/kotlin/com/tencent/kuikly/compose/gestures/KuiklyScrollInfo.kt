@@ -19,6 +19,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.tencent.kuikly.compose.coroutines.internal.KuiklyContextScheduler
+import com.tencent.kuikly.compose.foundation.drawer.MoveableDrawerDiagnosticClock
+import com.tencent.kuikly.compose.foundation.drawer.MoveableDrawerDiagnosticEvent
+import com.tencent.kuikly.compose.foundation.drawer.MoveableDrawerDiagnosticIds
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
 import com.tencent.kuikly.compose.ui.unit.IntOffset
@@ -36,17 +39,28 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 
 internal class ScrollViewBindingGate<T : Any> {
-    private val binding = MutableStateFlow<T?>(null)
+    internal data class Binding<T : Any>(val id: Long, val value: T)
 
-    var current: T? = null
+    private val binding = MutableStateFlow<Binding<T>?>(null)
+
+    var current: Binding<T>? = null
         private set
 
     fun update(value: T?) {
-        current = value
-        binding.value = value
+        val next = when {
+            value == null -> null
+            current?.value === value -> current
+            else -> Binding(MoveableDrawerDiagnosticIds.next(), value)
+        }
+        current = next
+        binding.value = next
     }
 
     suspend fun <R> withCurrentBinding(block: (T) -> R): R {
+        return withCurrentBindingSnapshot { block(it.value) }
+    }
+
+    suspend fun <R> withCurrentBindingSnapshot(block: (Binding<T>) -> R): R {
         while (true) {
             val candidate = binding.filterNotNull().first()
             if (current === candidate) {
@@ -114,6 +128,28 @@ class KuiklyScrollInfo {
     private val scrollViewBinding =
         ScrollViewBindingGate<ScrollerView<ScrollerAttr, ScrollerEvent>>()
 
+    internal val diagnosticOwnerId: Long = MoveableDrawerDiagnosticIds.next()
+    internal var diagnosticPagerOwnerId: Long = 0L
+    internal var diagnosticCommandGeneration: Long = 0L
+    internal var diagnosticObserver: ((MoveableDrawerDiagnosticEvent) -> Unit)? = null
+
+    internal val diagnosticBindingId: Long
+        get() = scrollViewBinding.current?.id ?: 0L
+
+    internal fun emitDrawerDiagnostic(stage: String, detail: String = "") {
+        diagnosticObserver?.invoke(
+            MoveableDrawerDiagnosticEvent(
+                monotonicNanos = MoveableDrawerDiagnosticClock.nowNanos(),
+                stage = stage,
+                commandGeneration = diagnosticCommandGeneration,
+                bindingId = diagnosticBindingId,
+                pagerOwnerId = diagnosticPagerOwnerId,
+                scrollInfoOwnerId = diagnosticOwnerId,
+                detail = detail
+            )
+        )
+    }
+
     /**
      * Scroll offset that needs to be ignored
      */
@@ -173,16 +209,21 @@ class KuiklyScrollInfo {
      */
     var scrollView: ScrollerView<ScrollerAttr, ScrollerEvent>? = null
         set(value) {
+            val oldBindingId = diagnosticBindingId
             field = value
             scrollViewBinding.update(value)
+            emitDrawerDiagnostic(
+                stage = if (value == null) "binding_clear" else "binding_update",
+                detail = "oldBindingId=$oldBindingId newBindingId=$diagnosticBindingId"
+            )
             if (hasPullToRefresh && value != null) {
                 updatePullToRefreshOnScrollView(value, true)
             }
         }
 
     internal suspend fun <R> withCurrentScrollViewBinding(
-        block: (ScrollerView<ScrollerAttr, ScrollerEvent>) -> R
-    ): R = scrollViewBinding.withCurrentBinding(block)
+        block: (ScrollerView<ScrollerAttr, ScrollerEvent>, Long) -> R
+    ): R = scrollViewBinding.withCurrentBindingSnapshot { block(it.value, it.id) }
 
     /**
      * Scroll orientation

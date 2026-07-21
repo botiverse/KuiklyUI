@@ -54,6 +54,15 @@ class MoveableDrawerState internal constructor(
     val fullScreen: Boolean = false,
     val drawerWidth: Dp = 300.dp
 ) {
+    val diagnosticStateId: Long = MoveableDrawerDiagnosticIds.next()
+
+    fun setDiagnosticObserver(observer: ((MoveableDrawerDiagnosticEvent) -> Unit)?) {
+        internalState.setDiagnosticObserver(observer)
+    }
+
+    val diagnosticBindingId: Long
+        get() = internalState.kuiklyInfo.diagnosticBindingId
+
     /** Whether the drawer is currently open (settled on the drawer page). */
     val isOpen: Boolean
         get() = internalState.currentPage == 0
@@ -72,13 +81,13 @@ class MoveableDrawerState internal constructor(
         }
 
     /** Open the drawer with animation. */
-    suspend fun open() {
-        internalState.animateScrollToPage(0)
+    suspend fun open(diagnosticGeneration: Long = 0L) {
+        internalState.animateScrollToPage(0, diagnosticGeneration = diagnosticGeneration)
     }
 
     /** Close the drawer with animation. */
-    suspend fun close() {
-        internalState.animateScrollToPage(1)
+    suspend fun close(diagnosticGeneration: Long = 0L) {
+        internalState.animateScrollToPage(1, diagnosticGeneration = diagnosticGeneration)
     }
 
     /** Toggle the drawer state with animation. */

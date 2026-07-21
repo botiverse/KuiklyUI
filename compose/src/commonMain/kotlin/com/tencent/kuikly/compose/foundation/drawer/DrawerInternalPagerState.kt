@@ -177,6 +177,24 @@ abstract class DrawerInternalPagerState internal constructor(
     private val animatedScrollScope = DrawerLazyAnimateScrollScope(this)
 
     internal val debugPagerStateId = identityHashCode(this)
+    internal val diagnosticOwnerId: Long = MoveableDrawerDiagnosticIds.next().also {
+        kuiklyInfo.diagnosticPagerOwnerId = it
+    }
+
+    internal fun setDiagnosticObserver(observer: ((MoveableDrawerDiagnosticEvent) -> Unit)?) {
+        kuiklyInfo.diagnosticObserver = observer
+        if (observer != null) {
+            kuiklyInfo.emitDrawerDiagnostic(
+                stage = "framework_observer_attached",
+                detail = "currentBindingId=${kuiklyInfo.diagnosticBindingId}"
+            )
+        }
+    }
+
+    internal fun emitDiagnostic(stage: String, generation: Long, detail: String = "") {
+        kuiklyInfo.diagnosticCommandGeneration = generation
+        kuiklyInfo.emitDrawerDiagnostic(stage, detail)
+    }
 
     internal val scrollPosition = DrawerScrollPosition(currentPage, currentPageOffsetFraction, this)
 
@@ -299,6 +317,10 @@ abstract class DrawerInternalPagerState internal constructor(
     }
 
     internal fun onNativeContentOffsetChanged(contentOffset: Int) {
+        kuiklyInfo.emitDrawerDiagnostic(
+            stage = "native_offset_observed",
+            detail = "contentOffset=$contentOffset currentPage=$currentPage isSnapAnimating=$isSnapAnimating"
+        )
         if (!isSnapAnimating || snapTargetReachedAlignmentRequested) return
         if (!hasSnapReachedTarget(contentOffset)) return
         snapTargetReachedAlignmentRequested = true
@@ -459,10 +481,20 @@ abstract class DrawerInternalPagerState internal constructor(
     suspend fun animateScrollToPage(
         page: Int,
         @FloatRange(from = -0.5, to = 0.5) pageOffsetFraction: Float = 0f,
-        animationSpec: AnimationSpec<Float> = spring()
+        animationSpec: AnimationSpec<Float> = spring(),
+        diagnosticGeneration: Long = 0L
     ) {
-        if (page == currentPage && currentPageOffsetFraction == pageOffsetFraction || pageCount == 0) return
+        emitDiagnostic(
+            stage = "animate_enter",
+            generation = diagnosticGeneration,
+            detail = "page=$page currentPage=$currentPage contentOffset=${kuiklyInfo.contentOffset}"
+        )
+        if (page == currentPage && currentPageOffsetFraction == pageOffsetFraction || pageCount == 0) {
+            emitDiagnostic("animate_already_settled", diagnosticGeneration)
+            return
+        }
         awaitScrollDependencies()
+        emitDiagnostic("await_layout_done", diagnosticGeneration)
         require(pageOffsetFraction in -0.5..0.5) {
             "pageOffsetFraction $pageOffsetFraction is not within the range -0.5 to 0.5"
         }
@@ -479,15 +511,32 @@ abstract class DrawerInternalPagerState internal constructor(
 
         val finalTargetOffset = targetOffset
 
-        kuiklyInfo.withCurrentScrollViewBinding { scrollView ->
+        kuiklyInfo.emitDrawerDiagnostic("binding_wait_start")
+        kuiklyInfo.withCurrentScrollViewBinding { scrollView, bindingId ->
+            emitDiagnostic(
+                stage = "binding_admitted",
+                generation = diagnosticGeneration,
+                detail = "admittedBindingId=$bindingId targetOffset=$finalTargetOffset"
+            )
             markSnapAnimationStarted(finalTargetOffset.toInt())
+            emitDiagnostic("snap_marked", diagnosticGeneration, "targetOffset=$finalTargetOffset")
             kuiklyInfo.run {
                 val targetOffsetDp = if (isVertical()) {
                     Offset(scrollView.curOffsetX, max(0f, targetOffset / getDensity() - 0.01f))
                 } else {
                     Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView.curOffsetY)
                 }
+                emitDiagnostic(
+                    "native_call_enter",
+                    diagnosticGeneration,
+                    "bindingId=$bindingId x=${targetOffsetDp.x} y=${targetOffsetDp.y} isDragging=$isDragging"
+                )
                 scrollView.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
+                emitDiagnostic(
+                    "native_call_return",
+                    diagnosticGeneration,
+                    "bindingId=$bindingId contentOffset=$contentOffset isDragging=$isDragging"
+                )
             }
         }
     }
