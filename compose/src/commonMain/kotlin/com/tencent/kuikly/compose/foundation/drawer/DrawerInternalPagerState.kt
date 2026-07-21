@@ -177,23 +177,28 @@ abstract class DrawerInternalPagerState internal constructor(
     private val animatedScrollScope = DrawerLazyAnimateScrollScope(this)
 
     internal val debugPagerStateId = identityHashCode(this)
-    internal val diagnosticOwnerId: Long = MoveableDrawerDiagnosticIds.next().also {
-        kuiklyInfo.diagnosticPagerOwnerId = it
+    internal val diagnosticOwnerId: Long = MoveableDrawerDiagnosticIds.next()
+
+    private fun diagnosticScrollInfo() = scrollableState.kuiklyInfo.also {
+        it.diagnosticPagerOwnerId = diagnosticOwnerId
     }
 
     internal fun setDiagnosticObserver(observer: ((MoveableDrawerDiagnosticEvent) -> Unit)?) {
-        kuiklyInfo.diagnosticObserver = observer
+        val info = diagnosticScrollInfo()
+        info.diagnosticObserver = observer
         if (observer != null) {
-            kuiklyInfo.emitDrawerDiagnostic(
+            info.emitDrawerDiagnostic(
                 stage = "framework_observer_attached",
-                detail = "currentBindingId=${kuiklyInfo.diagnosticBindingId}"
+                detail = "currentBindingId=${info.diagnosticBindingId}"
             )
         }
     }
 
     internal fun emitDiagnostic(stage: String, generation: Long, detail: String = "") {
-        kuiklyInfo.diagnosticCommandGeneration = generation
-        kuiklyInfo.emitDrawerDiagnostic(stage, detail)
+        diagnosticScrollInfo().run {
+            diagnosticCommandGeneration = generation
+            emitDrawerDiagnostic(stage, detail)
+        }
     }
 
     internal val scrollPosition = DrawerScrollPosition(currentPage, currentPageOffsetFraction, this)
