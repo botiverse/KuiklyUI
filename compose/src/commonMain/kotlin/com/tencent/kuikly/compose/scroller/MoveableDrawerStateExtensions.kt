@@ -26,6 +26,12 @@ import kotlin.math.abs
 import kotlin.math.min
 
 internal fun DrawerInternalPagerState.kuiklyWillDragEnd(params: WillEndDragParams, orientation: Orientation) {
+    kuiklyInfo.emitDrawerDiagnostic(
+        "will_drag_end_enter",
+        "offsetX=${params.offsetX} offsetY=${params.offsetY} " +
+            "targetContentOffsetX=${params.targetContentOffsetX} targetContentOffsetY=${params.targetContentOffsetY} " +
+            "velocityX=${params.velocityX} velocityY=${params.velocityY} isDragging=${kuiklyInfo.isDragging}"
+    )
     clearSnapAnimationState()
     val currentPageSize = pageSizeForPage(currentPage)
     val currentPageSizeWithSpacing = pageSizeWithSpacingForPage(currentPage)
@@ -50,6 +56,11 @@ internal fun DrawerInternalPagerState.kuiklyWillDragEnd(params: WillEndDragParam
             spaceBetweenPages
         ).coerceIn(0, lastPage)
     } else currentPage
+    kuiklyInfo.emitDrawerDiagnostic(
+        "will_drag_end_target_selected",
+        "currentPage=$currentPage snapBasePage=$snapBasePage pageDirection=$pageDirection " +
+            "targetPage=$targetPage correctedTargetPage=$correctedTargetPage velocity=$velocity"
+    )
 
     val kuiklyInfo = this.kuiklyInfo
     val pagerMeasureResult = layoutInfo as? PagerMeasureResult ?: return
@@ -80,10 +91,37 @@ internal fun DrawerInternalPagerState.kuiklyWillDragEnd(params: WillEndDragParam
             springVelocity
         )
         val targetOffsetDp = targetOffset / density
+        kuiklyInfo.emitDrawerDiagnostic(
+            "will_drag_end_native_target",
+            "chosenTargetOffset=$targetOffset targetOffsetDp=$targetOffsetDp correctedTargetPage=$correctedTargetPage " +
+                "isDragging=${kuiklyInfo.isDragging} isSnapAnimating=$isSnapAnimating"
+        )
         if (orientation == Orientation.Horizontal) {
-            kuiklyInfo.scrollView?.setContentOffset(targetOffsetDp, 0f, true, springAnimation)
+            kuiklyInfo.scrollView?.let { scrollView ->
+                kuiklyInfo.traceSetContentOffset(
+                    publisher = "native_will_drag_end_snap",
+                    callSite = "DrawerInternalPagerState.kuiklyWillDragEnd.horizontal",
+                    targetOffsetX = targetOffsetDp,
+                    targetOffsetY = 0f,
+                    animated = true,
+                    spring = true
+                ) {
+                    scrollView.setContentOffset(targetOffsetDp, 0f, true, springAnimation)
+                }
+            }
         } else {
-            kuiklyInfo.scrollView?.setContentOffset(0f, targetOffsetDp, true, springAnimation)
+            kuiklyInfo.scrollView?.let { scrollView ->
+                kuiklyInfo.traceSetContentOffset(
+                    publisher = "native_will_drag_end_snap",
+                    callSite = "DrawerInternalPagerState.kuiklyWillDragEnd.vertical",
+                    targetOffsetX = 0f,
+                    targetOffsetY = targetOffsetDp,
+                    animated = true,
+                    spring = true
+                ) {
+                    scrollView.setContentOffset(0f, targetOffsetDp, true, springAnimation)
+                }
+            }
         }
     }
 }

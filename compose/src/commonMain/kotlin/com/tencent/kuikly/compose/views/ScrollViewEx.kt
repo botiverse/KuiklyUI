@@ -86,9 +86,31 @@ internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.applyOffsetDelta(delta: I
     // 更新offset
     if (contentView?.getPager()?.pageData?.isAndroid == true) {
         // 安卓有个bug，刚好滚到最末尾的时候，是不成功的，临时处理下
-        setContentOffset(max(0f, newOffset.x / density - 0.01f), max(0f, newOffset.y / density - 0.01f))
+        val targetX = max(0f, newOffset.x / density - 0.01f)
+        val targetY = max(0f, newOffset.y / density - 0.01f)
+        kuiklyInfo.traceSetContentOffset(
+            publisher = "compose_offset_delta",
+            callSite = "ScrollerView.applyOffsetDelta.android",
+            targetOffsetX = targetX,
+            targetOffsetY = targetY,
+            animated = false,
+            spring = false
+        ) {
+            setContentOffset(targetX, targetY)
+        }
     } else {
-        setContentOffset(newOffset.x / density, newOffset.y / density)
+        val targetX = newOffset.x / density
+        val targetY = newOffset.y / density
+        kuiklyInfo.traceSetContentOffset(
+            publisher = "compose_offset_delta",
+            callSite = "ScrollerView.applyOffsetDelta.standard",
+            targetOffsetX = targetX,
+            targetOffsetY = targetY,
+            animated = false,
+            spring = false
+        ) {
+            setContentOffset(targetX, targetY)
+        }
     }
 
     // 恢复嵌套滚动设置

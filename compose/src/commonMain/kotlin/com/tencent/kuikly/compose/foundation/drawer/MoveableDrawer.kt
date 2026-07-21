@@ -63,6 +63,16 @@ class MoveableDrawerState internal constructor(
     val diagnosticBindingId: Long
         get() = internalState.kuiklyInfo.diagnosticBindingId
 
+    val diagnosticGestureEpoch: Long
+        get() = internalState.kuiklyInfo.diagnosticGestureEpoch
+
+    fun admitDiagnosticGesture(source: String): Long =
+        internalState.kuiklyInfo.admitDiagnosticGesture(source)
+
+    fun emitDiagnosticGestureTerminal(stage: String, detail: String = "") {
+        internalState.kuiklyInfo.emitDiagnosticGestureTerminal(stage, detail)
+    }
+
     /** Whether the drawer is currently open (settled on the drawer page). */
     val isOpen: Boolean
         get() = internalState.currentPage == 0

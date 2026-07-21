@@ -272,7 +272,17 @@ fun SubcomposeLayout(
                     // 实现分页滑动
                     val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
                     if (scrollableState is DrawerInternalPagerState) {
+                        kuiklyInfo.admitOrJoinNativeDiagnosticGesture()
+                        kuiklyInfo.emitDrawerDiagnostic(
+                            "will_drag_end_callback",
+                            "offsetX=${scaleParams.offsetX} offsetY=${scaleParams.offsetY} " +
+                                "targetContentOffsetX=${scaleParams.targetContentOffsetX} " +
+                                "targetContentOffsetY=${scaleParams.targetContentOffsetY} " +
+                                "velocityX=${scaleParams.velocityX} velocityY=${scaleParams.velocityY} " +
+                                "isDragging=${kuiklyInfo.scrollView?.isDragging ?: false}"
+                        )
                         if ((offset < 0 && scrollableState.isAtTop()) || offset > (kuiklyInfo.currentContentSize - viewportSize)) {
+                            kuiklyInfo.emitDrawerDiagnostic("will_drag_end_guarded", "offset=$offset")
                             return@willDragEndBySync
                         }
                         scrollableState.kuiklyWillDragEnd(scaleParams, orientation)
@@ -300,6 +310,13 @@ fun SubcomposeLayout(
                 kuiklyInfo.contentOffset = offset
                 (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
+                if (scrollableState is DrawerInternalPagerState) {
+                    kuiklyInfo.emitDiagnosticGestureTerminal(
+                        "native_scroll_end",
+                        "offset=$offset isDragging=${kuiklyInfo.scrollView?.isDragging ?: false} " +
+                            "isSnapAnimating=${scrollableState.isSnapAnimating}"
+                    )
+                }
 
                 // 仅触摸滑动结束会回调，api调用和bounce回弹都不会触发
                 // / back是回滑,forward是前滑
@@ -310,6 +327,14 @@ fun SubcomposeLayout(
                 val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
                 kuiklyInfo.contentOffset = offset
                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
+                if (scrollableState is DrawerInternalPagerState) {
+                    kuiklyInfo.ensureDiagnosticGesture("native_drag_end")
+                    kuiklyInfo.emitDiagnosticGestureTerminal(
+                        "native_drag_end",
+                        "offset=$offset isDragging=${kuiklyInfo.isDragging} " +
+                            "isSnapAnimating=${scrollableState.isSnapAnimating}"
+                    )
+                }
             }
             scroll {
                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())

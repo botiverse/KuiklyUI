@@ -324,7 +324,10 @@ abstract class DrawerInternalPagerState internal constructor(
     internal fun onNativeContentOffsetChanged(contentOffset: Int) {
         kuiklyInfo.emitDrawerDiagnostic(
             stage = "native_offset_observed",
-            detail = "contentOffset=$contentOffset currentPage=$currentPage isSnapAnimating=$isSnapAnimating"
+            detail = "contentOffset=$contentOffset currentPage=$currentPage isSnapAnimating=$isSnapAnimating " +
+                "activeOffsetWriteId=${kuiklyInfo.diagnosticOffsetWriteId} " +
+                "activeOffsetWritePublisher=${kuiklyInfo.diagnosticOffsetWritePublisher} " +
+                "activeOffsetWriteTarget=${kuiklyInfo.diagnosticOffsetWriteTarget}"
         )
         if (!isSnapAnimating || snapTargetReachedAlignmentRequested) return
         if (!hasSnapReachedTarget(contentOffset)) return
@@ -536,7 +539,16 @@ abstract class DrawerInternalPagerState internal constructor(
                     diagnosticGeneration,
                     "bindingId=$bindingId x=${targetOffsetDp.x} y=${targetOffsetDp.y} isDragging=$isDragging"
                 )
-                scrollView.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
+                traceSetContentOffset(
+                    publisher = "programmatic_drawer_command",
+                    callSite = "DrawerInternalPagerState.animateScrollToPage",
+                    targetOffsetX = targetOffsetDp.x,
+                    targetOffsetY = targetOffsetDp.y,
+                    animated = true,
+                    spring = false
+                ) {
+                    scrollView.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
+                }
                 emitDiagnostic(
                     "native_call_return",
                     diagnosticGeneration,

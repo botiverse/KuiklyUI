@@ -24,6 +24,50 @@ import kotlin.test.assertTrue
 
 class KuiklyScrollInfoTest {
     @Test
+    fun diagnosticGestureEpochIsAllocatedAtAdmissionAndRetainedThroughTerminal() {
+        val events = mutableListOf<String>()
+        val info = KuiklyScrollInfo().apply {
+            diagnosticObserver = { events += "${it.stage}:${it.detail}" }
+        }
+
+        val epoch = info.admitDiagnosticGesture("app_edge_pointer")
+        info.emitDiagnosticGestureTerminal("app_edge_drag_end")
+
+        assertTrue(epoch > 0L)
+        assertEquals(epoch, info.diagnosticGestureEpoch)
+        assertTrue(events.all { "gestureEpoch=$epoch" in it })
+        assertTrue(events.last().startsWith("app_edge_drag_end:"))
+    }
+
+    @Test
+    fun setContentOffsetTraceAttributesPublisherAndBracketsCall() {
+        val events = mutableListOf<String>()
+        val info = KuiklyScrollInfo().apply {
+            diagnosticCommandGeneration = 3L
+            diagnosticObserver = { events += "${it.stage}:${it.detail}" }
+        }
+
+        var called = false
+        info.traceSetContentOffset(
+            publisher = "native_will_drag_end_snap",
+            callSite = "test.callSite",
+            targetOffsetX = 540f,
+            targetOffsetY = 0f,
+            animated = true,
+            spring = true
+        ) { called = true }
+
+        assertTrue(called)
+        assertEquals(2, events.size)
+        assertTrue(events[0].startsWith("set_content_offset_enter:"))
+        assertTrue(events[1].startsWith("set_content_offset_return:"))
+        assertTrue(events.all { "publisher=native_will_drag_end_snap" in it })
+        assertTrue(events.all { "callSite=test.callSite" in it })
+        assertTrue(events.all { "targetOffsetX=540.0" in it })
+        assertTrue(events.all { "programmaticGeneration=3" in it })
+    }
+
+    @Test
     fun mismatchedProgrammaticCallbackClearsGuardAndProceeds() {
         val info = KuiklyScrollInfo().apply {
             ignoreScrollOffset = IntOffset(x = 0, y = 120)

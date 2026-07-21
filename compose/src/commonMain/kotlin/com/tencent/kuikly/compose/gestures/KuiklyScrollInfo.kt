@@ -132,6 +132,17 @@ class KuiklyScrollInfo {
     internal var diagnosticPagerOwnerId: Long = 0L
     internal var diagnosticCommandGeneration: Long = 0L
     internal var diagnosticObserver: ((MoveableDrawerDiagnosticEvent) -> Unit)? = null
+    internal var diagnosticGestureEpoch: Long = 0L
+        private set
+    internal var diagnosticGestureSource: String = "none"
+        private set
+    private var diagnosticGestureTerminalNanos: Long = 0L
+    internal var diagnosticOffsetWriteId: Long = 0L
+        private set
+    internal var diagnosticOffsetWritePublisher: String = "none"
+        private set
+    internal var diagnosticOffsetWriteTarget: String = "none"
+        private set
 
     internal val diagnosticBindingId: Long
         get() = scrollViewBinding.current?.id ?: 0L
@@ -145,9 +156,60 @@ class KuiklyScrollInfo {
                 bindingId = diagnosticBindingId,
                 pagerOwnerId = diagnosticPagerOwnerId,
                 scrollInfoOwnerId = diagnosticOwnerId,
-                detail = detail
+                detail = "gestureEpoch=$diagnosticGestureEpoch gestureSource=$diagnosticGestureSource $detail".trim()
             )
         )
+    }
+
+    internal fun admitDiagnosticGesture(source: String): Long {
+        diagnosticGestureEpoch = MoveableDrawerDiagnosticIds.next()
+        diagnosticGestureSource = source
+        diagnosticGestureTerminalNanos = 0L
+        emitDrawerDiagnostic("gesture_admitted", "source=$source")
+        return diagnosticGestureEpoch
+    }
+
+    internal fun ensureDiagnosticGesture(source: String): Long {
+        if (diagnosticGestureEpoch == 0L) admitDiagnosticGesture(source)
+        return diagnosticGestureEpoch
+    }
+
+    internal fun admitOrJoinNativeDiagnosticGesture(): Long {
+        val now = MoveableDrawerDiagnosticClock.nowNanos()
+        val joinsAppPointer =
+            diagnosticGestureSource == "app_edge_pointer" &&
+                (diagnosticGestureTerminalNanos == 0L ||
+                    now - diagnosticGestureTerminalNanos <= 2_000_000_000L)
+        return if (joinsAppPointer) diagnosticGestureEpoch else admitDiagnosticGesture("native_will_drag_end")
+    }
+
+    internal fun emitDiagnosticGestureTerminal(stage: String, detail: String = "") {
+        diagnosticGestureTerminalNanos = MoveableDrawerDiagnosticClock.nowNanos()
+        emitDrawerDiagnostic(stage, detail)
+    }
+
+    internal inline fun <T> traceSetContentOffset(
+        publisher: String,
+        callSite: String,
+        targetOffsetX: Float,
+        targetOffsetY: Float,
+        animated: Boolean,
+        spring: Boolean,
+        block: () -> T
+    ): T {
+        diagnosticOffsetWriteId = MoveableDrawerDiagnosticIds.next()
+        diagnosticOffsetWritePublisher = publisher
+        diagnosticOffsetWriteTarget = "$targetOffsetX,$targetOffsetY"
+        val fields =
+            "publisher=$publisher callSite=$callSite targetOffsetX=$targetOffsetX " +
+                "targetOffsetY=$targetOffsetY animated=$animated spring=$spring " +
+                "programmaticGeneration=$diagnosticCommandGeneration offsetWriteId=$diagnosticOffsetWriteId"
+        emitDrawerDiagnostic("set_content_offset_enter", fields)
+        return try {
+            block()
+        } finally {
+            emitDrawerDiagnostic("set_content_offset_return", fields)
+        }
     }
 
     /**
