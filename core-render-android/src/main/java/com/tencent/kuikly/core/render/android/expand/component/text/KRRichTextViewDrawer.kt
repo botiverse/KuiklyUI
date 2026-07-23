@@ -18,10 +18,14 @@ package com.tencent.kuikly.core.render.android.expand.component.text
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.os.Build
 import android.text.Layout
 import android.text.Spanned
+import android.text.TextPaint
+import android.text.style.CharacterStyle
 import android.text.style.ReplacementSpan
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
 import com.tencent.kuikly.core.render.android.expand.component.SelectionEdge
@@ -81,6 +85,18 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     private val inlineBoxSelectionPath = Path()
     private val inlineBoxLineClipPath = Path()
     private val inlineBoxSelectionBounds = RectF()
+    private val customUnderlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
+    private val customUnderlineClearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL_AND_STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+    }
+    private val customUnderlineSelectionPath = Path()
+    private val customUnderlineGlyphPath = Path()
+    private val customUnderlineGlyphBounds = RectF()
 
     private val wordIterator by lazy(LazyThreadSafetyMode.NONE) {
         WordIterator(textLayout.text, 0, textLayout.text.length, Locale.getDefault())
@@ -107,9 +123,153 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         drawInlineBoxChrome(canvas, drawFill = true, drawBorder = false)
         drawSlockInlineCodeChrome(canvas, drawFill = true, drawBorder = false)
         textLayout.draw(canvas)
+        drawCustomUnderlines(canvas)
         drawSlockInlineCodeChrome(canvas, drawFill = false, drawBorder = true)
         drawInlineBoxChrome(canvas, drawFill = false, drawBorder = true)
     }
+
+    private fun drawCustomUnderlines(canvas: Canvas) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRSkipInkCustomUnderlineSpan::class.java)
+        if (spans.isEmpty()) return
+
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+
+            val layer = canvas.saveLayer(
+                0f,
+                0f,
+                textLayout.width.toFloat(),
+                textLayout.height.toFloat(),
+                null,
+            )
+            val startLine = textLayout.getLineForOffset(start)
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val segmentStart = max(start, textLayout.getLineStart(line))
+                val segmentEnd = min(end, textLayout.getLineVisibleEnd(line))
+                if (segmentEnd <= segmentStart) continue
+
+                customUnderlineSelectionPath.reset()
+                textLayout.getSelectionPath(segmentStart, segmentEnd, customUnderlineSelectionPath)
+                if (customUnderlineSelectionPath.isEmpty) continue
+                val clipped = canvas.save()
+                val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+                val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+                canvas.clipRect(
+                    lineLeft,
+                    textLayout.getLineTop(line).toFloat(),
+                    lineRight,
+                    textLayout.getLineBottom(line).toFloat(),
+                )
+                canvas.clipPath(customUnderlineSelectionPath)
+                val resolvedPaint = resolveTextPaint(spanned, segmentStart, span)
+                customUnderlinePaint.color = span.color ?: resolvedPaint.color
+                customUnderlinePaint.strokeWidth =
+                    span.thickness ?: defaultUnderlineThickness(resolvedPaint)
+                val underlineY =
+                    textLayout.getLineBaseline(line).toFloat() +
+                        (span.offset ?: underlinePosition(resolvedPaint))
+                canvas.drawLine(
+                    0f,
+                    underlineY,
+                    textLayout.width.toFloat(),
+                    underlineY,
+                    customUnderlinePaint,
+                )
+                clearGlyphInkGaps(
+                    canvas = canvas,
+                    spanned = spanned,
+                    start = segmentStart,
+                    end = segmentEnd,
+                    line = line,
+                    underlineY = underlineY,
+                    thickness = customUnderlinePaint.strokeWidth,
+                    marker = span,
+                )
+                canvas.restoreToCount(clipped)
+            }
+            canvas.restoreToCount(layer)
+        }
+    }
+
+    private fun resolveTextPaint(
+        spanned: Spanned,
+        offset: Int,
+        marker: KRSkipInkCustomUnderlineSpan,
+    ): TextPaint = TextPaint(textLayout.paint).also { resolved ->
+        val queryEnd = (offset + 1).coerceAtMost(spanned.length)
+        spanned.getSpans(offset, queryEnd, CharacterStyle::class.java).forEach { style ->
+            if (style !== marker) style.updateDrawState(resolved)
+        }
+    }
+
+    private fun clearGlyphInkGaps(
+        canvas: Canvas,
+        spanned: Spanned,
+        start: Int,
+        end: Int,
+        line: Int,
+        underlineY: Float,
+        thickness: Float,
+        marker: KRSkipInkCustomUnderlineSpan,
+    ) {
+        var offset = start
+        val halfThickness = thickness / 2f
+        // Clear the actual glyph outline plus a restrained halo. A full glyph-bounds rectangle
+        // makes descenders erase the underline across their complete advance; no halo makes the
+        // skip nearly invisible at production scale. One underline thickness keeps the gap
+        // legible while remaining shaped by the glyph rather than by its bounding box.
+        customUnderlineClearPaint.strokeWidth = max(1f, thickness)
+        while (offset < end) {
+            val codePoint = Character.codePointAt(spanned, offset)
+            val next = (offset + Character.charCount(codePoint)).coerceAtMost(end)
+            val glyph = spanned.subSequence(offset, next).toString()
+            val resolvedPaint = resolveTextPaint(spanned, offset, marker)
+            val advance = resolvedPaint.measureText(glyph)
+            val caretX = textLayout.getPrimaryHorizontal(offset)
+            val glyphX = if (textLayout.isRtlCharAt(offset)) caretX - advance else caretX
+            customUnderlineGlyphPath.reset()
+            resolvedPaint.getTextPath(
+                glyph,
+                0,
+                glyph.length,
+                glyphX,
+                textLayout.getLineBaseline(line).toFloat(),
+                customUnderlineGlyphPath,
+            )
+            if (!customUnderlineGlyphPath.isEmpty) {
+                customUnderlineGlyphPath.computeBounds(customUnderlineGlyphBounds, true)
+                val bandTop = underlineY - halfThickness
+                val bandBottom = underlineY + halfThickness
+                if (
+                    customUnderlineGlyphBounds.bottom >= bandTop &&
+                    customUnderlineGlyphBounds.top <= bandBottom
+                ) {
+                    canvas.drawPath(customUnderlineGlyphPath, customUnderlineClearPaint)
+                }
+            }
+            offset = next
+        }
+    }
+
+    private fun defaultUnderlineThickness(paint: Paint): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            paint.underlineThickness.takeIf { it > 0f }
+                ?: (paint.textSize / 18f).coerceAtLeast(1f)
+        } else {
+            (paint.textSize / 18f).coerceAtLeast(1f)
+        }
+
+    private fun underlinePosition(paint: Paint): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            paint.underlinePosition.takeIf { it > 0f }
+                ?: (paint.textSize / 9f).coerceAtLeast(1f)
+        } else {
+            (paint.textSize / 9f).coerceAtLeast(1f)
+        }
 
     private fun drawInlineBoxChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
         val spanned = textLayout.text as? Spanned ?: return
