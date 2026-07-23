@@ -15,6 +15,7 @@
 
 package com.tencent.kuikly.core.render.android.expand.component.text
 
+import android.annotation.TargetApi
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -23,6 +24,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.TextPaint
@@ -221,7 +223,7 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 spanProps.textDecorationOffset != null
             ) {
                 textSpans.add(
-                    KRCustomUnderlineSpan(
+                    createKRCustomUnderlineSpan(
                         color = spanProps.textDecorationColor,
                         thickness = spanProps.textDecorationThickness,
                         offset = spanProps.textDecorationOffset
@@ -676,10 +678,70 @@ private class KRSlockInlineCodeTrailingMarginSpan : ReplacementSpan() {
     ) = Unit
 }
 
-private class KRCustomUnderlineSpan(
+/**
+ * Uses Android's native per-run underline paint whenever the caller only customizes color and/or
+ * thickness. A [CharacterStyle] remains breakable, so a long link can wrap at the same positions as
+ * ordinary text. The previous all-purpose [ReplacementSpan] made the complete decorated range one
+ * atomic layout run and could push a long URL outside its available width.
+ *
+ * Android does not expose a public underline-offset field on [TextPaint]. Keep the legacy drawing
+ * span only for callers that explicitly request an offset; color/thickness-only underlines take the
+ * wrap-safe native path.
+ */
+internal fun createKRCustomUnderlineSpan(
+    color: Int?,
+    thickness: Float?,
+    offset: Float?,
+): Any = if (offset == null) {
+    KRNativeCustomUnderlineSpan(color = color, thickness = thickness)
+} else {
+    KROffsetCustomUnderlineSpan(color = color, thickness = thickness, offset = offset)
+}
+
+internal class KRNativeCustomUnderlineSpan(
     private val color: Int?,
     private val thickness: Float?,
-    private val offset: Float?
+) : CharacterStyle(), UpdateAppearance {
+
+    override fun updateDrawState(textPaint: TextPaint) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            KRApi29UnderlinePaint.apply(
+                textPaint = textPaint,
+                color = color,
+                thickness = thickness,
+            )
+        } else {
+            // TextPaint's custom underline fields are not public API before
+            // Android 10. Keep one wrap-safe mechanism on API 21-28: the
+            // platform's ordinary underline. Custom color/thickness degrade
+            // explicitly instead of depending on greylisted fields.
+            textPaint.isUnderlineText = true
+        }
+    }
+}
+
+private object KRApi29UnderlinePaint {
+    @TargetApi(Build.VERSION_CODES.Q)
+    fun apply(
+        textPaint: TextPaint,
+        color: Int?,
+        thickness: Float?,
+    ) {
+        // TextLine draws underlineColor/underlineThickness independently from
+        // isUnderlineText. Custom decoration has one SSOT, so never enable the
+        // ordinary underline flag on this path.
+        textPaint.isUnderlineText = false
+        textPaint.underlineColor = color ?: textPaint.color
+        textPaint.underlineThickness =
+            thickness ?: textPaint.getUnderlineThickness().takeIf { it > 0f }
+            ?: (textPaint.textSize / 18f).coerceAtLeast(1f)
+    }
+}
+
+private class KROffsetCustomUnderlineSpan(
+    private val color: Int?,
+    private val thickness: Float?,
+    private val offset: Float,
 ) : ReplacementSpan() {
 
     override fun getSize(
@@ -718,7 +780,7 @@ private class KRCustomUnderlineSpan(
         paint.strokeWidth = thickness ?: max(1f, previousStrokeWidth)
         paint.style = Paint.Style.STROKE
         paint.isAntiAlias = true
-        val underlineY = y.toFloat() + (offset ?: max(1f, paint.strokeWidth))
+        val underlineY = y.toFloat() + offset
         canvas.drawLine(x, underlineY, x + lineWidth, underlineY, paint)
         paint.color = previousColor
         paint.strokeWidth = previousStrokeWidth
