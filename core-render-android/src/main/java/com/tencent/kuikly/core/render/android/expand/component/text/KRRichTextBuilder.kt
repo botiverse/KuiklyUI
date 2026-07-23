@@ -15,6 +15,7 @@
 
 package com.tencent.kuikly.core.render.android.expand.component.text
 
+import android.annotation.TargetApi
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -23,6 +24,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.TextPaint
@@ -702,13 +704,37 @@ internal class KRNativeCustomUnderlineSpan(
 ) : CharacterStyle(), UpdateAppearance {
 
     override fun updateDrawState(textPaint: TextPaint) {
-        textPaint.isUnderlineText = true
-        if (color != null || thickness != null) {
-            textPaint.underlineColor = color ?: textPaint.color
-            if (thickness != null) {
-                textPaint.underlineThickness = thickness
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            KRApi29UnderlinePaint.apply(
+                textPaint = textPaint,
+                color = color,
+                thickness = thickness,
+            )
+        } else {
+            // TextPaint's custom underline fields are not public API before
+            // Android 10. Keep one wrap-safe mechanism on API 21-28: the
+            // platform's ordinary underline. Custom color/thickness degrade
+            // explicitly instead of depending on greylisted fields.
+            textPaint.isUnderlineText = true
         }
+    }
+}
+
+private object KRApi29UnderlinePaint {
+    @TargetApi(Build.VERSION_CODES.Q)
+    fun apply(
+        textPaint: TextPaint,
+        color: Int?,
+        thickness: Float?,
+    ) {
+        // TextLine draws underlineColor/underlineThickness independently from
+        // isUnderlineText. Custom decoration has one SSOT, so never enable the
+        // ordinary underline flag on this path.
+        textPaint.isUnderlineText = false
+        textPaint.underlineColor = color ?: textPaint.color
+        textPaint.underlineThickness =
+            thickness ?: textPaint.getUnderlineThickness().takeIf { it > 0f }
+            ?: (textPaint.textSize / 18f).coerceAtLeast(1f)
     }
 }
 
