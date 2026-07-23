@@ -221,7 +221,7 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 spanProps.textDecorationOffset != null
             ) {
                 textSpans.add(
-                    KRCustomUnderlineSpan(
+                    createKRCustomUnderlineSpan(
                         color = spanProps.textDecorationColor,
                         thickness = spanProps.textDecorationThickness,
                         offset = spanProps.textDecorationOffset
@@ -676,10 +676,46 @@ private class KRSlockInlineCodeTrailingMarginSpan : ReplacementSpan() {
     ) = Unit
 }
 
-private class KRCustomUnderlineSpan(
+/**
+ * Uses Android's native per-run underline paint whenever the caller only customizes color and/or
+ * thickness. A [CharacterStyle] remains breakable, so a long link can wrap at the same positions as
+ * ordinary text. The previous all-purpose [ReplacementSpan] made the complete decorated range one
+ * atomic layout run and could push a long URL outside its available width.
+ *
+ * Android does not expose a public underline-offset field on [TextPaint]. Keep the legacy drawing
+ * span only for callers that explicitly request an offset; color/thickness-only underlines take the
+ * wrap-safe native path.
+ */
+internal fun createKRCustomUnderlineSpan(
+    color: Int?,
+    thickness: Float?,
+    offset: Float?,
+): Any = if (offset == null) {
+    KRNativeCustomUnderlineSpan(color = color, thickness = thickness)
+} else {
+    KROffsetCustomUnderlineSpan(color = color, thickness = thickness, offset = offset)
+}
+
+internal class KRNativeCustomUnderlineSpan(
     private val color: Int?,
     private val thickness: Float?,
-    private val offset: Float?
+) : CharacterStyle(), UpdateAppearance {
+
+    override fun updateDrawState(textPaint: TextPaint) {
+        textPaint.isUnderlineText = true
+        if (color != null || thickness != null) {
+            textPaint.underlineColor = color ?: textPaint.color
+            if (thickness != null) {
+                textPaint.underlineThickness = thickness
+            }
+        }
+    }
+}
+
+private class KROffsetCustomUnderlineSpan(
+    private val color: Int?,
+    private val thickness: Float?,
+    private val offset: Float,
 ) : ReplacementSpan() {
 
     override fun getSize(
@@ -718,7 +754,7 @@ private class KRCustomUnderlineSpan(
         paint.strokeWidth = thickness ?: max(1f, previousStrokeWidth)
         paint.style = Paint.Style.STROKE
         paint.isAntiAlias = true
-        val underlineY = y.toFloat() + (offset ?: max(1f, paint.strokeWidth))
+        val underlineY = y.toFloat() + offset
         canvas.drawLine(x, underlineY, x + lineWidth, underlineY, paint)
         paint.color = previousColor
         paint.strokeWidth = previousStrokeWidth
