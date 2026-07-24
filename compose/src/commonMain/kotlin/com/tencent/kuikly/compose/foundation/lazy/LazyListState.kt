@@ -58,6 +58,10 @@ import com.tencent.kuikly.compose.ui.util.fastFirstOrNull
 import com.tencent.kuikly.compose.ui.util.fastRoundToInt
 import com.tencent.kuikly.compose.ui.util.fastSumBy
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
+import com.tencent.kuikly.compose.scroller.InitialLazyListNativeViewportAction
+import com.tencent.kuikly.compose.scroller.initialLazyListNativeViewportAction
+import com.tencent.kuikly.compose.scroller.isComposeAtTopForScrollSync
+import com.tencent.kuikly.compose.scroller.tryExpandStartSize
 import com.tencent.kuikly.compose.scroller.tryExpandStartSizeNoScroll
 import com.tencent.kuikly.compose.profiler.RecompositionProfiler
 import com.tencent.kuikly.compose.material3.internal.identityHashCode
@@ -381,6 +385,41 @@ class LazyListState
             get() = scrollableState.lastScrolledBackward
 
         internal val placementScopeInvalidator = ObservableScopeInvalidator()
+
+        private var initialNativeViewportPending = true
+
+        /**
+         * Establishes the native offset during the first non-empty placement, before any child
+         * frame is published. Platform renderers can therefore apply a queued contentOffset from
+         * their first layout instead of exposing offset zero and converging 150 ms later.
+         */
+        internal fun prepareInitialNativeViewportBeforePlacement() {
+            when (
+                initialLazyListNativeViewportAction(
+                    pending = initialNativeViewportPending,
+                    hasItems = layoutInfo.totalItemsCount > 0,
+                    isComposeAtTop = isComposeAtTopForScrollSync(),
+                    contentOffset = kuiklyInfo.contentOffset,
+                    composeOffset = kuiklyInfo.composeOffset.toInt(),
+                    isDragging = kuiklyInfo.scrollView?.isDragging == true,
+                    hasScrollView = kuiklyInfo.scrollView != null,
+                )
+            ) {
+                InitialLazyListNativeViewportAction.Wait -> return
+                InitialLazyListNativeViewportAction.Complete -> {
+                    initialNativeViewportPending = false
+                    return
+                }
+                InitialLazyListNativeViewportAction.Prepare -> Unit
+            }
+
+            kuiklyInfo.deferredScrollOffsetAlignmentCoordinator.cancelAndInvalidate { it.cancel() }
+            kuiklyInfo.offsetDirty = true
+            tryExpandStartSize(offset = 0, isScrolling = false)
+            if (kuiklyInfo.composeOffset > 0f) {
+                initialNativeViewportPending = false
+            }
+        }
 
         // TODO: Coroutine scrolling APIs will allow this to be private again once we have more
         //  fine-grained control over scrolling
