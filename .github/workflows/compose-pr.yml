@@ -237,6 +237,8 @@ jobs:
         run: python3 tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
       - name: Reject non-finite iOS scroll event values
         run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
+      - name: Preserve profiler observer composition and thread ownership
+        run: python3 tools/check-profiler-observer-state-partition.py --self-test
 
   exact-matrix:
     if: always()
