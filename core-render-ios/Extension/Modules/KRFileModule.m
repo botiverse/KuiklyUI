@@ -7,6 +7,27 @@
 #import "KRFileModule.h"
 #import "NSObject+KR.h"
 
+static dispatch_queue_t KRProfilerFileQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.tencent.kuikly.profiler.file", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+// Accessed only from KRProfilerFileQueue(). A successful operation is recorded before its
+// callback, so a retry through another Pager can safely acknowledge a lost callback without
+// applying the same append or overwrite twice.
+static NSMutableSet<NSString *> *KRCompletedProfilerOperationIds(void) {
+    static NSMutableSet<NSString *> *operationIds;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        operationIds = [[NSMutableSet alloc] init];
+    });
+    return operationIds;
+}
+
 @implementation KRFileModule
 
 /**
@@ -41,6 +62,7 @@
 
     NSString *filename = params[@"filename"];
     NSString *content = params[@"content"];
+    NSString *operationId = params[@"operationId"];
 
     if (!filename || !content) {
         if (callback) callback(@{@"error": @"missing filename or content"});
@@ -50,7 +72,12 @@
     NSString *profilerDir = [self profilerDir];
     NSString *filePath = [profilerDir stringByAppendingPathComponent:filename];
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    dispatch_async(KRProfilerFileQueue(), ^{
+        NSMutableSet<NSString *> *completedOperationIds = KRCompletedProfilerOperationIds();
+        if (operationId.length > 0 && [completedOperationIds containsObject:operationId]) {
+            if (callback) callback(@{@"path": filePath});
+            return;
+        }
         NSError *error = nil;
         // 追加写：每行内容末尾加换行，适合 JSONL 格式
         NSString *line = [content stringByAppendingString:@"\n"];
@@ -62,12 +89,18 @@
                 [handle seekToEndOfFile];
                 [handle writeData:data];
                 [handle closeFile];
+                if (operationId.length > 0) {
+                    [completedOperationIds addObject:operationId];
+                }
                 if (callback) callback(@{@"path": filePath});
             } else {
                 if (callback) callback(@{@"error": @"failed to open file for appending"});
             }
         } else {
             BOOL success = [data writeToFile:filePath options:NSDataWritingAtomic error:&error];
+            if (success && operationId.length > 0) {
+                [completedOperationIds addObject:operationId];
+            }
             if (callback) {
                 if (success) {
                     callback(@{@"path": filePath});
@@ -85,6 +118,7 @@
 
     NSString *filename = params[@"filename"];
     NSString *content = params[@"content"];
+    NSString *operationId = params[@"operationId"];
 
     if (!filename || !content) {
         if (callback) callback(@{@"error": @"missing filename or content"});
@@ -94,12 +128,20 @@
     NSString *profilerDir = [self profilerDir];
     NSString *filePath = [profilerDir stringByAppendingPathComponent:filename];
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    dispatch_async(KRProfilerFileQueue(), ^{
+        NSMutableSet<NSString *> *completedOperationIds = KRCompletedProfilerOperationIds();
+        if (operationId.length > 0 && [completedOperationIds containsObject:operationId]) {
+            if (callback) callback(@{@"path": filePath});
+            return;
+        }
         NSError *error = nil;
         BOOL success = [content writeToFile:filePath
                                  atomically:YES
                                    encoding:NSUTF8StringEncoding
                                       error:&error];
+        if (success && operationId.length > 0) {
+            [completedOperationIds addObject:operationId];
+        }
         if (callback) {
             if (success) {
                 callback(@{@"path": filePath});

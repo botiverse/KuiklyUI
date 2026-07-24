@@ -97,6 +97,82 @@ class ProfilerFileOutputLifecycleTest {
     }
 
     @Test
+    fun moduleChangeRecoversAnInFlightFrameWriteWhoseCallbackNeverReturns() {
+        val moduleA = fileModule("pager-a")
+        val moduleB = fileModule("pager-b")
+        var currentModule: FileModule? = moduleA
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ currentModule }, dispatcher)
+        val completions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-a", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        assertFalse(
+            dispatcher.dispatches[0].operation.operationId ==
+                dispatcher.dispatches[1].operation.operationId
+        )
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+
+        strategy.onFrameComplete(frame(frameId = 1L, startTimestampMs = 150L))
+        strategy.writeReport(report("session-a", 100L), completions::add)
+
+        assertEquals(3, dispatcher.dispatches.size)
+        val abandonedAppend = dispatcher.dispatches[2]
+        assertDispatch(
+            abandonedAppend,
+            moduleA,
+            ProfilerFileOperationKind.APPEND,
+            "profiler_frames.jsonl"
+        )
+        assertTrue(completions.isEmpty())
+
+        // The old Pager disappears after native accepted the append but before its callback can
+        // cross the destroyed bridge. Merely clearing blockedFileModule must not leave the global
+        // queue permanently pinned behind that callback.
+        currentModule = moduleB
+        strategy.onFileModuleChanged()
+
+        assertEquals(4, dispatcher.dispatches.size)
+        val repairedFrames = dispatcher.dispatches[3]
+        assertDispatch(
+            repairedFrames,
+            moduleB,
+            ProfilerFileOperationKind.APPEND,
+            "profiler_frames.jsonl"
+        )
+        assertSame(abandonedAppend.operation, repairedFrames.operation)
+        assertEquals(abandonedAppend.operation.operationId, repairedFrames.operation.operationId)
+        assertTrue(repairedFrames.operation.content.contains("\"frameId\":1"))
+        assertTrue(completions.isEmpty())
+
+        // The old callback can race the retried dispatch. Module identity is part of the in-flight
+        // token, so A must not complete the same operation object currently owned by B.
+        dispatcher.complete(2, ProfilerFileIoResult.Success)
+        assertEquals(4, dispatcher.dispatches.size)
+        assertTrue(completions.isEmpty())
+
+        dispatcher.complete(3, ProfilerFileIoResult.Success)
+        assertEquals(5, dispatcher.dispatches.size)
+        assertDispatch(
+            dispatcher.dispatches[4],
+            moduleB,
+            ProfilerFileOperationKind.WRITE,
+            "profiler_report.json"
+        )
+        dispatcher.complete(4, ProfilerFileIoResult.Success)
+
+        assertEquals(
+            listOf<RecompositionProfilerFileOutputResult>(
+                RecompositionProfilerFileOutputResult.Success("session-a")
+            ),
+            completions
+        )
+        assertEquals(5, dispatcher.dispatches.size)
+        assertEquals(1, completions.size)
+        assertEquals(4, dispatcher.dispatches.map { it.operation.operationId }.toSet().size)
+    }
+
+    @Test
     fun queuedWritesWaitForAFileModuleInsteadOfBeingDropped() {
         var currentModule: FileModule? = null
         val dispatcher = RecordingDispatcher()

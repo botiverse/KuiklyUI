@@ -31,11 +31,18 @@ import com.tencent.kuikly.compose.ui.synchronized
 import com.tencent.kuikly.core.datetime.DateTime
 import com.tencent.kuikly.core.module.FileModule
 import kotlin.concurrent.Volatile
+import kotlinx.atomicfu.atomic
 
 internal enum class ProfilerFileOperationKind {
     WRITE,
     APPEND
 }
+
+private val profilerFileOperationProcessEpoch = DateTime.currentTimestamp()
+private val profilerFileOperationSequence = atomic(0L)
+
+private fun nextProfilerFileOperationId(): String =
+    "profiler-$profilerFileOperationProcessEpoch-${profilerFileOperationSequence.getAndIncrement()}"
 
 internal class ProfilerFileOperation(
     val kind: ProfilerFileOperationKind,
@@ -43,6 +50,7 @@ internal class ProfilerFileOperation(
     val content: String,
     val generation: Long,
     val sessionId: String,
+    val operationId: String = nextProfilerFileOperationId(),
     val completion: ((RecompositionProfilerFileOutputResult) -> Unit)? = null
 ) {
     /** Same-module retries are deliberately bounded so a synchronous native failure cannot spin. */
@@ -88,9 +96,19 @@ private object NativeProfilerFileIoDispatcher : ProfilerFileIoDispatcher {
             try {
                 when (operation.kind) {
                     ProfilerFileOperationKind.WRITE ->
-                        module.writeFile(operation.filename, operation.content, callback)
+                        module.writeFile(
+                            operation.filename,
+                            operation.content,
+                            operation.operationId,
+                            callback
+                        )
                     ProfilerFileOperationKind.APPEND ->
-                        module.appendFile(operation.filename, operation.content, callback)
+                        module.appendFile(
+                            operation.filename,
+                            operation.content,
+                            operation.operationId,
+                            callback
+                        )
                 }
             } catch (throwable: Throwable) {
                 completion(
@@ -171,6 +189,7 @@ internal class FileOutputStrategy(
     private val fileOperationsLock = createSynchronizedObject()
     private val pendingFileOperations = mutableListOf<ProfilerFileOperation>()
     private var inFlightFileOperation: ProfilerFileOperation? = null
+    private var inFlightFileModule: FileModule? = null
     private var blockedFileModule: FileModule? = null
     private var fileSessionGeneration: Long = 0L
     private val generationArtifactFailures = mutableMapOf<Long, String>()
@@ -307,8 +326,20 @@ internal class FileOutputStrategy(
 
     /** 当 live Pager/FileModule 集合变化时，重试因旧 Pager 销毁而保留的队头操作。 */
     internal fun onFileModuleChanged() {
+        val currentModule = fileModuleProvider()
         synchronized(fileOperationsLock) {
             blockedFileModule = null
+            val operation = inFlightFileOperation
+            if (operation != null && inFlightFileModule !== currentModule) {
+                // Native may already have committed this operation even though the destroyed
+                // Pager can no longer deliver its callback. Reuse the operation and its stable
+                // idempotency key on the new Pager; the process-wide native queue safely dedupes
+                // a commit whose acknowledgement was lost.
+                inFlightFileOperation = null
+                inFlightFileModule = null
+                operation.sameModuleRetryCount = 0
+                pendingFileOperations.add(0, operation)
+            }
         }
         dispatchNextFileOperation()
     }
@@ -457,6 +488,7 @@ internal class FileOutputStrategy(
             if (module === blockedFileModule) return@synchronized
             val operation = pendingFileOperations.removeAt(0)
             inFlightFileOperation = operation
+            inFlightFileModule = module
             dispatch = module to operation
         }
         val (module, operation) = dispatch ?: return
@@ -486,8 +518,11 @@ internal class FileOutputStrategy(
         var failureToLog: String? = null
         var dispatchNext = false
         synchronized(fileOperationsLock) {
-            if (inFlightFileOperation !== operation) return@synchronized
+            if (inFlightFileOperation !== operation || inFlightFileModule !== module) {
+                return@synchronized
+            }
             inFlightFileOperation = null
+            inFlightFileModule = null
             if (operation.generation != fileSessionGeneration) {
                 blockedFileModule = null
                 takeCompletionLocked(

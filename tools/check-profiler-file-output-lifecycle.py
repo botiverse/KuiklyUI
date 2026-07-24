@@ -31,9 +31,15 @@ PATHS = {
         "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/"
         "RecompositionOutputStrategy.kt"
     ),
+    "file_module": ROOT / "core/src/commonMain/kotlin/com/tencent/kuikly/core/module/FileModule.kt",
     "android": ROOT / (
         "core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/module/"
         "KRFileModule.kt"
+    ),
+    "ios": ROOT / "core-render-ios/Extension/Modules/KRFileModule.m",
+    "android_tests": ROOT / (
+        "core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/module/"
+        "KRFileModuleTest.kt"
     ),
     "ohos": ROOT / (
         "core-render-ohos/src/main/cpp/libohos_render/expand/modules/file/"
@@ -117,6 +123,12 @@ def assert_contract(sources: dict[str, str]) -> None:
             "private val fileModuleProvider: () -> FileModule?",
             "private val pendingFileOperations = mutableListOf<ProfilerFileOperation>()",
             "private var inFlightFileOperation: ProfilerFileOperation? = null",
+            "private var inFlightFileModule: FileModule? = null",
+            "val operationId: String = nextProfilerFileOperationId()",
+            "module.writeFile(\n                            operation.filename,\n                            operation.content,\n                            operation.operationId,",
+            "module.appendFile(\n                            operation.filename,\n                            operation.content,\n                            operation.operationId,",
+            "if (operation != null && inFlightFileModule !== currentModule)",
+            "if (inFlightFileOperation !== operation || inFlightFileModule !== module)",
             "ProfilerFileIoResult.RetryableFailure(\"pager bridge unavailable\")",
             "pendingFileOperations.add(0, operation)",
             "operation.sameModuleRetryCount < MAX_SAME_MODULE_RETRIES",
@@ -136,6 +148,21 @@ def assert_contract(sources: dict[str, str]) -> None:
         raise AssertionError("FileOutputStrategy may not retain one fixed Pager FileModule")
     if "if (!cancel) block()" in strategy or "if(!cancel)block()" in compact(strategy):
         raise AssertionError("Pager cancellation must retry; it may not silently drop file I/O")
+    if strategy.count("nextProfilerFileOperationId()") != 2:
+        raise AssertionError("operation id must be created once per operation, never per dispatch/retry")
+
+    file_module = sources["file_module"]
+    require_tokens(
+        "FileModule",
+        file_module,
+        (
+            'private const val PARAM_OPERATION_ID = "operationId"',
+            "writeFileInternal(filename, content, operationId, callback)",
+            "appendFileInternal(filename, content, operationId, callback)",
+        ),
+    )
+    if file_module.count("put(PARAM_OPERATION_ID, operationId)") != 2:
+        raise AssertionError("FileModule must serialize operationId for both write and append")
 
     require_tokens(
         "RecompositionProfilerFileOutputResult",
@@ -174,6 +201,60 @@ def assert_contract(sources: dict[str, str]) -> None:
     android_append = between(sources["android"], "private fun appendFile(", "private fun writeFile(")
     if "content.isNullOrEmpty()" not in android_append:
         raise AssertionError("Android append must continue rejecting empty batches")
+    require_tokens(
+        "Android profiler file queue",
+        sources["android"],
+        (
+            "Executors.newSingleThreadExecutor",
+            'private const val PARAM_OPERATION_ID = "operationId"',
+            "private val COMPLETED_OPERATION_IDS = HashSet<String>()",
+        ),
+    )
+    for label, region in (("write", android_write), ("append", android_append)):
+        require_tokens(
+            f"Android {label} idempotent FIFO",
+            region,
+            (
+                "FILE_EXECUTOR.execute",
+                "COMPLETED_OPERATION_IDS.contains(operationId)",
+                "COMPLETED_OPERATION_IDS.add(operationId)",
+            ),
+        )
+        if "Thread {" in region:
+            raise AssertionError(f"Android {label} may not start a raw per-call thread")
+    require_tokens(
+        "Android native file queue tests",
+        sources["android_tests"],
+        (
+            "duplicateOperationIdAcrossPagerModulesAppendsOnlyOnce",
+            "moduleA.call(\"appendFile\", params, callback)",
+            "moduleB.call(\"appendFile\", params, callback)",
+            'assertEquals("frame\\n", file.readText(Charsets.UTF_8))',
+        ),
+    )
+
+    ios_append = between(sources["ios"], "- (void)appendFile:", "- (void)writeFile:")
+    ios_write = between(sources["ios"], "- (void)writeFile:", "@end")
+    require_tokens(
+        "iOS profiler file queue",
+        sources["ios"],
+        (
+            'dispatch_queue_create("com.tencent.kuikly.profiler.file", DISPATCH_QUEUE_SERIAL)',
+            "KRCompletedProfilerOperationIds",
+        ),
+    )
+    for label, region in (("write", ios_write), ("append", ios_append)):
+        require_tokens(
+            f"iOS {label} idempotent FIFO",
+            region,
+            (
+                "dispatch_async(KRProfilerFileQueue()",
+                "[completedOperationIds containsObject:operationId]",
+                "[completedOperationIds addObject:operationId]",
+            ),
+        )
+        if "dispatch_get_global_queue" in region:
+            raise AssertionError(f"iOS {label} may not use a concurrent global queue")
 
     ohos_write = between(sources["ohos"], "void KRFileModule::WriteFile", "void KRFileModule::AppendFile")
     if "content.empty()" in ohos_write:
@@ -183,6 +264,28 @@ def assert_contract(sources: dict[str, str]) -> None:
     ohos_append = between(sources["ohos"], "void KRFileModule::AppendFile", "void KRFileModule::GetFilesDir")
     if "content.empty()" not in ohos_append:
         raise AssertionError("OHOS append must continue rejecting empty batches")
+    require_tokens(
+        "OHOS profiler file queue",
+        sources["ohos"],
+        (
+            "class ProfilerFileWorker",
+            "std::condition_variable condition_",
+            "std::deque<Task> tasks_",
+            "std::unordered_set<std::string> completedOperationIds_",
+        ),
+    )
+    for label, region in (("write", ohos_write), ("append", ohos_append)):
+        require_tokens(
+            f"OHOS {label} idempotent FIFO",
+            region,
+            (
+                "ProfilerFileWorker::Instance().Enqueue",
+                "completedOperationIds.count(operationId)",
+                "completedOperationIds.insert(operationId)",
+            ),
+        )
+    if ".detach()" in sources["ohos"]:
+        raise AssertionError("OHOS file operations may not use detached per-call threads")
 
     require_tokens(
         "profiler lifecycle tests",
@@ -190,6 +293,7 @@ def assert_contract(sources: dict[str, str]) -> None:
         (
             "liveModuleRegistryFallsBackWhenThePreferredPagerIsDestroyed",
             "stalePagerCancellationRetriesTheSameWriteOnTheLiveFallback",
+            "moduleChangeRecoversAnInFlightFrameWriteWhoseCallbackNeverReturns",
             "queuedWritesWaitForAFileModuleInsteadOfBeingDropped",
             "resetRewritesTheSessionHeaderAndRejectsFramesFromTheOldGeneration",
             "reportWritesRemainSerializedAcrossStopAndPostStopExport",
@@ -275,6 +379,60 @@ def main() -> int:
             "strategy",
             "operation.filename == FILE_FRAMES",
             "operation.filename == FILE_REPORT // mutation: report failure poisons retry",
+        )
+        expect_failure(
+            sources,
+            "strategy",
+            "                            operation.operationId,",
+            "                            nextProfilerFileOperationId(), // mutation: new id on retry",
+        )
+        expect_failure(
+            sources,
+            "strategy",
+            "if (inFlightFileOperation !== operation || inFlightFileModule !== module)",
+            "if (inFlightFileOperation !== operation) // mutation: old Pager callback may win",
+        )
+        expect_failure(
+            sources,
+            "file_module",
+            "put(PARAM_OPERATION_ID, operationId)",
+            "put(\"mutationOperationId\", operationId)",
+        )
+        expect_failure(
+            sources,
+            "android",
+            "COMPLETED_OPERATION_IDS.contains(operationId)",
+            "false // mutation: duplicate native commit",
+        )
+        expect_failure(
+            sources,
+            "android",
+            "FILE_EXECUTOR.execute {",
+            "Thread { // mutation: concurrent per-call writer",
+        )
+        expect_failure(
+            sources,
+            "ios",
+            "[completedOperationIds containsObject:operationId]",
+            "NO // mutation: duplicate native commit",
+        )
+        expect_failure(
+            sources,
+            "ios",
+            "dispatch_async(KRProfilerFileQueue(), ^{",
+            "dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{",
+        )
+        expect_failure(
+            sources,
+            "ohos",
+            "completedOperationIds.count(operationId) > 0",
+            "false // mutation: duplicate native commit",
+        )
+        expect_failure(
+            sources,
+            "ohos",
+            "ProfilerFileWorker::Instance().Enqueue(",
+            "std::thread( // mutation: concurrent per-call writer",
         )
         expect_failure(
             sources,
