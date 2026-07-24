@@ -30,6 +30,106 @@ import kotlin.test.assertTrue
 class ContentSizeExtensionsTest {
 
     @Test
+    fun initialNonTopViewportCommitsBeforeFirstPlacement() {
+        assertEquals(
+            InitialLazyListNativeViewportAction.Prepare,
+            initialLazyListNativeViewportAction(
+                pending = true,
+                hasItems = true,
+                isComposeAtTop = false,
+                contentOffset = 0,
+                composeOffset = 0,
+                isDragging = false,
+                hasScrollView = true,
+            )
+        )
+    }
+
+    @Test
+    fun initialViewportWaitsForItemsAndNativeBinding() {
+        assertEquals(
+            InitialLazyListNativeViewportAction.Wait,
+            initialLazyListNativeViewportAction(
+                pending = true,
+                hasItems = false,
+                isComposeAtTop = false,
+                contentOffset = 0,
+                composeOffset = 0,
+                isDragging = false,
+                hasScrollView = true,
+            )
+        )
+        assertEquals(
+            InitialLazyListNativeViewportAction.Wait,
+            initialLazyListNativeViewportAction(
+                pending = true,
+                hasItems = true,
+                isComposeAtTop = false,
+                contentOffset = 0,
+                composeOffset = 0,
+                isDragging = false,
+                hasScrollView = false,
+            )
+        )
+    }
+
+    @Test
+    fun initialTopOrRestoredViewportNeedsNoNewNativeCommit() {
+        assertEquals(
+            InitialLazyListNativeViewportAction.Complete,
+            initialLazyListNativeViewportAction(
+                pending = true,
+                hasItems = true,
+                isComposeAtTop = true,
+                contentOffset = 0,
+                composeOffset = 0,
+                isDragging = false,
+                hasScrollView = true,
+            )
+        )
+        assertEquals(
+            InitialLazyListNativeViewportAction.Complete,
+            initialLazyListNativeViewportAction(
+                pending = true,
+                hasItems = true,
+                isComposeAtTop = false,
+                contentOffset = 900,
+                composeOffset = 900,
+                isDragging = false,
+                hasScrollView = true,
+            )
+        )
+    }
+
+    @Test
+    fun initialViewportNeverOverridesDragOrRepeats() {
+        assertEquals(
+            InitialLazyListNativeViewportAction.Complete,
+            initialLazyListNativeViewportAction(
+                pending = true,
+                hasItems = true,
+                isComposeAtTop = false,
+                contentOffset = 0,
+                composeOffset = 0,
+                isDragging = true,
+                hasScrollView = true,
+            )
+        )
+        assertEquals(
+            InitialLazyListNativeViewportAction.Complete,
+            initialLazyListNativeViewportAction(
+                pending = false,
+                hasItems = true,
+                isComposeAtTop = false,
+                contentOffset = 0,
+                composeOffset = 0,
+                isDragging = false,
+                hasScrollView = true,
+            )
+        )
+    }
+
+    @Test
     fun deferredAlignmentSkipsActiveScrollUnlessForced() {
         assertFalse(
             shouldApplyDeferredScrollOffsetAlignment(

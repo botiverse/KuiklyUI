@@ -199,11 +199,44 @@ private const val PULL_TO_REFRESH_ITEM_KEY = "pull_to_refresh"
  * Whether Compose is at top for scroll-sync correction.
  * Only differs from [isAtTop] when PTR [KuiklyScrollInfo.pullToRefreshTopInsetPx] > 0.
  */
-private fun ScrollableState.isComposeAtTopForScrollSync(): Boolean {
+internal fun ScrollableState.isComposeAtTopForScrollSync(): Boolean {
     if (this is LazyListState && kuiklyInfo.pullToRefreshTopInsetPx > 0) {
         return firstVisibleItemIndex == 0 && firstVisibleItemScrollOffset == 0
     }
     return isAtTop()
+}
+
+internal enum class InitialLazyListNativeViewportAction {
+    Wait,
+    Prepare,
+    Complete,
+}
+
+/**
+ * Decides whether the first non-empty LazyList placement must establish the native scroll
+ * coordinate space before its children are placed.
+ *
+ * A non-top initial LazyList measure is already the intended Compose viewport. Deferring the
+ * matching native offset through [tryExpandStartSizeNoScroll] lets ScrollView expose offset-zero
+ * pixels first and only converge later. The initial placement is the one safe boundary where the
+ * native offset can still be queued for the platform's first layout, while ordinary scrolling
+ * keeps the existing deferred alignment policy.
+ */
+internal fun initialLazyListNativeViewportAction(
+    pending: Boolean,
+    hasItems: Boolean,
+    isComposeAtTop: Boolean,
+    contentOffset: Int,
+    composeOffset: Int,
+    isDragging: Boolean,
+    hasScrollView: Boolean,
+): InitialLazyListNativeViewportAction = when {
+    !pending -> InitialLazyListNativeViewportAction.Complete
+    !hasItems || !hasScrollView -> InitialLazyListNativeViewportAction.Wait
+    isDragging -> InitialLazyListNativeViewportAction.Complete
+    isComposeAtTop -> InitialLazyListNativeViewportAction.Complete
+    contentOffset != 0 || composeOffset != 0 -> InitialLazyListNativeViewportAction.Complete
+    else -> InitialLazyListNativeViewportAction.Prepare
 }
 
 /**
