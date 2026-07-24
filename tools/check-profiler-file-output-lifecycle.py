@@ -19,6 +19,10 @@ PATHS = {
         "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/output/"
         "FileOutputStrategy.kt"
     ),
+    "completion_result": ROOT / (
+        "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/"
+        "RecompositionProfilerFileOutputResult.kt"
+    ),
     "tracker": ROOT / (
         "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/"
         "RecompositionTracker.kt"
@@ -94,7 +98,11 @@ def assert_contract(sources: dict[str, str]) -> None:
             "FileOutputStrategy(fileModuleProvider = { currentFileModule })",
             "newTracker.addOutputStrategy(strategy)",
             "strategy.activate(newTracker.sessionId, newTracker.startTimestampMs)",
-            "fileStrategy?.deactivate(report)",
+            "fun stop(completion: (RecompositionProfilerFileOutputResult) -> Unit)",
+            "strategy.deactivate(report, completion)",
+            "fun getReport(",
+            "completion: (RecompositionProfilerFileOutputResult) -> Unit",
+            "strategy.writeReport(finalReport, completion)",
         ),
     )
     start_stop = between(profiler, "fun start()", "fun getReport(")
@@ -111,18 +119,34 @@ def assert_contract(sources: dict[str, str]) -> None:
             "private var inFlightFileOperation: ProfilerFileOperation? = null",
             "ProfilerFileIoResult.RetryableFailure(\"pager bridge unavailable\")",
             "pendingFileOperations.add(0, operation)",
-            "blockedFileModule = module",
-            "retryImmediately = fileModuleProvider()?.let { it !== module } == true",
+            "operation.sameModuleRetryCount < MAX_SAME_MODULE_RETRIES",
+            "retryable file output exhausted after",
+            "takeCompletionLocked(operation, completionResult)",
+            "profiler session superseded before native file output completed",
+            "sessionId != report.sessionId",
+            "generationArtifactFailures",
+            "operation.filename == FILE_FRAMES",
             "internal fun onFileModuleChanged()",
             "override fun onSessionReset(sessionId: String, startTimestampMs: Long)",
             "pendingFileOperations.clear()",
-            "ProfilerFileOperation(ProfilerFileOperationKind.WRITE, FILE_REPORT, \"\")",
+            "FILE_REPORT, \"\", generation",
         ),
     )
     if re.search(r"private\s+val\s+fileModule\s*:\s*FileModule", strategy):
         raise AssertionError("FileOutputStrategy may not retain one fixed Pager FileModule")
     if "if (!cancel) block()" in strategy or "if(!cancel)block()" in compact(strategy):
         raise AssertionError("Pager cancellation must retry; it may not silently drop file I/O")
+
+    require_tokens(
+        "RecompositionProfilerFileOutputResult",
+        sources["completion_result"],
+        (
+            "sealed class RecompositionProfilerFileOutputResult",
+            "data class Success",
+            "data class Failure",
+            "val reason: String",
+        ),
+    )
 
     require_tokens(
         "RecompositionTracker",
@@ -169,6 +193,14 @@ def assert_contract(sources: dict[str, str]) -> None:
             "queuedWritesWaitForAFileModuleInsteadOfBeingDropped",
             "resetRewritesTheSessionHeaderAndRejectsFramesFromTheOldGeneration",
             "reportWritesRemainSerializedAcrossStopAndPostStopExport",
+            "retryableFailureRetriesOnTheSameLiveModuleInsteadOfStalling",
+            "retryableFailureExhaustionSurfacesOneTerminalReportFailure",
+            "reportCompletionWaitsForQueuedFramesAndNativeReportCommit",
+            "earlierFrameFailureMakesACommittedReportArtifactSetFail",
+            "reportOnlyTerminalFailureCanRetrySuccessfullyInTheSameSession",
+            "newSessionSupersedesOldReportCompletionExactlyOnce",
+            "lateStopFromOldSessionCannotDeactivateTheNewSession",
+            "twoConsecutiveSessionsEachReceiveTheirOwnCommitAcknowledgement",
         ),
     )
     if "python3 tools/check-profiler-file-output-lifecycle.py --self-test" not in sources["workflow"]:
@@ -205,8 +237,8 @@ def main() -> int:
         expect_failure(
             sources,
             "strategy",
-            "pendingFileOperations.add(0, operation)",
-            "// mutation: cancelled operation dropped",
+            "completion(ProfilerFileIoResult.RetryableFailure(\"pager bridge unavailable\"))",
+            "completion(ProfilerFileIoResult.TerminalFailure(\"mutation: cancelled operation dropped\"))",
         )
         expect_failure(
             sources,
@@ -217,8 +249,32 @@ def main() -> int:
         expect_failure(
             sources,
             "profiler",
-            "fileStrategy?.deactivate(report)",
-            "fileStrategy?.deactivate(report)\n                fileStrategy = null",
+            "strategy.deactivate(report, completion)",
+            "strategy.deactivate(report)\n            fileStrategy = null",
+        )
+        expect_failure(
+            sources,
+            "strategy",
+            "operation.sameModuleRetryCount < MAX_SAME_MODULE_RETRIES",
+            "false // mutation: same live module never retries",
+        )
+        expect_failure(
+            sources,
+            "strategy",
+            "takeCompletionLocked(operation, completionResult)",
+            "null // mutation: native success is never acknowledged",
+        )
+        expect_failure(
+            sources,
+            "strategy",
+            "sessionId != report.sessionId",
+            "false // mutation: old stop may deactivate a new session",
+        )
+        expect_failure(
+            sources,
+            "strategy",
+            "operation.filename == FILE_FRAMES",
+            "operation.filename == FILE_REPORT // mutation: report failure poisons retry",
         )
         expect_failure(
             sources,
