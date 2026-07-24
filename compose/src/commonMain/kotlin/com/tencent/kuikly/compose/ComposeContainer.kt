@@ -134,11 +134,26 @@ open class ComposeContainer :
      * Profiler 生命周期监听器，负责在 Profiler start 时把 FileModule 实例传入。
      * 页面销毁时注销，避免内存泄漏。
      */
+    private var profilerFileModule: FileModule? = null
+
+    private fun registerProfilerFileModule() {
+        val module = getModule<FileModule>(FileModule.MODULE_NAME) ?: return
+        val previous = profilerFileModule
+        if (previous !== module) {
+            previous?.let { RecompositionProfiler.unregisterFileModule(it) }
+            profilerFileModule = module
+        }
+        RecompositionProfiler.registerFileModule(module)
+    }
+
+    private fun unregisterProfilerFileModule() {
+        profilerFileModule?.let { RecompositionProfiler.unregisterFileModule(it) }
+        profilerFileModule = null
+    }
+
     private val fileModuleListener = object : RecompositionProfiler.ProfilerLifecycleListener {
         override fun onProfilerStarted(tracker: RecompositionTracker) {
-            getModule<FileModule>(FileModule.MODULE_NAME)?.let {
-                RecompositionProfiler.setFileModule(it)
-            }
+            registerProfilerFileModule()
         }
         override fun onProfilerStopped() { /* nothing */ }
     }
@@ -183,9 +198,7 @@ open class ComposeContainer :
 
         // 如果 Profiler 已启用（start 先于页面创建），此时补传 FileModule
         if (RecompositionProfiler.isEnabled) {
-            getModule<FileModule>(FileModule.MODULE_NAME)?.let {
-                RecompositionProfiler.setFileModule(it)
-            }
+            registerProfilerFileModule()
         }
     }
 
@@ -227,11 +240,13 @@ open class ComposeContainer :
 
     override fun pageWillDestroy() {
         super.pageWillDestroy()
+        // Native bridge 被销毁前先从进程级 Profiler 解绑，使待写文件可回退到其他 live Pager。
+        unregisterProfilerFileModule()
+        RecompositionProfiler.removeLifecycleListener(fileModuleListener)
         stopFrameDispatcher()
         mediator?.updateAppState(false)
         dispose()
         updateLifecycleState(Lifecycle.State.DESTROYED)
-        RecompositionProfiler.removeLifecycleListener(fileModuleListener)
     }
 
     private fun updateLifecycleState(state: Lifecycle.State) {

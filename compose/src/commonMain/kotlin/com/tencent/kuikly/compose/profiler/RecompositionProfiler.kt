@@ -90,26 +90,37 @@ object RecompositionProfiler {
         }
     }
 
-    /** 最近一次传入的 FileModule，供 start() 重新 activate 使用 */
-    private var lastFileModule: FileModule? = null
+    /**
+     * FileModule 属于 Pager，Profiler 却是进程级单例。这里跟踪所有 live Pager module，
+     * 当当前 Pager 销毁时回退到另一个 live module，避免文件 I/O 因 scheduler cancel 静默丢失。
+     */
+    private val fileModuleRegistry = ProfilerFileModuleRegistry()
+
+    @Volatile
+    private var currentFileModule: FileModule? = null
 
     /**
-     * 由 ComposeContainer 在 onProfilerStarted 时传入 FileModule 实例。
-     * 如果 enableFile=true 且尚未创建 FileOutputStrategy，则自动创建并注册。
+     * 由 ComposeContainer 在 onProfilerStarted / Pager 激活时注册 FileModule 实例。
      */
-    internal fun setFileModule(fileModule: FileModule) {
+    internal fun registerFileModule(fileModule: FileModule) {
         synchronized(lock) {
-            lastFileModule = fileModule
-            if (config.enableFile && fileStrategy == null) {
-                val strategy = FileOutputStrategy(fileModule)
-                fileStrategy = strategy
-                tracker?.addOutputStrategy(strategy)
-                strategy.activate(tracker?.sessionId ?: "", tracker?.startTimestampMs ?: 0L)
-            }
+            currentFileModule = fileModuleRegistry.register(fileModule)
+            fileStrategy?.onFileModuleChanged()
         }
     }
 
-    /** FileOutputStrategy 持有，stop 时写报告 */
+    /** Pager 销毁前解绑其 FileModule，并切换到另一个 live Pager。 */
+    internal fun unregisterFileModule(fileModule: FileModule) {
+        synchronized(lock) {
+            currentFileModule = fileModuleRegistry.unregister(fileModule)
+            fileStrategy?.onFileModuleChanged()
+        }
+    }
+
+    /**
+     * FileOutputStrategy 跨 stop/start 保留，使已提交的旧 session 写入与新 session
+     * header/clear 共用一条串行队列，不会因原生异步回调乱序覆盖。
+     */
     private var fileStrategy: FileOutputStrategy? = null
 
     /**
@@ -215,7 +226,6 @@ object RecompositionProfiler {
         synchronized(lock) {
             if (!isEnabled) {
                 stoppedTracker = null  // 清除上次 stop 的快照
-                fileStrategy = null   // 清除上次的文件策略
                 val newTracker = RecompositionTracker()
                 newTracker.start(config)
                 tracker = newTracker
@@ -233,19 +243,16 @@ object RecompositionProfiler {
                     overlayStrategy = strategy
                     newTracker.addOutputStrategy(strategy)
                 }
-                // Notify lifecycle listeners to register CompositionObserver
-                // ComposeContainer 会在 onProfilerStarted 里调用 setFileModule
+                // Notify lifecycle listeners to register CompositionObserver and their live FileModule.
                 for (listener in lifecycleListeners) {
                     listener.onProfilerStarted(newTracker)
                 }
-                // 如果页面已存活（不会再触发 onProfilerStarted），用上次缓存的 FileModule 直接 activate
-                if (config.enableFile && fileStrategy == null) {
-                    lastFileModule?.let { fm ->
-                        val strategy = FileOutputStrategy(fm)
-                        fileStrategy = strategy
-                        newTracker.addOutputStrategy(strategy)
-                        strategy.activate(newTracker.sessionId, newTracker.startTimestampMs)
-                    }
+                if (config.enableFile) {
+                    val strategy = fileStrategy ?: FileOutputStrategy(
+                        fileModuleProvider = { currentFileModule }
+                    ).also { fileStrategy = it }
+                    newTracker.addOutputStrategy(strategy)
+                    strategy.activate(newTracker.sessionId, newTracker.startTimestampMs)
                 }
             }
         }
@@ -276,7 +283,6 @@ object RecompositionProfiler {
                 // 写聚合报告文件
                 val report = stoppedTracker?.generateReport() ?: RecompositionReport.EMPTY
                 fileStrategy?.deactivate(report)
-                fileStrategy = null
             }
         }
     }
@@ -287,7 +293,7 @@ object RecompositionProfiler {
      * 如果从未启动过，返回空报告。
      *
      * @param saveToFile 是否同时将报告写入 profiler_report.json 并触发各输出策略的 onReportReady 回调。
-     *   需要 enableFile=true 且 Profiler 正在运行（stop 后 fileStrategy 已释放）。默认 true。
+     *   需要 enableFile=true。stop 后仍可重新导出最后一次快照。默认 true。
      *   设为 false 时静默返回数据，不产生任何日志或文件 I/O。
      */
     fun getReport(saveToFile: Boolean = true): RecompositionReport {
@@ -295,7 +301,8 @@ object RecompositionProfiler {
             val baseReport: RecompositionReport,
             val trackerRef: RecompositionTracker?,
             val namesSnapshot: List<String>,
-            val prefixesSnapshot: List<String>
+            val prefixesSnapshot: List<String>,
+            val fileOutputEnabled: Boolean
         )
         val snapshot = synchronized(lock) {
             val t = tracker ?: stoppedTracker
@@ -303,7 +310,8 @@ object RecompositionProfiler {
                 baseReport = t?.generateReport() ?: RecompositionReport.EMPTY,
                 trackerRef = t,
                 namesSnapshot = excludedNames.toList().sorted(),
-                prefixesSnapshot = excludedPrefixes.toList().sorted()
+                prefixesSnapshot = excludedPrefixes.toList().sorted(),
+                fileOutputEnabled = config.enableFile
             )
         }
         // 根据 excludedNames / excludedPrefixes 过滤 composables 和 hotspots
@@ -330,7 +338,9 @@ object RecompositionProfiler {
             filteredPrefixes = snapshot.prefixesSnapshot
         )
         if (saveToFile) {
-            fileStrategy?.writeReport(finalReport)
+            if (snapshot.fileOutputEnabled) {
+                fileStrategy?.writeReport(finalReport)
+            }
             // 触发所有策略的 onReportReady（日志输出等）；saveToFile=false 时静默
             snapshot.trackerRef?.notifyReportReady(finalReport)
         }

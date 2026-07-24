@@ -90,8 +90,10 @@ class KRFileModule : KuiklyRenderBaseModule() {
         val filename = json.optString(PARAM_FILENAME)
         val content = json.optString(PARAM_CONTENT)
 
-        if (filename.isNullOrEmpty() || content.isNullOrEmpty()) {
-            callback?.invoke(mapOf("error" to "missing filename or content"))
+        // Empty content is a valid overwrite operation: profiler start/reset uses it to truncate
+        // the previous session's report before any new frame is recorded.
+        if (filename.isNullOrEmpty()) {
+            callback?.invoke(mapOf("error" to "missing filename"))
             return
         }
 
