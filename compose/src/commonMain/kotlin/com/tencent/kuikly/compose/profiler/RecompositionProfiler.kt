@@ -123,6 +123,9 @@ object RecompositionProfiler {
      */
     private var fileStrategy: FileOutputStrategy? = null
 
+    /** Whether the current or most recently stopped session was started with file output enabled. */
+    private var sessionFileOutputEnabled: Boolean = false
+
     /**
      * 内部追踪引擎实例，供 [BaseComposeScene] 帧追踪使用。
      * 仅在 [isEnabled] 为 true 时非空。
@@ -226,6 +229,7 @@ object RecompositionProfiler {
         synchronized(lock) {
             if (!isEnabled) {
                 stoppedTracker = null  // 清除上次 stop 的快照
+                sessionFileOutputEnabled = config.enableFile
                 val newTracker = RecompositionTracker()
                 newTracker.start(config)
                 tracker = newTracker
@@ -265,6 +269,28 @@ object RecompositionProfiler {
      */
     @OptIn(InternalComposeTracingApi::class)
     fun stop() {
+        stopInternal(completion = null)
+    }
+
+    /**
+     * Stops tracing and reports the terminal native file-output result.
+     *
+     * [completion] is invoked exactly once. [RecompositionProfilerFileOutputResult.Success] means
+     * the report write and every queued frame operation before it completed for the same session;
+     * enqueueing the write is not success.
+     */
+    @OptIn(InternalComposeTracingApi::class)
+    fun stop(completion: (RecompositionProfilerFileOutputResult) -> Unit) {
+        stopInternal(completion)
+    }
+
+    @OptIn(InternalComposeTracingApi::class)
+    private fun stopInternal(
+        completion: ((RecompositionProfilerFileOutputResult) -> Unit)?
+    ) {
+        var outputStrategy: FileOutputStrategy? = null
+        var outputReport: RecompositionReport? = null
+        var immediateResult: RecompositionProfilerFileOutputResult? = null
         synchronized(lock) {
             if (isEnabled) {
                 isEnabled = false
@@ -282,8 +308,34 @@ object RecompositionProfiler {
                 overlayStrategy = null
                 // 写聚合报告文件
                 val report = stoppedTracker?.generateReport() ?: RecompositionReport.EMPTY
-                fileStrategy?.deactivate(report)
+                if (sessionFileOutputEnabled) {
+                    outputStrategy = fileStrategy
+                    outputReport = report
+                    if (outputStrategy == null && completion != null) {
+                        immediateResult = RecompositionProfilerFileOutputResult.Failure(
+                            report.sessionId,
+                            "profiler file output strategy is unavailable"
+                        )
+                    }
+                } else if (completion != null) {
+                    immediateResult = RecompositionProfilerFileOutputResult.Failure(
+                        report.sessionId,
+                        "profiler file output is disabled for this session"
+                    )
+                }
+            } else if (completion != null) {
+                immediateResult = RecompositionProfilerFileOutputResult.Failure(
+                    stoppedTracker?.sessionId.orEmpty(),
+                    "profiler is not running"
+                )
             }
+        }
+        val strategy = outputStrategy
+        val report = outputReport
+        if (strategy != null && report != null) {
+            strategy.deactivate(report, completion)
+        } else {
+            immediateResult?.let { result -> notifyFileOutputCompletion(completion, result) }
         }
     }
 
@@ -296,7 +348,24 @@ object RecompositionProfiler {
      *   需要 enableFile=true。stop 后仍可重新导出最后一次快照。默认 true。
      *   设为 false 时静默返回数据，不产生任何日志或文件 I/O。
      */
-    fun getReport(saveToFile: Boolean = true): RecompositionReport {
+    fun getReport(saveToFile: Boolean = true): RecompositionReport =
+        getReportInternal(saveToFile, completion = null)
+
+    /**
+     * Gets the current report and acknowledges its terminal native file commit.
+     *
+     * This overload is intended for callers that must not display an export success message until
+     * the native report file is durable. [completion] is invoked exactly once.
+     */
+    fun getReport(
+        saveToFile: Boolean,
+        completion: (RecompositionProfilerFileOutputResult) -> Unit
+    ): RecompositionReport = getReportInternal(saveToFile, completion)
+
+    private fun getReportInternal(
+        saveToFile: Boolean,
+        completion: ((RecompositionProfilerFileOutputResult) -> Unit)?
+    ): RecompositionReport {
         data class Snapshot(
             val baseReport: RecompositionReport,
             val trackerRef: RecompositionTracker?,
@@ -311,7 +380,7 @@ object RecompositionProfiler {
                 trackerRef = t,
                 namesSnapshot = excludedNames.toList().sorted(),
                 prefixesSnapshot = excludedPrefixes.toList().sorted(),
-                fileOutputEnabled = config.enableFile
+                fileOutputEnabled = sessionFileOutputEnabled
             )
         }
         // 根据 excludedNames / excludedPrefixes 过滤 composables 和 hotspots
@@ -339,12 +408,55 @@ object RecompositionProfiler {
         )
         if (saveToFile) {
             if (snapshot.fileOutputEnabled) {
-                fileStrategy?.writeReport(finalReport)
+                val strategy = fileStrategy
+                if (strategy != null) {
+                    strategy.writeReport(finalReport, completion)
+                } else {
+                    notifyFileOutputCompletion(
+                        completion,
+                        RecompositionProfilerFileOutputResult.Failure(
+                            finalReport.sessionId,
+                            "profiler file output strategy is unavailable"
+                        )
+                    )
+                }
+            } else {
+                notifyFileOutputCompletion(
+                    completion,
+                    RecompositionProfilerFileOutputResult.Failure(
+                        finalReport.sessionId,
+                        "profiler file output is disabled for this session"
+                    )
+                )
             }
             // 触发所有策略的 onReportReady（日志输出等）；saveToFile=false 时静默
             snapshot.trackerRef?.notifyReportReady(finalReport)
+        } else {
+            notifyFileOutputCompletion(
+                completion,
+                RecompositionProfilerFileOutputResult.Failure(
+                    finalReport.sessionId,
+                    "file output acknowledgement requires saveToFile=true"
+                )
+            )
         }
         return finalReport
+    }
+
+    private fun notifyFileOutputCompletion(
+        completion: ((RecompositionProfilerFileOutputResult) -> Unit)?,
+        result: RecompositionProfilerFileOutputResult
+    ) {
+        val callback = completion ?: return
+        try {
+            callback(result)
+        } catch (throwable: Throwable) {
+            com.tencent.kuikly.core.log.KLog.e(
+                "RCProfiler",
+                "File output completion callback failed: " +
+                    (throwable.message ?: throwable::class.simpleName.orEmpty())
+            )
+        }
     }
 
     /**

@@ -23,6 +23,7 @@ import com.tencent.kuikly.compose.profiler.output.ProfilerFileOperationKind
 import com.tencent.kuikly.core.module.FileModule
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -158,14 +159,233 @@ class ProfilerFileOutputLifecycleTest {
         dispatcher.complete(1, ProfilerFileIoResult.Success)
 
         strategy.deactivate(report("session-a", 100L))
-        strategy.writeReport(report("session-a-export", 100L))
+        strategy.writeReport(report("session-a", 101L))
 
         assertEquals(3, dispatcher.dispatches.size)
         assertTrue(dispatcher.dispatches[2].operation.content.contains("session-a"))
         dispatcher.complete(2, ProfilerFileIoResult.Success)
 
         assertEquals(4, dispatcher.dispatches.size)
-        assertTrue(dispatcher.dispatches[3].operation.content.contains("session-a-export"))
+        assertTrue(dispatcher.dispatches[3].operation.content.contains("\"startTimestampMs\":101"))
+    }
+
+    @Test
+    fun retryableFailureRetriesOnTheSameLiveModuleInsteadOfStalling() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+
+        strategy.activate("session-a", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.RetryableFailure("context unavailable"))
+
+        assertEquals(2, dispatcher.dispatches.size)
+        assertSame(module, dispatcher.dispatches[1].module)
+        assertSame(dispatcher.dispatches[0].operation, dispatcher.dispatches[1].operation)
+
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+        assertEquals(3, dispatcher.dispatches.size)
+        assertEquals("profiler_report.json", dispatcher.dispatches[2].operation.filename)
+    }
+
+    @Test
+    fun retryableFailureExhaustionSurfacesOneTerminalReportFailure() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+        val completions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-a", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+        strategy.writeReport(report("session-a", 100L), completions::add)
+
+        dispatcher.complete(2, ProfilerFileIoResult.RetryableFailure("context unavailable"))
+        dispatcher.complete(3, ProfilerFileIoResult.RetryableFailure("context unavailable"))
+        dispatcher.complete(4, ProfilerFileIoResult.RetryableFailure("context unavailable"))
+
+        assertEquals(5, dispatcher.dispatches.size)
+        assertEquals(1, completions.size)
+        val failure = completions.single()
+        assertTrue(failure is RecompositionProfilerFileOutputResult.Failure)
+        assertTrue(failure.reason.contains("exhausted after 3 attempts"))
+    }
+
+    @Test
+    fun reportCompletionWaitsForQueuedFramesAndNativeReportCommit() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+        val completions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-a", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+        strategy.onFrameComplete(frame(frameId = 1L, startTimestampMs = 150L))
+        strategy.deactivate(report("session-a", 100L), completions::add)
+
+        assertEquals(3, dispatcher.dispatches.size)
+        assertEquals("profiler_frames.jsonl", dispatcher.dispatches[2].operation.filename)
+        assertTrue(completions.isEmpty())
+
+        dispatcher.complete(2, ProfilerFileIoResult.Success)
+        assertEquals(4, dispatcher.dispatches.size)
+        assertEquals("profiler_report.json", dispatcher.dispatches[3].operation.filename)
+        assertTrue(completions.isEmpty())
+
+        dispatcher.complete(3, ProfilerFileIoResult.Success)
+        assertEquals(
+            RecompositionProfilerFileOutputResult.Success("session-a"),
+            completions.single()
+        )
+    }
+
+    @Test
+    fun earlierFrameFailureMakesACommittedReportArtifactSetFail() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+        val completions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-a", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+        strategy.onFrameComplete(frame(frameId = 1L, startTimestampMs = 150L))
+        strategy.deactivate(report("session-a", 100L), completions::add)
+
+        dispatcher.complete(2, ProfilerFileIoResult.TerminalFailure("append denied"))
+        assertTrue(completions.isEmpty())
+        dispatcher.complete(3, ProfilerFileIoResult.Success)
+
+        val failure = completions.single()
+        assertTrue(failure is RecompositionProfilerFileOutputResult.Failure)
+        assertTrue(failure.reason.contains("earlier profiler file operation failed"))
+        assertTrue(failure.reason.contains("append denied"))
+    }
+
+    @Test
+    fun reportOnlyTerminalFailureCanRetrySuccessfullyInTheSameSession() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+        val firstCompletions = mutableListOf<RecompositionProfilerFileOutputResult>()
+        val secondCompletions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-a", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+
+        strategy.writeReport(report("session-a", 100L), firstCompletions::add)
+        dispatcher.complete(2, ProfilerFileIoResult.TerminalFailure("report denied"))
+
+        assertEquals(1, firstCompletions.size)
+        val firstFailure = firstCompletions.single()
+        assertTrue(firstFailure is RecompositionProfilerFileOutputResult.Failure)
+        assertEquals("report denied", firstFailure.reason)
+
+        strategy.writeReport(report("session-a", 100L), secondCompletions::add)
+        assertEquals(4, dispatcher.dispatches.size)
+        assertTrue(secondCompletions.isEmpty())
+        dispatcher.complete(3, ProfilerFileIoResult.Success)
+
+        assertEquals(1, firstCompletions.size)
+        assertEquals(
+            listOf<RecompositionProfilerFileOutputResult>(
+                RecompositionProfilerFileOutputResult.Success("session-a")
+            ),
+            secondCompletions
+        )
+    }
+
+    @Test
+    fun newSessionSupersedesOldReportCompletionExactlyOnce() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+        val oldCompletions = mutableListOf<RecompositionProfilerFileOutputResult>()
+        val newCompletions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-old", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+        strategy.writeReport(report("session-old", 100L), oldCompletions::add)
+
+        strategy.activate("session-new", 200L)
+        assertEquals(1, oldCompletions.size)
+        assertTrue(oldCompletions.single() is RecompositionProfilerFileOutputResult.Failure)
+
+        dispatcher.complete(2, ProfilerFileIoResult.Success)
+        assertEquals(1, oldCompletions.size)
+        dispatcher.complete(3, ProfilerFileIoResult.Success)
+        dispatcher.complete(4, ProfilerFileIoResult.Success)
+
+        strategy.deactivate(report("session-new", 200L), newCompletions::add)
+        dispatcher.complete(5, ProfilerFileIoResult.Success)
+
+        assertEquals(
+            RecompositionProfilerFileOutputResult.Success("session-new"),
+            newCompletions.single()
+        )
+    }
+
+    @Test
+    fun lateStopFromOldSessionCannotDeactivateTheNewSession() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+        val oldCompletions = mutableListOf<RecompositionProfilerFileOutputResult>()
+        val newCompletions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-old", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+        strategy.activate("session-new", 200L)
+
+        strategy.deactivate(report("session-old", 100L), oldCompletions::add)
+        assertTrue(oldCompletions.single() is RecompositionProfilerFileOutputResult.Failure)
+
+        dispatcher.complete(2, ProfilerFileIoResult.Success)
+        dispatcher.complete(3, ProfilerFileIoResult.Success)
+        strategy.onFrameComplete(frame(frameId = 2L, startTimestampMs = 250L))
+        strategy.deactivate(report("session-new", 200L), newCompletions::add)
+
+        assertEquals("profiler_frames.jsonl", dispatcher.dispatches[4].operation.filename)
+        dispatcher.complete(4, ProfilerFileIoResult.Success)
+        dispatcher.complete(5, ProfilerFileIoResult.Success)
+        assertEquals(
+            RecompositionProfilerFileOutputResult.Success("session-new"),
+            newCompletions.single()
+        )
+    }
+
+    @Test
+    fun twoConsecutiveSessionsEachReceiveTheirOwnCommitAcknowledgement() {
+        val module = fileModule("pager-live")
+        val dispatcher = RecordingDispatcher()
+        val strategy = FileOutputStrategy({ module }, dispatcher)
+        val completions = mutableListOf<RecompositionProfilerFileOutputResult>()
+
+        strategy.activate("session-one", 100L)
+        dispatcher.complete(0, ProfilerFileIoResult.Success)
+        dispatcher.complete(1, ProfilerFileIoResult.Success)
+        strategy.deactivate(report("session-one", 100L), completions::add)
+        assertTrue(completions.isEmpty())
+        dispatcher.complete(2, ProfilerFileIoResult.Success)
+
+        strategy.activate("session-two", 200L)
+        dispatcher.complete(3, ProfilerFileIoResult.Success)
+        dispatcher.complete(4, ProfilerFileIoResult.Success)
+        strategy.deactivate(report("session-two", 200L), completions::add)
+        assertEquals(1, completions.size)
+        dispatcher.complete(5, ProfilerFileIoResult.Success)
+
+        assertEquals(
+            listOf<RecompositionProfilerFileOutputResult>(
+                RecompositionProfilerFileOutputResult.Success("session-one"),
+                RecompositionProfilerFileOutputResult.Success("session-two")
+            ),
+            completions
+        )
+        assertFalse(completions.any { it is RecompositionProfilerFileOutputResult.Failure })
     }
 
     private fun fileModule(pagerId: String): FileModule = FileModule().also { it.pagerId = pagerId }

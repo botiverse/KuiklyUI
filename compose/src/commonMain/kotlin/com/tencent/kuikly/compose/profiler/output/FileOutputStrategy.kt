@@ -21,6 +21,7 @@ import com.tencent.kuikly.compose.profiler.RecompositionEvent
 import com.tencent.kuikly.compose.profiler.RecompositionFrameEndEvent
 import com.tencent.kuikly.compose.profiler.RecompositionFrameStartEvent
 import com.tencent.kuikly.compose.profiler.RecompositionOutputStrategy
+import com.tencent.kuikly.compose.profiler.RecompositionProfilerFileOutputResult
 import com.tencent.kuikly.compose.profiler.RecompositionReport
 import com.tencent.kuikly.compose.profiler.RecompositionSessionOutputStrategy
 import com.tencent.kuikly.compose.profiler.ScrollContextEvent
@@ -36,11 +37,20 @@ internal enum class ProfilerFileOperationKind {
     APPEND
 }
 
-internal data class ProfilerFileOperation(
+internal class ProfilerFileOperation(
     val kind: ProfilerFileOperationKind,
     val filename: String,
-    val content: String
-)
+    val content: String,
+    val generation: Long,
+    val sessionId: String,
+    val completion: ((RecompositionProfilerFileOutputResult) -> Unit)? = null
+) {
+    /** Same-module retries are deliberately bounded so a synchronous native failure cannot spin. */
+    internal var sameModuleRetryCount: Int = 0
+
+    /** Guarded by FileOutputStrategy.fileOperationsLock. */
+    internal var completionDelivered: Boolean = false
+}
 
 internal sealed class ProfilerFileIoResult {
     internal object Success : ProfilerFileIoResult()
@@ -128,11 +138,29 @@ internal class FileOutputStrategy(
     private val ioDispatcher: ProfilerFileIoDispatcher = NativeProfilerFileIoDispatcher
 ) : RecompositionOutputStrategy, RecompositionSessionOutputStrategy {
 
+    private data class CompletionDelivery(
+        val callback: (RecompositionProfilerFileOutputResult) -> Unit,
+        val result: RecompositionProfilerFileOutputResult
+    )
+
+    private data class SessionSnapshot(
+        val generation: Long,
+        val sessionId: String
+    )
+
+    private data class PendingFrameBatch(
+        val generation: Long,
+        val sessionId: String,
+        val content: String
+    )
+
     companion object {
         private const val FILE_FRAMES = "profiler_frames.jsonl"
         private const val FILE_REPORT = "profiler_report.json"
         /** append 批量写入间隔（毫秒） */
         private const val APPEND_INTERVAL_MS = 2000L
+        /** Initial attempt plus two retries; exhaustion is surfaced instead of stalling forever. */
+        internal const val MAX_SAME_MODULE_RETRIES = 2
     }
 
     /** 待 append 的帧 JSON 缓冲区（onFrameComplete 在帧路径线程写入，须加锁） */
@@ -144,6 +172,8 @@ internal class FileOutputStrategy(
     private val pendingFileOperations = mutableListOf<ProfilerFileOperation>()
     private var inFlightFileOperation: ProfilerFileOperation? = null
     private var blockedFileModule: FileModule? = null
+    private var fileSessionGeneration: Long = 0L
+    private val generationArtifactFailures = mutableMapOf<Long, String>()
 
     /** 上次 append 的时间戳 */
     private var lastAppendMs: Long = 0L
@@ -154,6 +184,9 @@ internal class FileOutputStrategy(
 
     /** session 真正的 start 时间戳（tracker.startTimestampMs），用于过滤旧帧 */
     private var sessionStartTimestampMs: Long = 0L
+
+    /** Current session id; guarded together with [sessionGeneration] by [pendingFramesLock]. */
+    private var sessionId: String = ""
 
     /** reset/activate 代际；防止 reset 前已开始构建的帧在 reset 后进入新 session。 */
     private var sessionGeneration: Long = 0L
@@ -173,12 +206,36 @@ internal class FileOutputStrategy(
      * 由 RecompositionProfiler 在 stop() 时调用，停止文件写入并 flush 剩余帧数据。
      */
     fun deactivate(report: RecompositionReport) {
-        if (!active) return
-        active = false
-        // flush 剩余帧
+        deactivate(report, completion = null)
+    }
+
+    /**
+     * Deactivates capture and acknowledges the native report commit. The callback is terminal and
+     * is invoked exactly once. It is never invoked merely because the write was enqueued.
+     */
+    fun deactivate(
+        report: RecompositionReport,
+        completion: ((RecompositionProfilerFileOutputResult) -> Unit)?
+    ) {
+        val inactiveReason = synchronized(pendingFramesLock) {
+            when {
+                !active -> "profiler file output is not active"
+                sessionId != report.sessionId ->
+                    "profiler session was superseded before stop file output began"
+                else -> {
+                    active = false
+                    null
+                }
+            }
+        }
+        if (inactiveReason != null) {
+            if (completion != null) {
+                deliverImmediateFailure(report.sessionId, inactiveReason, completion)
+            }
+            return
+        }
         flushPendingFrames()
-        // 写聚合报告
-        writeReport(report)
+        enqueueReport(report, completion)
     }
 
     /**
@@ -186,14 +243,16 @@ internal class FileOutputStrategy(
      * 先 flush 内存中尚未写入的帧，确保 frames 文件与 report 数据完整一致。
      */
     fun writeReport(report: RecompositionReport) {
+        writeReport(report, completion = null)
+    }
+
+    /** Writes [report] and invokes [completion] only after the native report write is terminal. */
+    fun writeReport(
+        report: RecompositionReport,
+        completion: ((RecompositionProfilerFileOutputResult) -> Unit)?
+    ) {
         flushPendingFrames()
-        enqueueFileOperation(
-            ProfilerFileOperation(
-                kind = ProfilerFileOperationKind.WRITE,
-                filename = FILE_REPORT,
-                content = report.toJson()
-            )
-        )
+        enqueueReport(report, completion)
     }
 
     override fun onFrameComplete(events: List<RecompositionEvent>) {
@@ -257,50 +316,137 @@ internal class FileOutputStrategy(
     // ========== 内部方法 ==========
 
     private fun beginSession(sessionId: String, sessionStartMs: Long, activate: Boolean) {
+        val header = "{\"type\":\"session\",\"sessionId\":\"$sessionId\",\"startTimestampMs\":$sessionStartMs}\n"
+        val superseded = mutableListOf<CompletionDelivery>()
         synchronized(pendingFramesLock) {
             if (activate) active = true
+            this.sessionId = sessionId
             sessionStartTimestampMs = sessionStartMs
             sessionGeneration += 1L
             lastAppendMs = DateTime.currentTimestamp()
             pendingFrames.clear()
+            val generation = sessionGeneration
+            // Publish the frame/session generation and its file-queue generation atomically. A
+            // concurrent export can now observe either the complete old generation or the complete
+            // new generation, never a new frame generation paired with the old file queue.
+            synchronized(fileOperationsLock) {
+                // 新 session 取代尚未提交的旧 session 操作。已进入原生层的操作不可取消，
+                // 但串行队列保证新 header/clear 必定在其完成后覆盖旧数据。
+                pendingFileOperations.forEach { operation ->
+                    takeCompletionLocked(
+                        operation,
+                        RecompositionProfilerFileOutputResult.Failure(
+                            operation.sessionId,
+                            "profiler session superseded before file output committed"
+                        )
+                    )?.let(superseded::add)
+                }
+                inFlightFileOperation?.let { operation ->
+                    if (operation.generation != generation) {
+                        takeCompletionLocked(
+                            operation,
+                            RecompositionProfilerFileOutputResult.Failure(
+                                operation.sessionId,
+                                "profiler session superseded before file output committed"
+                            )
+                        )?.let(superseded::add)
+                    }
+                }
+                pendingFileOperations.clear()
+                fileSessionGeneration = generation
+                generationArtifactFailures.clear()
+                pendingFileOperations.add(
+                    ProfilerFileOperation(
+                        ProfilerFileOperationKind.WRITE,
+                        FILE_FRAMES,
+                        header,
+                        generation,
+                        sessionId
+                    )
+                )
+                // 清空旧 report，避免上一 session 的 report 与新 frames 被误当成同一次采集。
+                pendingFileOperations.add(
+                    ProfilerFileOperation(
+                        ProfilerFileOperationKind.WRITE,
+                        FILE_REPORT,
+                        "",
+                        generation,
+                        sessionId
+                    )
+                )
+                blockedFileModule = null
+            }
         }
-
-        val header = "{\"type\":\"session\",\"sessionId\":\"$sessionId\",\"startTimestampMs\":$sessionStartMs}\n"
-        synchronized(fileOperationsLock) {
-            // 新 session 取代尚未提交的旧 session 操作。已进入原生层的操作不可取消，
-            // 但串行队列保证新 header/clear 必定在其完成后覆盖旧数据。
-            pendingFileOperations.clear()
-            pendingFileOperations.add(
-                ProfilerFileOperation(ProfilerFileOperationKind.WRITE, FILE_FRAMES, header)
-            )
-            // 清空旧 report，避免上一 session 的 report 与新 frames 被误当成同一次采集。
-            pendingFileOperations.add(
-                ProfilerFileOperation(ProfilerFileOperationKind.WRITE, FILE_REPORT, "")
-            )
-            blockedFileModule = null
-        }
+        deliverCompletions(superseded)
         dispatchNextFileOperation()
     }
 
     private fun flushPendingFrames() {
         val batch = synchronized(pendingFramesLock) {
             if (pendingFrames.isEmpty()) return
-            pendingFrames.joinToString("\n").also { pendingFrames.clear() }
+            PendingFrameBatch(
+                generation = sessionGeneration,
+                sessionId = sessionId,
+                content = pendingFrames.joinToString("\n")
+            ).also { pendingFrames.clear() }
         }
         enqueueFileOperation(
             ProfilerFileOperation(
                 kind = ProfilerFileOperationKind.APPEND,
                 filename = FILE_FRAMES,
-                content = batch
+                content = batch.content,
+                generation = batch.generation,
+                sessionId = batch.sessionId
+            )
+        )
+    }
+
+    private fun enqueueReport(
+        report: RecompositionReport,
+        completion: ((RecompositionProfilerFileOutputResult) -> Unit)?
+    ) {
+        val snapshot = synchronized(pendingFramesLock) {
+            SessionSnapshot(sessionGeneration, sessionId)
+        }
+        if (snapshot.sessionId.isEmpty() || report.sessionId != snapshot.sessionId) {
+            deliverImmediateFailure(
+                report.sessionId,
+                "report session does not match the active file-output generation",
+                completion
+            )
+            return
+        }
+        enqueueFileOperation(
+            ProfilerFileOperation(
+                kind = ProfilerFileOperationKind.WRITE,
+                filename = FILE_REPORT,
+                content = report.toJson(),
+                generation = snapshot.generation,
+                sessionId = snapshot.sessionId,
+                completion = completion
             )
         )
     }
 
     private fun enqueueFileOperation(operation: ProfilerFileOperation) {
+        var staleCompletion: CompletionDelivery? = null
+        var accepted = false
         synchronized(fileOperationsLock) {
-            pendingFileOperations.add(operation)
+            if (operation.generation != fileSessionGeneration) {
+                staleCompletion = takeCompletionLocked(
+                    operation,
+                    RecompositionProfilerFileOutputResult.Failure(
+                        operation.sessionId,
+                        "profiler session superseded before file output was queued"
+                    )
+                )
+            } else {
+                pendingFileOperations.add(operation)
+                accepted = true
+            }
         }
-        dispatchNextFileOperation()
+        staleCompletion?.let { deliverCompletion(it) }
+        if (accepted) dispatchNextFileOperation()
     }
 
     private fun dispatchNextFileOperation() {
@@ -314,8 +460,20 @@ internal class FileOutputStrategy(
             dispatch = module to operation
         }
         val (module, operation) = dispatch ?: return
-        ioDispatcher.dispatch(module, operation) { result ->
-            completeFileOperation(module, operation, result)
+        try {
+            ioDispatcher.dispatch(module, operation) { result ->
+                completeFileOperation(module, operation, result)
+            }
+        } catch (throwable: Throwable) {
+            completeFileOperation(
+                module,
+                operation,
+                ProfilerFileIoResult.TerminalFailure(
+                    throwable.message ?: throwable::class.simpleName.orEmpty().ifEmpty {
+                        "file dispatcher failed"
+                    }
+                )
+            )
         }
     }
 
@@ -324,33 +482,155 @@ internal class FileOutputStrategy(
         operation: ProfilerFileOperation,
         result: ProfilerFileIoResult
     ) {
-        var retryImmediately = false
-        var terminalFailure: String? = null
+        val completions = mutableListOf<CompletionDelivery>()
+        var failureToLog: String? = null
+        var dispatchNext = false
         synchronized(fileOperationsLock) {
             if (inFlightFileOperation !== operation) return@synchronized
             inFlightFileOperation = null
-            when (result) {
-                ProfilerFileIoResult.Success -> blockedFileModule = null
-                is ProfilerFileIoResult.RetryableFailure -> {
-                    pendingFileOperations.add(0, operation)
-                    blockedFileModule = module
-                    retryImmediately = fileModuleProvider()?.let { it !== module } == true
-                    if (retryImmediately) blockedFileModule = null
-                }
-                is ProfilerFileIoResult.TerminalFailure -> {
-                    blockedFileModule = null
-                    terminalFailure = result.reason
+            if (operation.generation != fileSessionGeneration) {
+                blockedFileModule = null
+                takeCompletionLocked(
+                    operation,
+                    RecompositionProfilerFileOutputResult.Failure(
+                        operation.sessionId,
+                        "profiler session superseded before native file output completed"
+                    )
+                )?.let(completions::add)
+                dispatchNext = true
+            } else {
+                when (result) {
+                    ProfilerFileIoResult.Success -> {
+                        blockedFileModule = null
+                        val priorFailure = generationArtifactFailures[operation.generation]
+                        val completionResult =
+                            if (priorFailure == null) {
+                                RecompositionProfilerFileOutputResult.Success(operation.sessionId)
+                            } else {
+                                RecompositionProfilerFileOutputResult.Failure(
+                                    operation.sessionId,
+                                    "an earlier profiler file operation failed: $priorFailure"
+                                )
+                            }
+                        takeCompletionLocked(operation, completionResult)?.let(completions::add)
+                        dispatchNext = true
+                    }
+                    is ProfilerFileIoResult.RetryableFailure -> {
+                        val currentModule = fileModuleProvider()
+                        when {
+                            currentModule == null -> {
+                                // There is no Pager on which to retry yet. A future registry change
+                                // explicitly wakes the queue; the operation is not dropped.
+                                pendingFileOperations.add(0, operation)
+                                blockedFileModule = module
+                            }
+                            currentModule !== module -> {
+                                operation.sameModuleRetryCount = 0
+                                pendingFileOperations.add(0, operation)
+                                blockedFileModule = null
+                                dispatchNext = true
+                            }
+                            operation.sameModuleRetryCount < MAX_SAME_MODULE_RETRIES -> {
+                                operation.sameModuleRetryCount += 1
+                                pendingFileOperations.add(0, operation)
+                                blockedFileModule = null
+                                dispatchNext = true
+                            }
+                            else -> {
+                                blockedFileModule = null
+                                val failure =
+                                    "retryable file output exhausted after " +
+                                        "${operation.sameModuleRetryCount + 1} attempts: ${result.reason}"
+                                recordArtifactFailureLocked(operation, failure)
+                                takeCompletionLocked(
+                                    operation,
+                                    RecompositionProfilerFileOutputResult.Failure(
+                                        operation.sessionId,
+                                        failure
+                                    )
+                                )?.let(completions::add)
+                                failureToLog = failure
+                                dispatchNext = true
+                            }
+                        }
+                    }
+                    is ProfilerFileIoResult.TerminalFailure -> {
+                        blockedFileModule = null
+                        recordArtifactFailureLocked(operation, result.reason)
+                        takeCompletionLocked(
+                            operation,
+                            RecompositionProfilerFileOutputResult.Failure(
+                                operation.sessionId,
+                                result.reason
+                            )
+                        )?.let(completions::add)
+                        failureToLog = result.reason
+                        dispatchNext = true
+                    }
                 }
             }
         }
-        terminalFailure?.let { reason ->
+        failureToLog?.let { reason ->
             com.tencent.kuikly.core.log.KLog.e(
                 "RCProfiler",
                 "File output failed operation=${operation.kind} file=${operation.filename}: $reason"
             )
         }
-        if (result is ProfilerFileIoResult.Success || terminalFailure != null || retryImmediately) {
-            dispatchNextFileOperation()
+        deliverCompletions(completions)
+        if (dispatchNext) dispatchNextFileOperation()
+    }
+
+    /** Frame/header failures make the current artifact set incomplete; report-only retries do not. */
+    private fun recordArtifactFailureLocked(operation: ProfilerFileOperation, reason: String) {
+        if (operation.filename == FILE_FRAMES &&
+            generationArtifactFailures[operation.generation] == null
+        ) {
+            generationArtifactFailures[operation.generation] = reason
+        }
+    }
+
+    private fun takeCompletionLocked(
+        operation: ProfilerFileOperation,
+        result: RecompositionProfilerFileOutputResult
+    ): CompletionDelivery? {
+        val callback = operation.completion ?: return null
+        if (operation.completionDelivered) return null
+        operation.completionDelivered = true
+        return CompletionDelivery(callback, result)
+    }
+
+    private fun deliverCompletions(completions: List<CompletionDelivery>) {
+        completions.forEach(::deliverCompletion)
+    }
+
+    private fun deliverCompletion(delivery: CompletionDelivery) {
+        try {
+            delivery.callback(delivery.result)
+        } catch (throwable: Throwable) {
+            com.tencent.kuikly.core.log.KLog.e(
+                "RCProfiler",
+                "File output completion callback failed: " +
+                    (throwable.message ?: throwable::class.simpleName.orEmpty())
+            )
+        }
+    }
+
+    private fun deliverImmediateFailure(
+        sessionId: String,
+        reason: String,
+        completion: ((RecompositionProfilerFileOutputResult) -> Unit)?
+    ) {
+        com.tencent.kuikly.core.log.KLog.e(
+            "RCProfiler",
+            "File output request failed session=$sessionId: $reason"
+        )
+        completion?.let { callback ->
+            deliverCompletion(
+                CompletionDelivery(
+                    callback,
+                    RecompositionProfilerFileOutputResult.Failure(sessionId, reason)
+                )
+            )
         }
     }
 
