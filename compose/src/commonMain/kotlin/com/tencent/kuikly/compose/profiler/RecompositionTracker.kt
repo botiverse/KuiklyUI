@@ -332,9 +332,12 @@ internal class RecompositionTracker {
         stateIdentityRegistry.clear()
         startTimestampMs = DateTime.currentTimestamp()
         sessionId = "rcp-${startTimestampMs}-${Random.nextInt(10000)}"
-        // 通知所有输出策略清空自身数据
+        // 通知所有输出策略清空自身数据，并传递 reset 后的新 session。
         for (strategy in outputStrategies) {
             strategy.onReset()
+            if (strategy is RecompositionSessionOutputStrategy) {
+                strategy.onSessionReset(sessionId, startTimestampMs)
+            }
         }
     }
 

@@ -239,6 +239,8 @@ jobs:
         run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
       - name: Preserve profiler observer composition and thread ownership
         run: python3 tools/check-profiler-observer-state-partition.py --self-test
+      - name: Preserve profiler file output across Pager and session lifecycle
+        run: python3 tools/check-profiler-file-output-lifecycle.py --self-test
 
   exact-matrix:
     if: always()

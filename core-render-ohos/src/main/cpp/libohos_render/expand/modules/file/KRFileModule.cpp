@@ -76,8 +76,10 @@ void KRFileModule::WriteFile(const KRAnyValue &params, const KRRenderCallback &c
     const std::string filename = jsonObj->GetString("filename");
     const std::string content  = jsonObj->GetString("content");
 
-    if (filename.empty() || content.empty()) {
-        if (callback) callback(MakeResult("error", "missing filename or content"));
+    // Empty content is a valid overwrite operation used to truncate the previous profiler report
+    // when a new session starts.
+    if (filename.empty()) {
+        if (callback) callback(MakeResult("error", "missing filename"));
         return;
     }
 
