@@ -374,8 +374,15 @@ private fun rememberLazyListMeasurePolicy(
                         containerConstraints.constrainWidth(width + totalHorizontalPadding),
                         containerConstraints.constrainHeight(height + totalVerticalPadding),
                         emptyMap(),
-                        placement
-                    )
+                    ) {
+                        placeLazyListChildrenWithInitialNativeViewport(
+                            placementScope = this,
+                            prepareInitialNativeViewport = {
+                                state.prepareInitialNativeViewportBeforePlacement()
+                            },
+                            placement = placement,
+                        )
+                    }
                 }
             )
 
@@ -385,4 +392,13 @@ private fun rememberLazyListMeasurePolicy(
         state.applyMeasureResult(measureResult, isLookingAhead)
         measureResult
     }
+}
+
+internal fun <T> placeLazyListChildrenWithInitialNativeViewport(
+    placementScope: T,
+    prepareInitialNativeViewport: () -> Unit,
+    placement: T.() -> Unit,
+) {
+    prepareInitialNativeViewport()
+    placementScope.placement()
 }
