@@ -300,6 +300,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 if (segmentEnd <= segmentStart) continue
                 val atomicBounds =
                     atomicSpan?.let { atomicInlineBoxBounds(start, end, line, it) }
+                val clipToSelectionPath = atomicBounds == null
                 val segmentLeft: Float
                 val segmentRight: Float
                 if (atomicBounds != null) {
@@ -309,19 +310,10 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                     segmentLeft = atomicBounds.left
                     segmentRight = atomicBounds.right
                 } else {
-                    val startX = max(
-                        textLayout.getPrimaryHorizontal(segmentStart),
-                        textLayout.getSecondaryHorizontal(segmentStart),
-                    )
-                    // At a run boundary Android's primary caret may use downstream
-                    // affinity and jump across the following span. The upstream
-                    // caret is the actual visual end of this inline group.
-                    val endX = min(
-                        textLayout.getPrimaryHorizontal(segmentEnd),
-                        textLayout.getSecondaryHorizontal(segmentEnd),
-                    )
-                    segmentLeft = min(startX, endX)
-                    segmentRight = max(startX, endX)
+                    val segmentBounds = inlineBoxSelectionBounds(segmentStart, segmentEnd, line)
+                        ?: continue
+                    segmentLeft = segmentBounds.left
+                    segmentRight = segmentBounds.right
                 }
                 val left = (
                     segmentLeft + if (segmentStart == start) style.marginStart else 0f
@@ -338,6 +330,12 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                 val bottom = baseline + metrics.descent + style.paddingBottom + style.borderWidth
                 if (bottom <= top) continue
                 inlineBoxRect.set(left, top, right, bottom)
+                val saveCount =
+                    if (clipToSelectionPath) {
+                        canvas.save().also { canvas.clipPath(inlineBoxSelectionPath) }
+                    } else {
+                        null
+                    }
                 if (drawFill && style.backgroundColor != null) {
                     inlineBoxFillPaint.color = style.backgroundColor
                     canvas.drawRoundRect(
@@ -359,6 +357,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
                         inlineBoxBorderPaint
                     )
                 }
+                if (saveCount != null) canvas.restoreToCount(saveCount)
             }
         }
     }
@@ -371,13 +370,25 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     ): RectF? {
         val measuredWidth = atomicSpan.measuredWidth.toFloat()
         if (measuredWidth <= 0f) return null
+        val bounds = inlineBoxSelectionBounds(start, end, line) ?: return null
+        if (textLayout.getParagraphDirection(line) >= 0) {
+            bounds.right = min(textLayout.width.toFloat(), bounds.left + measuredWidth)
+        } else {
+            bounds.left = max(0f, bounds.right - measuredWidth)
+        }
+        return bounds
+    }
+
+    private fun inlineBoxSelectionBounds(start: Int, end: Int, line: Int): RectF? {
         inlineBoxSelectionPath.reset()
         textLayout.getSelectionPath(start, end, inlineBoxSelectionPath)
         inlineBoxLineClipPath.reset()
+        val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+        val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
         inlineBoxLineClipPath.addRect(
-            0f,
+            lineLeft,
             textLayout.getLineTop(line).toFloat(),
-            textLayout.width.toFloat(),
+            lineRight,
             textLayout.getLineBottom(line).toFloat(),
             Path.Direction.CW,
         )
@@ -386,13 +397,6 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
         }
         inlineBoxSelectionPath.computeBounds(inlineBoxSelectionBounds, true)
         if (inlineBoxSelectionBounds.isEmpty) return null
-        if (textLayout.getParagraphDirection(line) >= 0) {
-            inlineBoxSelectionBounds.right =
-                min(textLayout.width.toFloat(), inlineBoxSelectionBounds.left + measuredWidth)
-        } else {
-            inlineBoxSelectionBounds.left =
-                max(0f, inlineBoxSelectionBounds.right - measuredWidth)
-        }
         return inlineBoxSelectionBounds
     }
 
