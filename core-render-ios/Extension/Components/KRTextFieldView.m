@@ -271,6 +271,15 @@ NSString *const KRVFontContextParamKey = @"contextParam";
         self.autocorrectionType = UITextAutocorrectionTypeNo;
         self.spellCheckingType = UITextSpellCheckingTypeNo;
     }
+    if (@available(iOS 11.0, *)) {
+        // Passwords are opaque credentials. UIKit smart punctuation can rewrite visually
+        // similar characters before textDidChange (for example ASCII punctuation into its
+        // typographic form), which changes the bytes ultimately verified by the server.
+        // Keep non-password fields on the UIKit default and fail closed only for passwords.
+        self.smartDashesType = isPassword ? UITextSmartDashesTypeNo : UITextSmartDashesTypeDefault;
+        self.smartQuotesType = isPassword ? UITextSmartQuotesTypeNo : UITextSmartQuotesTypeDefault;
+        self.smartInsertDeleteType = isPassword ? UITextSmartInsertDeleteTypeNo : UITextSmartInsertDeleteTypeDefault;
+    }
 }
 
 - (void)setCss_returnKeyType:(NSString *)css_returnKeyType {
