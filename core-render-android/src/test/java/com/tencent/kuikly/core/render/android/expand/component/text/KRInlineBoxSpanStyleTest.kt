@@ -7,13 +7,46 @@
 
 package com.tencent.kuikly.core.render.android.expand.component.text
 
+import android.util.SizeF
+import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class KRInlineBoxSpanStyleTest {
+
+    @Test
+    fun inlineBoxGroupLineStartReadsTheRichTextBuilderReceiver() {
+        assertEquals(true, "".isInlineBoxGroupAtLineStart())
+        assertEquals(true, "prefix\n".isInlineBoxGroupAtLineStart())
+        assertEquals(false, "prefix".isInlineBoxGroupAtLineStart())
+    }
+
+    @Test
+    fun twoChildInlineBoxBuildDoesNotReadPastAnEmptyRichTextBuilder() {
+        val children = JSONArray()
+            .put(JSONObject().put(KRTextProps.PROP_KEY_TEXT, "first"))
+            // Still runs parseSpanProps after the first child has entered buildList, which is
+            // the exact receiver-shadowing state, while keeping the successful path atomic.
+            .put(JSONObject().put(KRTextProps.PROP_KEY_TEXT, ""))
+        val group = JSONObject()
+            .put(InlineBoxGroupSpanProps.PROP_KEY_CHILDREN, children)
+            .put("inlineBoxBorderWidth", 0)
+        val textProps = KRTextProps(null).apply {
+            values = JSONArray().put(group)
+        }
+
+        val result = KRRichTextBuilder(null).build(textProps, mutableListOf()) { SizeF(0f, 0f) }
+
+        assertNotNull(result)
+        assertEquals("first", result.toString())
+    }
 
     @Test
     fun absentStyleDoesNotCreateRendererDecoration() {
