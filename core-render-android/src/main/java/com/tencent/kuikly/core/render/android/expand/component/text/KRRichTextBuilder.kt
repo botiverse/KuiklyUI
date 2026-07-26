@@ -72,6 +72,9 @@ private const val SLOCK_INLINE_CODE_LONG_RUN_THRESHOLD = 16
 internal const val INLINE_BOX_LAYOUT_JOINER = '\u2060'
 private const val INLINE_BOX_LAYOUT_EDGE = '\uFFFC'
 
+internal fun CharSequence.isInlineBoxGroupAtLineStart(): Boolean =
+    isEmpty() || this[lastIndex] == '\n'
+
 /**
  * 富文本构造器
  */
@@ -307,7 +310,10 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 val childProps = parseSpanProps(
                     childValue,
                     defaultTextProps,
-                    isStart = isEmpty() || this@appendInlineBoxGroup[lastIndex] == '\n',
+                    // buildList adds a List receiver here. Using its isEmpty()/lastIndex
+                    // against the SpannableStringBuilder crashes when the group already has a
+                    // child but the rich-text builder is still empty (charAt(0) on length 0).
+                    isStart = this@appendInlineBoxGroup.isInlineBoxGroupAtLineStart(),
                 )
                 if (childProps.text.isNotEmpty()) add(childIndex to childProps)
             }
