@@ -32,11 +32,12 @@ import com.tencent.kuikly.core.base.attr.AccessibilityRole
  * 主要功能：
  * 1. 监听并处理 Compose 语义树的变更，自动为节点设置合适的无障碍文本和角色。
  * 2. 感知 stateDescription 的新增、变化和消失，并提供回调接口供业务自定义处理。
- * 3. 内部维护节点 stateDescription 的缓存，支持外部主动清理缓存，防止内存泄漏。
+ * 3. 内部维护节点 stateDescription 和原生语义状态，支持节点卸载与主动清理，防止内存泄漏。
  */
 class KuiklySemantisHandler {
 
     private val lastStateDescriptionMap = mutableMapOf<Int, String?>()
+    private val nativeSemanticsNodes = NativeSemanticsNodeRegistry<KNode<*>>()
 
     /**
      * 语义树变更回调，自动为节点设置无障碍文本和角色，并感知 stateDescription 变化。
@@ -45,6 +46,7 @@ class KuiklySemantisHandler {
     fun onSemanticsChange(semanticsOwner: SemanticsOwner) {
         val allNodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = true)
         val currentNodeIds = mutableSetOf<Int>()
+        val currentNativeNodes = mutableMapOf<Int, KNode<*>>()
         allNodes.forEach { node ->
             val config = node.config
             val role = config.getOrNull(SemanticsProperties.Role)
@@ -55,6 +57,7 @@ class KuiklySemantisHandler {
             val isClickable = config.getOrNull(SemanticsActions.OnClick) != null
             val isLongClickable = config.getOrNull(SemanticsActions.OnLongClick) != null
             (node.layoutNode as? KNode<*>)?.run {
+                currentNativeNodes[nodeId] = this
                 val accessibility = buildAccessibilityText(node.config)
                 if (accessibility != "") {
                     view.getViewAttr().accessibility(accessibility)
@@ -82,6 +85,7 @@ class KuiklySemantisHandler {
                 lastStateDescriptionMap[nodeId] = stateDescription
             }
         }
+        nativeSemanticsNodes.reconcile(currentNativeNodes).forEach(::clearNativeSemantics)
         val removedIds = lastStateDescriptionMap.keys - currentNodeIds
         for (removedId in removedIds) {
             val lastDesc = lastStateDescriptionMap[removedId]
@@ -176,8 +180,39 @@ class KuiklySemantisHandler {
         return kuiklyAccRole
     }
 
-    fun clearCache() {
-        lastStateDescriptionMap.clear()
+    private fun clearNativeSemantics(node: KNode<*>) {
+        node.view.getViewAttr().apply {
+            accessibility("")
+            accessibilityRole(AccessibilityRole.NONE)
+            accessibilityInfo(false, false)
+        }
     }
 
+    fun onNodeDetached(nodeId: Int) {
+        lastStateDescriptionMap.remove(nodeId)
+        nativeSemanticsNodes.remove(nodeId)
+    }
+
+    fun clearCache() {
+        lastStateDescriptionMap.clear()
+        nativeSemanticsNodes.clear()
+    }
+}
+
+internal class NativeSemanticsNodeRegistry<T : Any> {
+    private val nodes = mutableMapOf<Int, T>()
+
+    fun reconcile(current: Map<Int, T>): List<T> {
+        val removed = nodes.mapNotNull { (id, previousNode) ->
+            val currentNode = current[id]
+            previousNode.takeIf { currentNode == null || currentNode !== previousNode }
+        }
+        nodes.clear()
+        nodes.putAll(current)
+        return removed
+    }
+
+    fun clear(): List<T> = nodes.values.toList().also { nodes.clear() }
+
+    fun remove(id: Int): T? = nodes.remove(id)
 }
