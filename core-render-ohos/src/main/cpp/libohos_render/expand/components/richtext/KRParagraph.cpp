@@ -328,7 +328,8 @@ void KRParagraph::AddSpanToStyledString(const KRRenderValue::Map &spanMap, ArkUI
             OH_Drawing_SetTextStyleDecorationColor(txtStyle, textDecorationColor);
         }
         if (textDecorationThickness > 0 && fontSize > 0) {
-            OH_Drawing_SetTextStyleDecorationThicknessScale(txtStyle, textDecorationThickness * dpi / fontSize);
+            OH_Drawing_SetTextStyleDecorationThicknessScale(
+                txtStyle, kuikly::util::ConvertToTextDecorationThicknessScale(textDecorationThickness * dpi, fontSize));
         }
     }
     OH_Drawing_SetTextStyleFontStyle(txtStyle, fontStyle);
