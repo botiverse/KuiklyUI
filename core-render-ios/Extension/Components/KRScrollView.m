@@ -53,6 +53,8 @@ static void KRLogDroppedScrollEventValue(NSString *field,
 
 /** attr is bouncesEnable  */
 @property (nonatomic, strong) NSNumber *KUIKLY_PROP(bouncesEnable);
+/** attr enables UIScrollViewKeyboardDismissModeInteractive on iOS */
+@property (nonatomic, strong) NSNumber *KUIKLY_PROP(keyboardDismissModeInteractiveIOS);
 /** attr is pagingEnabled  */
 @property (nonatomic, strong) NSNumber *KUIKLY_PROP(pagingEnabled);
 /** attr is isComposePager  */
@@ -548,6 +550,17 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     if (self.css_bouncesEnable != css_bouncesEnable) {
         _css_bouncesEnable = css_bouncesEnable;
         self.bounces = _css_bouncesEnable ? [css_bouncesEnable boolValue] : YES;
+    }
+}
+
+- (void)setCss_keyboardDismissModeInteractiveIOS:(NSNumber *)css_keyboardDismissModeInteractiveIOS {
+    if (self.css_keyboardDismissModeInteractiveIOS != css_keyboardDismissModeInteractiveIOS) {
+        _css_keyboardDismissModeInteractiveIOS = css_keyboardDismissModeInteractiveIOS;
+        #if !TARGET_OS_OSX // [macOS]
+        self.keyboardDismissMode = [css_keyboardDismissModeInteractiveIOS boolValue]
+            ? UIScrollViewKeyboardDismissModeInteractive
+            : UIScrollViewKeyboardDismissModeNone;
+        #endif // [macOS]
     }
 }
 
