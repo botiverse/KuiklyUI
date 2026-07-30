@@ -15,6 +15,7 @@
 
 package com.tencent.kuikly.compose.extension
 
+import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.node.KNode
 import com.tencent.kuikly.compose.ui.semantics.Role
 import com.tencent.kuikly.compose.ui.semantics.SemanticsActions
@@ -43,6 +44,7 @@ class KuiklySemantisHandler {
      * 语义树变更回调，自动为节点设置无障碍文本和角色，并感知 stateDescription 变化。
      * @param semanticsOwner 当前 Compose 语义树的 owner
      */
+    @OptIn(ExperimentalComposeUiApi::class)
     fun onSemanticsChange(semanticsOwner: SemanticsOwner) {
         val allNodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = true)
         val currentNodeIds = mutableSetOf<Int>()
@@ -50,6 +52,7 @@ class KuiklySemantisHandler {
         allNodes.forEach { node ->
             val config = node.config
             val role = config.getOrNull(SemanticsProperties.Role)
+            val isInvisibleToUser = config.getOrNull(SemanticsProperties.InvisibleToUser) != null
             val stateDescription = config.getOrNull(SemanticsProperties.StateDescription)
             val nodeId = node.id
             currentNodeIds.add(nodeId)
@@ -59,14 +62,11 @@ class KuiklySemantisHandler {
             (node.layoutNode as? KNode<*>)?.run {
                 currentNativeNodes[nodeId] = this
                 val accessibility = buildAccessibilityText(node.config)
-                if (accessibility != "") {
-                    view.getViewAttr().accessibility(accessibility)
-                    val kuiklyAccRole = convertComposeRoleToKuiklyRole(role)
-                    view.getViewAttr().accessibilityRole(kuiklyAccRole)
-                }
-                if (isClickable || isLongClickable) {
-                    view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
-                }
+                view.getViewAttr().accessibility(accessibility)
+                view.getViewAttr().accessibilityRole(
+                    resolveNativeAccessibilityRole(isInvisibleToUser, accessibility.isNotEmpty(), role)
+                )
+                view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
 
                 val testTag = config.getOrNull(SemanticsProperties.TestTag)
                 if (testTag != null) {
@@ -168,18 +168,6 @@ class KuiklySemantisHandler {
         return textBuilder.toString()
     }
 
-    private fun convertComposeRoleToKuiklyRole(role: Role?): AccessibilityRole {
-        val kuiklyAccRole = when (role) {
-            Role.Image -> AccessibilityRole.IMAGE
-            Role.Checkbox -> AccessibilityRole.CHECKBOX
-            Role.Switch -> AccessibilityRole.TEXT
-            Role.Button -> AccessibilityRole.BUTTON
-            Role.RadioButton -> AccessibilityRole.CHECKBOX
-            else -> AccessibilityRole.TEXT
-        }
-        return kuiklyAccRole
-    }
-
     private fun clearNativeSemantics(node: KNode<*>) {
         node.view.getViewAttr().apply {
             accessibility("")
@@ -197,6 +185,20 @@ class KuiklySemantisHandler {
         lastStateDescriptionMap.clear()
         nativeSemanticsNodes.clear()
     }
+}
+
+internal fun resolveNativeAccessibilityRole(
+    isInvisibleToUser: Boolean,
+    hasAccessibilityText: Boolean,
+    role: Role?
+): AccessibilityRole = when {
+    isInvisibleToUser -> AccessibilityRole.HIDDEN
+    !hasAccessibilityText && role == null -> AccessibilityRole.NONE
+    role == Role.Image -> AccessibilityRole.IMAGE
+    role == Role.Checkbox -> AccessibilityRole.CHECKBOX
+    role == Role.Button -> AccessibilityRole.BUTTON
+    role == Role.RadioButton -> AccessibilityRole.CHECKBOX
+    else -> AccessibilityRole.TEXT
 }
 
 internal class NativeSemanticsNodeRegistry<T : Any> {

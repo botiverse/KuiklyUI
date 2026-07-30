@@ -804,6 +804,7 @@ fun View.clearViewData() {
 fun String?.toJSONObjectSafely(): JSONObject = JSONObject(this ?: "{}")
 
 private const val ROLE_NONE = "none"
+private const val ROLE_HIDDEN = "hidden"
 private fun View.setAccessibilityRole(propValue: Any) {
     val value = when (propValue as String) {
         "button" -> Button::class.java.name
@@ -812,6 +813,7 @@ private fun View.setAccessibilityRole(propValue: Any) {
         "image" -> ImageView::class.java.name
         "checkbox" -> CheckBox::class.java.name
         "none" -> ROLE_NONE
+        "hidden" -> ROLE_HIDDEN
         else -> ""
     }
     putViewData(KRCssConst.ACCESSIBILITY_ROLE, value)
@@ -832,14 +834,19 @@ private fun View.setAccessibilityInfo(propValue: Any) {
 }
 
 private fun View.setAccessibilityImportance(description: String, role: String) {
-    importantForAccessibility = if (role == ROLE_NONE) {
+    importantForAccessibility = resolveAccessibilityImportance(description, role)
+}
+
+internal fun resolveAccessibilityImportance(description: String, role: String): Int =
+    if (role == ROLE_HIDDEN) {
+        View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    } else if (role == ROLE_NONE) {
         View.IMPORTANT_FOR_ACCESSIBILITY_NO
     } else if (description.isEmpty()) {
         View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
     } else {
         View.IMPORTANT_FOR_ACCESSIBILITY_YES
     }
-}
 
 private fun View.resetAccessibilityImportance() {
     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
