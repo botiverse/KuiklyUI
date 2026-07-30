@@ -16,7 +16,9 @@
 #import "KRTextAreaView.h"
 #import "KRComponentDefine.h"
 #import "KRConvertUtil.h"
+#import "KRLogModule.h"
 #import "KRRichTextView.h"
+#import "KRTextInputEventSequencer.h"
 #import "KuiklyRenderBridge.h"
 #import "KuiklyRenderView.h"
 #import "NSObject+KR.h"
@@ -105,6 +107,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
 - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
 - (NSDictionary *)p_currentTextInputStatePayload;
+- (void)p_notifyTextChangeCallbacksWithState:(NSDictionary *)state;
+- (void)p_recordImeTextChangeWithMarkedText:(BOOL)hasMarkedText state:(NSDictionary *)state;
 #if !TARGET_OS_OSX
 - (BOOL)p_shouldForwardHardwareTabKey;
 - (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
@@ -122,6 +126,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     NSInteger _textInputSyncRevision;
     NSMutableDictionary *_props;
     BOOL _ignoreTextDidChanged;
+    KRTextInputEventSequencer *_textInputEventSequencer;
     /** 显式设置的光标颜色 */
     UIColor *_cursorColor;
     /** 显式设置的选中高亮颜色 */
@@ -158,6 +163,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
         self.textContainer.lineFragmentPadding = 0;
         self.backgroundColor = [UIColor clearColor];
         _props = [NSMutableDictionary new];
+        _textInputEventSequencer = [KRTextInputEventSequencer new];
     }
     return self;
 }
@@ -197,6 +203,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     NSString *lastText = self.text ?: @"";
     NSString *newText = css_text ?: @"";
     if (![lastText isEqualToString:newText]) {
+        [_textInputEventSequencer invalidatePendingMarkedText];
         self.text = css_text;
         [self textViewDidChange:self];
         [self updateLineHeightIfApplicable];
@@ -242,6 +249,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 - (void)setCss_values:(NSString *)css_values {
     if (_css_values != css_values) {
+        [_textInputEventSequencer invalidatePendingMarkedText];
         _css_values = css_values;
         if (_css_values.length) {
             KRRichTextShadow *textShadow = [KRRichTextShadow new];
@@ -428,6 +436,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     NSError *error = nil;
     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
     if (!json) return;
+    [_textInputEventSequencer invalidatePendingMarkedText];
     if (json[@"syncRevision"] != nil) {
         _textInputSyncRevision = [json[@"syncRevision"] integerValue];
     }
@@ -525,6 +534,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 - (void)css_setText:(NSDictionary *)args {
     NSString *text = args[KRC_PARAM_KEY];
+    [_textInputEventSequencer invalidatePendingMarkedText];
     self.text = text;
     [self textViewDidChange:self];
 }
@@ -785,18 +795,14 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     [self p_updatePlaceholder];
     // 如果有拼音输入，根据配置决定是否触发回调
     if (textView.markedTextRange) {
+        NSDictionary *state = [self p_currentTextInputStatePayload];
+        [self p_recordImeTextChangeWithMarkedText:YES state:state];
         BOOL enablePinyinCallback = [self.css_enablePinyinCallback boolValue];
         if (enablePinyinCallback) {
             // Complete editing state must lead the legacy text callback. Compose then preserves
             // the marked range and pairs/drops the legacy echo instead of hoisting a null
             // composition back into the controlled TextFieldValue.
-            if (self.css_textInputStateChange) {
-                self.css_textInputStateChange([self p_currentTextInputStatePayload]);
-            }
-            if (self.css_textDidChange) {
-                NSString *text = [self p_outputText].copy ?: @"";
-                self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text]), @"syncRevision": @(_textInputSyncRevision)});
-            }
+            [self p_notifyTextChangeCallbacksWithState:state];
         }
         return;
     }
@@ -804,14 +810,15 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     // 实时应用 textPostProcessor（emoji attachment）
     [self p_applyTextPostProcessorIfNeed];
 
-    if (self.css_textDidChange) {
-        NSString *text = [self p_outputText].copy ?: @"";
-        self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text]), @"syncRevision": @(_textInputSyncRevision)});
-    }
-
-    if (self.css_textInputStateChange) {
-        self.css_textInputStateChange([self p_currentTextInputStatePayload]);
-    }
+    NSDictionary *state = [self p_currentTextInputStatePayload];
+    [self p_recordImeTextChangeWithMarkedText:NO state:state];
+    // Keep the same complete-before-legacy ordering used while marked text is active. A Chinese
+    // IME candidate commit can shrink the backing store dramatically (for example 31 -> 3). If
+    // the legacy callback leads, Compose briefly observes selection=0/composition=null before the
+    // authoritative native selection arrives. Publishing one frozen native snapshot in the
+    // complete callback first lets the callback arbiter consume the following legacy echo without
+    // exposing that invalid intermediate editing state or feeding it back to UIKit.
+    [self p_notifyTextChangeCallbacksWithState:state];
 }
 
 - (void)textViewDidChangeSelection:(UITextView *)textView {
@@ -1022,6 +1029,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 
 - (void)textViewDidEndEditing:(UITextView *)textView{ // 失焦
+    [_textInputEventSequencer invalidatePendingMarkedText];
     _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
         NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
@@ -1545,6 +1553,34 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
         @"syncRevision": @(_textInputSyncRevision),
         @"length": @([self p_calculateLengthForText:rawText])
     };
+}
+
+- (void)p_notifyTextChangeCallbacksWithState:(NSDictionary *)state {
+    [_textInputEventSequencer notifyState:state
+                         completeCallback:self.css_textInputStateChange
+                           legacyCallback:self.css_textDidChange];
+}
+
+- (void)p_recordImeTextChangeWithMarkedText:(BOOL)hasMarkedText state:(NSDictionary *)state {
+    NSString *rawText = state[@"text"] ?: @"";
+    NSDictionary *diagnostic = [_textInputEventSequencer recordRawTextLength:rawText.length
+                                                               hasMarkedText:hasMarkedText];
+    if (!diagnostic) {
+        return;
+    }
+
+    // Keep this diagnostic sparse and content-free. The sequencer only returns metadata for a
+    // large contraction inside one uninterrupted native edit session; blur or controlled text
+    // mutation invalidates the pending marked observation.
+    [KRLogModule logInfo:[NSString stringWithFormat:
+        @"[KRTextAreaView] ime_commit_large_shrink generation=%lu markedLength=%lu committedLength=%lu storageLength=%lu selectionStart=%lu selectionEnd=%lu firstResponder=%@",
+        (unsigned long)[diagnostic[@"generation"] unsignedIntegerValue],
+        (unsigned long)[diagnostic[@"markedLength"] unsignedIntegerValue],
+        (unsigned long)[diagnostic[@"committedLength"] unsignedIntegerValue],
+        (unsigned long)self.textStorage.length,
+        (unsigned long)[state[@"selectionStart"] unsignedIntegerValue],
+        (unsigned long)[state[@"selectionEnd"] unsignedIntegerValue],
+        self.isFirstResponder ? @"true" : @"false"]];
 }
 
 - (NSRange)p_getOutputRangeWithInputRange:(NSRange)inputRange {
