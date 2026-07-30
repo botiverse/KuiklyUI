@@ -824,9 +824,18 @@ private fun View.setAccessibilityRole(propValue: Any) {
 private fun View.setTestTag(propValue: Any) {
     val tag = propValue as String
     putViewData(KRCssConst.TEST_TAG, tag)
-    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+    importantForAccessibility = resolveTestTagAccessibilityImportance(
+        getViewData(KRCssConst.ACCESSIBILITY_ROLE)
+    )
     initAccessibilityDelegate()
 }
+
+internal fun resolveTestTagAccessibilityImportance(role: String?): Int =
+    if (role == ROLE_HIDDEN) {
+        View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    } else {
+        View.IMPORTANT_FOR_ACCESSIBILITY_YES
+    }
 
 private fun View.setAccessibilityInfo(propValue: Any) {
     putViewData(KRCssConst.ACCESSIBILITY_INFO, propValue)

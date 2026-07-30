@@ -29,6 +29,22 @@ class KRAccessibilityImportanceTest {
     }
 
     @Test
+    fun testTagDoesNotExposeAHiddenNativeSubtree() {
+        assertEquals(
+            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS,
+            resolveTestTagAccessibilityImportance(role = "hidden")
+        )
+    }
+
+    @Test
+    fun testTagRestoresAContainerAfterHiddenRoleIsCleared() {
+        assertEquals(
+            View.IMPORTANT_FOR_ACCESSIBILITY_YES,
+            resolveTestTagAccessibilityImportance(role = "none")
+        )
+    }
+
+    @Test
     fun noneRoleRestoresDescendantTraversal() {
         assertEquals(
             View.IMPORTANT_FOR_ACCESSIBILITY_NO,
