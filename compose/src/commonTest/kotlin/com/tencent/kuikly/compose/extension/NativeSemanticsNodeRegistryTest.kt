@@ -15,12 +15,38 @@
 
 package com.tencent.kuikly.compose.extension
 
+import com.tencent.kuikly.compose.ui.semantics.Role
+import com.tencent.kuikly.core.base.attr.AccessibilityRole
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class NativeSemanticsNodeRegistryTest {
+    @Test
+    fun invisibleNodeExcludesItsNativeSubtree() {
+        assertEquals(
+            AccessibilityRole.HIDDEN,
+            resolveNativeAccessibilityRole(isInvisibleToUser = true, hasAccessibilityText = false, role = null)
+        )
+    }
+
+    @Test
+    fun visibleEmptyContainerRestoresDescendantTraversal() {
+        assertEquals(
+            AccessibilityRole.NONE,
+            resolveNativeAccessibilityRole(isInvisibleToUser = false, hasAccessibilityText = false, role = null)
+        )
+    }
+
+    @Test
+    fun visibleButtonKeepsItsNativeRole() {
+        assertEquals(
+            AccessibilityRole.BUTTON,
+            resolveNativeAccessibilityRole(isInvisibleToUser = false, hasAccessibilityText = true, role = Role.Button)
+        )
+    }
+
     @Test
     fun reconcileReturnsOnlyNodesRemovedFromCurrentGeneration() {
         val registry = NativeSemanticsNodeRegistry<Any>()
