@@ -23,6 +23,12 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class NativeSemanticsNodeRegistryTest {
+    private data class ProjectionNode(
+        val name: String,
+        val hidden: Boolean = false,
+        val parent: ProjectionNode? = null
+    )
+
     @Test
     fun invisibleNodeExcludesItsNativeSubtree() {
         assertEquals(
@@ -45,6 +51,36 @@ class NativeSemanticsNodeRegistryTest {
             AccessibilityRole.BUTTON,
             resolveNativeAccessibilityRole(isInvisibleToUser = false, hasAccessibilityText = true, role = Role.Button)
         )
+    }
+
+    @Test
+    fun hiddenAncestorProjectsToEveryFlattenedNativeDescendant() {
+        val hiddenRoot = ProjectionNode(name = "content", hidden = true)
+        val navigation = ProjectionNode(name = "navigation", parent = hiddenRoot)
+        val search = ProjectionNode(name = "search", parent = navigation)
+        val drawer = ProjectionNode(name = "drawer")
+
+        val hiddenNodes = effectivelyHiddenNodes(
+            nodes = listOf(hiddenRoot, navigation, search, drawer),
+            isHidden = ProjectionNode::hidden,
+            parentOf = ProjectionNode::parent
+        )
+
+        assertEquals(setOf(hiddenRoot, navigation, search), hiddenNodes)
+    }
+
+    @Test
+    fun clearingHiddenAncestorRestoresTheProjectedSubtree() {
+        val visibleRoot = ProjectionNode(name = "content")
+        val search = ProjectionNode(name = "search", parent = visibleRoot)
+
+        val hiddenNodes = effectivelyHiddenNodes(
+            nodes = listOf(visibleRoot, search),
+            isHidden = ProjectionNode::hidden,
+            parentOf = ProjectionNode::parent
+        )
+
+        assertTrue(hiddenNodes.isEmpty())
     }
 
     @Test

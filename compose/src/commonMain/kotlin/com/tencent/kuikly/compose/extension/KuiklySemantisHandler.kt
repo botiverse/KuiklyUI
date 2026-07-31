@@ -85,6 +85,18 @@ class KuiklySemantisHandler {
                 lastStateDescriptionMap[nodeId] = stateDescription
             }
         }
+        effectivelyHiddenNodes(
+            nodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = false),
+            isHidden = { node ->
+                node.config.getOrNull(SemanticsProperties.InvisibleToUser) != null
+            },
+            parentOf = { node -> node.parent }
+        ).forEach { node ->
+            (node.layoutNode as? KNode<*>)?.run {
+                currentNativeNodes[node.id] = this
+                hideNativeSemantics(this)
+            }
+        }
         nativeSemanticsNodes.reconcile(currentNativeNodes).forEach(::clearNativeSemantics)
         val removedIds = lastStateDescriptionMap.keys - currentNodeIds
         for (removedId in removedIds) {
@@ -176,6 +188,10 @@ class KuiklySemantisHandler {
         }
     }
 
+    private fun hideNativeSemantics(node: KNode<*>) {
+        node.view.getViewAttr().accessibilityRole(AccessibilityRole.HIDDEN)
+    }
+
     fun onNodeDetached(nodeId: Int) {
         lastStateDescriptionMap.remove(nodeId)
         nativeSemanticsNodes.remove(nodeId)
@@ -217,4 +233,21 @@ internal class NativeSemanticsNodeRegistry<T : Any> {
     fun clear(): List<T> = nodes.values.toList().also { nodes.clear() }
 
     fun remove(id: Int): T? = nodes.remove(id)
+}
+
+internal fun <T : Any> effectivelyHiddenNodes(
+    nodes: List<T>,
+    isHidden: (T) -> Boolean,
+    parentOf: (T) -> T?
+): Set<T> = buildSet {
+    nodes.forEach { node ->
+        var ancestor: T? = node
+        while (ancestor != null) {
+            if (isHidden(ancestor)) {
+                add(node)
+                break
+            }
+            ancestor = parentOf(ancestor)
+        }
+    }
 }
