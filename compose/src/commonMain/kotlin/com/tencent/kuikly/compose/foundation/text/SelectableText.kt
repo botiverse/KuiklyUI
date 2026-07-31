@@ -16,17 +16,30 @@
 package com.tencent.kuikly.compose.foundation.text
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import com.tencent.kuikly.compose.extension.MakeKuiklyComposeNode
 import com.tencent.kuikly.compose.ui.Modifier
 import com.tencent.kuikly.compose.ui.graphics.Color
 import com.tencent.kuikly.compose.ui.graphics.isSpecified
+import com.tencent.kuikly.compose.ui.layout.Measurable
+import com.tencent.kuikly.compose.ui.layout.IntrinsicMeasurable
+import com.tencent.kuikly.compose.ui.layout.IntrinsicMeasureScope
+import com.tencent.kuikly.compose.ui.layout.MeasurePolicy
+import com.tencent.kuikly.compose.ui.layout.MeasureResult
+import com.tencent.kuikly.compose.ui.layout.MeasureScope
+import com.tencent.kuikly.compose.ui.node.KNode
+import com.tencent.kuikly.compose.ui.node.MeasureScopeWithLayoutNode
 import com.tencent.kuikly.compose.ui.platform.LocalDensity
 import com.tencent.kuikly.compose.ui.text.TextStyle
 import com.tencent.kuikly.compose.ui.text.style.TextAlign
+import com.tencent.kuikly.compose.ui.unit.Constraints
+import com.tencent.kuikly.compose.ui.unit.IntSize
+import com.tencent.kuikly.compose.ui.unit.constrain
 import com.tencent.kuikly.compose.ui.unit.isSpecified
 import com.tencent.kuikly.core.views.SelectableTextAttr
 import com.tencent.kuikly.core.views.SelectableTextView
 import com.tencent.kuikly.core.views.TextConst
+import kotlin.math.ceil
 
 /**
  * System-selectable plain text.
@@ -56,9 +69,18 @@ fun SelectableText(
     style: TextStyle = TextStyle.Default,
 ) {
     val density = LocalDensity.current
+    // Lazy containers measure items with an unbounded main axis. The generic
+    // Kuikly node policy lays out at constraints.maxHeight directly, which is
+    // Constraints.Infinity for a vertical LazyColumn. Measure this text-backed
+    // native node through its TextShadow instead so the Compose node receives
+    // the finite content height that the native view will render at.
+    val measurePolicy = remember(text, style, density.density) {
+        selectableTextMeasurePolicy()
+    }
     MakeKuiklyComposeNode<SelectableTextView>(
         factory = { SelectableTextView() },
         modifier = modifier,
+        measurePolicy = measurePolicy,
         viewUpdate = { view ->
             view.getViewAttr().run {
                 text(text)
@@ -68,6 +90,135 @@ fun SelectableText(
         }
     )
 }
+
+private const val SELECTABLE_TEXT_UNBOUNDED_WIDTH = 100000f
+private const val SELECTABLE_TEXT_UNBOUNDED_HEIGHT = -1f
+
+internal fun selectableTextShadowConstraint(
+    maxDimension: Int,
+    pagerDensity: Float,
+    unboundedValue: Float,
+): Float =
+    if (maxDimension == Constraints.Infinity) {
+        unboundedValue
+    } else {
+        maxDimension.toFloat() / pagerDensity
+    }
+
+internal fun selectableTextMeasuredSize(
+    constraints: Constraints,
+    measuredWidth: Float,
+    measuredHeight: Float,
+    pagerDensity: Float,
+): IntSize =
+    constraints.constrain(
+        IntSize(
+            width = ceil(measuredWidth * pagerDensity).toInt(),
+            height = ceil(measuredHeight * pagerDensity).toInt(),
+        )
+    )
+
+internal fun selectableTextViewForMeasure(scope: IntrinsicMeasureScope): SelectableTextView {
+    val layoutNode =
+        (scope as? MeasureScopeWithLayoutNode)?.layoutNode
+            ?: error("SelectableText measure scope must expose its layout node")
+    return ((layoutNode as? KNode<*>)?.view as? SelectableTextView)
+        ?: error("SelectableText measure policy must run on a SelectableText KNode")
+}
+
+internal fun selectableTextMeasurePolicy(
+    pagerDensity: (SelectableTextView) -> Float = { it.getPager().pagerDensity() },
+): MeasurePolicy =
+    object : MeasurePolicy {
+        private val placementBlock: com.tencent.kuikly.compose.ui.layout.Placeable.PlacementScope.() -> Unit = {}
+
+        override fun MeasureScope.measure(
+            measurables: List<Measurable>,
+            constraints: Constraints,
+        ): MeasureResult {
+            check(measurables.isEmpty()) { "SelectableText must remain a leaf native node" }
+            // Resolve the native view from the KNode that Compose is actually
+            // measuring. A ReusableComposeNode may retain its KNode while
+            // ordinary remember caches are recreated for replacement content.
+            val view = selectableTextViewForMeasure(this)
+            val pagerDensity = pagerDensity(view)
+            val measured =
+                view.calculateContentSize(
+                    maxWidth =
+                        selectableTextShadowConstraint(
+                            maxDimension = constraints.maxWidth,
+                            pagerDensity = pagerDensity,
+                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_WIDTH,
+                        ),
+                    maxHeight =
+                        selectableTextShadowConstraint(
+                            maxDimension = constraints.maxHeight,
+                            pagerDensity = pagerDensity,
+                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_HEIGHT,
+                        ),
+                )
+            val size =
+                selectableTextMeasuredSize(
+                    constraints = constraints,
+                    measuredWidth = measured?.width ?: 0f,
+                    measuredHeight = measured?.height ?: 0f,
+                    pagerDensity = pagerDensity,
+                )
+            return layout(size.width, size.height, placementBlock = placementBlock)
+        }
+
+        override fun IntrinsicMeasureScope.minIntrinsicWidth(
+            measurables: List<IntrinsicMeasurable>,
+            height: Int,
+        ): Int = intrinsicSize(measurables, Constraints.Infinity, height).width
+
+        override fun IntrinsicMeasureScope.maxIntrinsicWidth(
+            measurables: List<IntrinsicMeasurable>,
+            height: Int,
+        ): Int = intrinsicSize(measurables, Constraints.Infinity, height).width
+
+        override fun IntrinsicMeasureScope.minIntrinsicHeight(
+            measurables: List<IntrinsicMeasurable>,
+            width: Int,
+        ): Int = intrinsicSize(measurables, width, Constraints.Infinity).height
+
+        override fun IntrinsicMeasureScope.maxIntrinsicHeight(
+            measurables: List<IntrinsicMeasurable>,
+            width: Int,
+        ): Int = intrinsicSize(measurables, width, Constraints.Infinity).height
+
+        private fun IntrinsicMeasureScope.intrinsicSize(
+            measurables: List<IntrinsicMeasurable>,
+            maxWidth: Int,
+            maxHeight: Int,
+        ): IntSize {
+            check(measurables.isEmpty()) { "SelectableText must remain a leaf native node" }
+            // Unlike MeasurePolicy's default intrinsic implementation, this
+            // keeps the original coordinator receiver, which exposes the
+            // actual KNode instead of wrapping it in IntrinsicsMeasureScope.
+            val view = selectableTextViewForMeasure(this)
+            val density = pagerDensity(view)
+            val measured =
+                view.calculateContentSize(
+                    maxWidth =
+                        selectableTextShadowConstraint(
+                            maxDimension = maxWidth,
+                            pagerDensity = density,
+                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_WIDTH,
+                        ),
+                    maxHeight =
+                        selectableTextShadowConstraint(
+                            maxDimension = maxHeight,
+                            pagerDensity = density,
+                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_HEIGHT,
+                        ),
+                )
+            return IntSize(
+                width = ceil((measured?.width ?: 0f) * density).toInt().coerceAtLeast(0),
+                height = ceil((measured?.height ?: 0f) * density).toInt().coerceAtLeast(0),
+            )
+        }
+    }
 
 /**
  * The resolved native prop values for a [SelectableText] style. Kept as plain
