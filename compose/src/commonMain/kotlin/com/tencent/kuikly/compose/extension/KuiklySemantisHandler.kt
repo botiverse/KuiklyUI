@@ -85,12 +85,20 @@ class KuiklySemantisHandler {
                 lastStateDescriptionMap[nodeId] = stateDescription
             }
         }
-        effectivelyHiddenNodes(
-            nodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = false),
-            isHidden = { node ->
+        val unmergedNodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = false)
+        val hiddenLayoutNodes = unmergedNodes
+            .filter { node ->
                 node.config.getOrNull(SemanticsProperties.InvisibleToUser) != null
-            },
-            parentOf = { node -> node.parent }
+            }
+            .mapTo(mutableSetOf()) { node -> node.layoutNode }
+        // Semantic parent links can stop at merge/clear boundaries while the flattened native
+        // views remain descendants in the LayoutNode tree. Project hidden state through that
+        // stable ancestry so every native accessibility candidate is covered.
+        effectivelyHiddenNodes(
+            nodes = (allNodes + unmergedNodes).distinctBy(SemanticsNode::id),
+            firstAncestor = { node -> node.layoutNode },
+            isHidden = hiddenLayoutNodes::contains,
+            parentOf = { layoutNode -> layoutNode.parent }
         ).forEach { node ->
             (node.layoutNode as? KNode<*>)?.run {
                 currentNativeNodes[node.id] = this
@@ -239,9 +247,21 @@ internal fun <T : Any> effectivelyHiddenNodes(
     nodes: List<T>,
     isHidden: (T) -> Boolean,
     parentOf: (T) -> T?
+): Set<T> = effectivelyHiddenNodes(
+    nodes = nodes,
+    firstAncestor = { node -> node },
+    isHidden = isHidden,
+    parentOf = parentOf
+)
+
+internal fun <T : Any, A : Any> effectivelyHiddenNodes(
+    nodes: List<T>,
+    firstAncestor: (T) -> A,
+    isHidden: (A) -> Boolean,
+    parentOf: (A) -> A?
 ): Set<T> = buildSet {
     nodes.forEach { node ->
-        var ancestor: T? = node
+        var ancestor: A? = firstAncestor(node)
         while (ancestor != null) {
             if (isHidden(ancestor)) {
                 add(node)

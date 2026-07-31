@@ -882,6 +882,10 @@ private fun View.initAccessibilityDelegate() {
             if (name != null) {
                 info.className = name
             }
+            if (name == ROLE_HIDDEN) {
+                configureHiddenAccessibilityNodeInfo(info)
+                return
+            }
 
             getViewData<String>(KRCssConst.ACCESSIBILITY_INFO)?.apply {
                 val flags = (this as String).split(" ")
@@ -921,6 +925,27 @@ private fun View.initAccessibilityDelegate() {
 
     }
     putViewData(KRCssConst.HAD_INIT_ACCESSIBILITY_DELEGATE, true)
+}
+
+internal fun configureHiddenAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+    info.isVisibleToUser = false
+    info.isFocusable = false
+    info.isFocused = false
+    info.isAccessibilityFocused = false
+    info.isClickable = false
+    info.isLongClickable = false
+    info.isEditable = false
+    info.isCheckable = false
+    info.isChecked = false
+    info.isSelected = false
+    info.text = null
+    info.contentDescription = null
+    info.removeAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    info.removeAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+    info.removeAction(AccessibilityNodeInfo.ACTION_CLICK)
+    info.removeAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+    info.removeAction(AccessibilityNodeInfo.ACTION_SET_SELECTION)
+    info.removeAction(AccessibilityNodeInfo.ACTION_SET_TEXT)
 }
 
 internal fun View.hasDebugName(): Boolean {

@@ -16,9 +16,17 @@
 package com.tencent.kuikly.core.render.android.css.ktx
 
 import android.view.View
+import android.view.accessibility.AccessibilityNodeInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [28])
 class KRAccessibilityImportanceTest {
     @Test
     fun hiddenRoleExcludesTheEntireNativeSubtree() {
@@ -58,6 +66,31 @@ class KRAccessibilityImportanceTest {
             View.IMPORTANT_FOR_ACCESSIBILITY_YES,
             resolveAccessibilityImportance(description = "Search", role = TextViewRole)
         )
+    }
+
+    @Test
+    fun hiddenNodeInfoExposesNoFocusableOrActionableSemantics() {
+        val info = AccessibilityNodeInfo.obtain().apply {
+            isVisibleToUser = true
+            isFocusable = true
+            isClickable = true
+            isLongClickable = true
+            text = "Search"
+            contentDescription = "Search"
+            addAction(AccessibilityNodeInfo.ACTION_CLICK)
+            addAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+        }
+
+        configureHiddenAccessibilityNodeInfo(info)
+
+        assertFalse(info.isVisibleToUser)
+        assertFalse(info.isFocusable)
+        assertFalse(info.isClickable)
+        assertFalse(info.isLongClickable)
+        assertNull(info.text)
+        assertNull(info.contentDescription)
+        assertEquals(0, info.actions and AccessibilityNodeInfo.ACTION_CLICK)
+        assertEquals(0, info.actions and AccessibilityNodeInfo.ACTION_LONG_CLICK)
     }
 
     private companion object {
