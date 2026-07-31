@@ -429,6 +429,9 @@ open class KuiklyRenderViewBaseDelegator(private val delegate: KuiklyRenderViewB
             renderViewExport(KRTextAreaView.VIEW_NAME, { context ->
                 KRTextAreaView(context, delegate.softInputMode())
             })
+            renderViewExport(KRSelectableTextView.VIEW_NAME, { context ->
+                KRSelectableTextView(context)
+            })
             renderViewExport(KRCanvasView.VIEW_NAME, { context ->
                 KRCanvasView(context)
             })
