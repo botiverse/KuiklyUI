@@ -21,6 +21,7 @@ import com.tencent.kuikly.compose.extension.MakeKuiklyComposeNode
 import com.tencent.kuikly.compose.ui.Modifier
 import com.tencent.kuikly.compose.ui.graphics.Color
 import com.tencent.kuikly.compose.ui.graphics.isSpecified
+import com.tencent.kuikly.compose.ui.input.pointer.nativeDispatchRelease
 import com.tencent.kuikly.compose.ui.layout.Measurable
 import com.tencent.kuikly.compose.ui.layout.IntrinsicMeasurable
 import com.tencent.kuikly.compose.ui.layout.IntrinsicMeasureScope
@@ -79,7 +80,11 @@ fun SelectableText(
     }
     MakeKuiklyComposeNode<SelectableTextView>(
         factory = { SelectableTextView() },
-        modifier = modifier,
+        // The system selection gesture lives in the native view. Release this
+        // region from any ancestor native-dispatch capture (overlay barriers)
+        // so the native text view keeps receiving MotionEvents; the release is
+        // branch-scoped, so barriers still block click-through elsewhere.
+        modifier = modifier.nativeDispatchRelease(),
         measurePolicy = measurePolicy,
         viewUpdate = { view ->
             view.getViewAttr().run {

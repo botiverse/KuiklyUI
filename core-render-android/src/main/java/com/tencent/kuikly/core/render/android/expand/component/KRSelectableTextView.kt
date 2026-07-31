@@ -21,7 +21,9 @@ import android.text.Spannable
 import android.text.SpannableString
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.TextView
+import com.tencent.kuikly.core.render.android.const.KRCssConst
 import com.tencent.kuikly.core.render.android.css.ktx.spToPxI
 import com.tencent.kuikly.core.render.android.css.ktx.toColor
 import com.tencent.kuikly.core.render.android.css.ktx.toPxF
@@ -95,7 +97,32 @@ class KRSelectableTextView(context: Context) : TextView(context), IKuiklyRenderV
                 applyLineHeight()
                 true
             }
+            // View capability: this surface's clickable/long-clickable a11y
+            // truth comes from the system TextView selection semantics. The
+            // compose semantics bridge derives its boolean mask from compose
+            // click semantics (absent here) and would report the view as not
+            // long-clickable, breaking a11y ACTION_LONG_CLICK and automation
+            // readouts. Decline only this mask; every other a11y prop (role,
+            // testTag, plain text, state description) still applies normally.
+            KRCssConst.ACCESSIBILITY_INFO -> true
             else -> super.setProp(propKey, propValue)
+        }
+    }
+
+    /**
+     * Final-layer accessibility truth: whatever delegates or masked props ran
+     * upstream, the exposed node info derives clickable/long-clickable from
+     * the real view flags and advertises the system selection actions.
+     */
+    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        info.isClickable = isClickable
+        info.isLongClickable = isLongClickable
+        if (isLongClickable) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
+        }
+        if (isTextSelectable) {
+            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION)
         }
     }
 
