@@ -153,6 +153,16 @@ open class SelectableTextView : DeclarativeBaseView<SelectableTextAttr, Event>()
         measureOutput.height = outHeight
     }
 
+    /**
+     * Measures the native selectable text through the same [TextShadow] used
+     * by the core flex path. Compose wrappers call this when their parent uses
+     * an unbounded main-axis constraint (for example a vertical LazyColumn),
+     * where the generic native-node measure policy cannot use maxHeight as an
+     * actual layout dimension.
+     */
+    open fun calculateContentSize(maxWidth: Float, maxHeight: Float) =
+        shadow?.calculateRenderViewSize(maxWidth, maxHeight)
+
     private fun FlexNode.stretchWidth(): Boolean {
         if (positionType != FlexPositionType.RELATIVE) {
             return false

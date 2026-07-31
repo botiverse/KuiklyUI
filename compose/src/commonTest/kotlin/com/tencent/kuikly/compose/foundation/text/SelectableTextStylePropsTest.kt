@@ -16,14 +16,26 @@
 package com.tencent.kuikly.compose.foundation.text
 
 import com.tencent.kuikly.compose.ui.graphics.Color
+import com.tencent.kuikly.compose.ui.layout.MeasureScope
+import com.tencent.kuikly.compose.ui.node.KNode
+import com.tencent.kuikly.compose.ui.node.LayoutNode
+import com.tencent.kuikly.compose.ui.node.MeasureScopeWithLayoutNode
 import com.tencent.kuikly.compose.ui.text.TextStyle
 import com.tencent.kuikly.compose.ui.text.font.FontWeight
 import com.tencent.kuikly.compose.ui.text.style.TextAlign
+import com.tencent.kuikly.compose.ui.unit.Constraints
+import com.tencent.kuikly.compose.ui.unit.Density
+import com.tencent.kuikly.compose.ui.unit.IntSize
+import com.tencent.kuikly.compose.ui.unit.LayoutDirection
 import com.tencent.kuikly.compose.ui.unit.sp
+import com.tencent.kuikly.core.base.Size
 import com.tencent.kuikly.core.views.SelectableTextAttr
+import com.tencent.kuikly.core.views.SelectableTextView
 import com.tencent.kuikly.core.views.TextConst
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
+import kotlin.test.assertSame
 
 /**
  * The resolver is the contract between Compose style values and the native
@@ -33,6 +45,138 @@ import kotlin.test.assertEquals
  * mapping and the reset-on-reuse behavior.
  */
 class SelectableTextStylePropsTest {
+
+    @Test
+    fun reusableNodeMeasuresTheActualKNodeViewAfterTextAndStyleChange() {
+        val actualView = RecordingSelectableTextView()
+        val detachedRememberedView = RecordingSelectableTextView()
+        val scope = TestMeasureScope(KNode(actualView))
+        val constraints = Constraints(
+            minWidth = 636,
+            maxWidth = 636,
+            minHeight = 0,
+            maxHeight = Constraints.Infinity,
+        )
+        val policy = selectableTextMeasurePolicy { measuredView ->
+            assertSame(actualView, measuredView)
+            3f
+        }
+
+        actualView.getViewAttr().text("A")
+        resolveSelectableTextStyleProps(
+            TextStyle(color = Color.Red, fontSize = 20.sp),
+            densityScale = 1f,
+        ).applyTo(actualView.getViewAttr())
+        actualView.nextHeight = 24f
+        val first = with(policy) { scope.measure(emptyList(), constraints) }
+        assertEquals(72, first.height)
+
+        // Model a Lazy reusable slot retaining this KNode while an ordinary
+        // remembered object is recreated for the replacement content.
+        actualView.getViewAttr().text("B")
+        resolveSelectableTextStyleProps(TextStyle.Default, densityScale = 1f)
+            .applyTo(actualView.getViewAttr())
+        actualView.nextHeight = 40f
+        val reused = with(policy) { scope.measure(emptyList(), constraints) }
+        assertEquals(120, reused.height)
+        assertEquals(2, actualView.requests.size)
+        assertEquals(0, detachedRememberedView.requests.size)
+        assertSame(actualView, selectableTextViewForMeasure(scope))
+
+        // Explicit intrinsic implementations must keep the original node-aware
+        // receiver instead of re-entering normal measure through a wrapper that
+        // has lost MeasureScopeWithLayoutNode.
+        val intrinsicHeight = with(policy) { scope.minIntrinsicHeight(emptyList(), 636) }
+        assertEquals(120, intrinsicHeight)
+        assertEquals(212f to -1f, actualView.requests.last())
+
+        val intrinsicWidth = with(policy) { scope.maxIntrinsicWidth(emptyList(), 120) }
+        assertEquals(636, intrinsicWidth)
+        assertEquals(100000f to 40f, actualView.requests.last())
+        assertEquals(4, actualView.requests.size)
+        assertEquals(0, detachedRememberedView.requests.size)
+    }
+
+    @Test
+    fun unboundedLazyColumnHeightUsesShadowSentinelAndFiniteContentHeight() {
+        val constraints = Constraints(
+            minWidth = 636,
+            maxWidth = 636,
+            minHeight = 0,
+            maxHeight = Constraints.Infinity,
+        )
+
+        assertEquals(
+            -1f,
+            selectableTextShadowConstraint(
+                maxDimension = constraints.maxHeight,
+                pagerDensity = 3f,
+                unboundedValue = -1f,
+            )
+        )
+        val measured =
+            selectableTextMeasuredSize(
+                constraints = constraints,
+                measuredWidth = 212f,
+                measuredHeight = 24f,
+                pagerDensity = 3f,
+            )
+        assertEquals(IntSize(width = 636, height = 72), measured)
+        assertNotEquals(Constraints.Infinity, measured.height)
+    }
+
+    @Test
+    fun boundedDimensionsAreConvertedToShadowUnitsAndConstrainedBack() {
+        val constraints = Constraints(
+            minWidth = 300,
+            maxWidth = 600,
+            minHeight = 40,
+            maxHeight = 240,
+        )
+
+        assertEquals(
+            200f,
+            selectableTextShadowConstraint(
+                maxDimension = constraints.maxWidth,
+                pagerDensity = 3f,
+                unboundedValue = 100000f,
+            )
+        )
+        assertEquals(
+            80f,
+            selectableTextShadowConstraint(
+                maxDimension = constraints.maxHeight,
+                pagerDensity = 3f,
+                unboundedValue = -1f,
+            )
+        )
+        assertEquals(
+            IntSize(width = 300, height = 240),
+            selectableTextMeasuredSize(
+                constraints = constraints,
+                measuredWidth = 80f,
+                measuredHeight = 100f,
+                pagerDensity = 3f,
+            )
+        )
+    }
+
+    private class RecordingSelectableTextView : SelectableTextView() {
+        var nextWidth = 212f
+        var nextHeight = 0f
+        val requests = mutableListOf<Pair<Float, Float>>()
+
+        override fun calculateContentSize(maxWidth: Float, maxHeight: Float): Size {
+            requests += maxWidth to maxHeight
+            return Size(nextWidth, nextHeight)
+        }
+    }
+
+    private class TestMeasureScope(
+        override val layoutNode: LayoutNode,
+    ) : MeasureScopeWithLayoutNode, Density by Density(1f) {
+        override val layoutDirection: LayoutDirection = LayoutDirection.Ltr
+    }
 
     private val defaultProps = SelectableTextStyleProps(
         color = Color.Black.toKuiklyColor().toString(),
