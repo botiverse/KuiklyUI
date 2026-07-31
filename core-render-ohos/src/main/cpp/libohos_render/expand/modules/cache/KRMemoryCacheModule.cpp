@@ -19,15 +19,24 @@
 #include "libohos_render/expand/modules/network/KRNetworkModule.h"
 #include "libohos_render/utils/KRURIHelper.h"
 #include <cstdint>
+#include <limits>
 #include <multimedia/image_framework/image/image_source_native.h>
 #include <multimedia/image_framework/image/pixelmap_native.h>
+#include <new>
 #include <shared_mutex>
+#include <vector>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 // Remove this declaration if compatable api is raised to 18 and above
 extern Image_ErrorCode OH_PixelmapNative_Destroy(OH_PixelmapNative **pixelmap) __attribute__((weak));
+// Keep Kuikly loadable on its supported API 12-14 floor. The allocator-selecting
+// decoder was added in API 15 and therefore must not become a strong BIND_NOW
+// dependency of libkuikly.so.
+extern Image_ErrorCode OH_ImageSourceNative_CreatePixelmapUsingAllocator(
+    OH_ImageSourceNative *source, OH_DecodingOptions *options, IMAGE_ALLOCATOR_TYPE allocator,
+    OH_PixelmapNative **pixelmap) __attribute__((weak));
 #ifdef __cplusplus
 };
 #endif
@@ -57,6 +66,112 @@ static bool isNetwork(const std::string &src) {
 }
 
 static bool isAssets(const std::string &src) { return src.compare(0, KR_ASSET_PREFIX.size(), KR_ASSET_PREFIX) == 0; }
+
+static Image_ErrorCode ValidateCpuReadableRgbaPixelmap(OH_PixelmapNative *pixelmap) {
+    if (pixelmap == nullptr) {
+        return IMAGE_BAD_PARAMETER;
+    }
+
+    OH_Pixelmap_ImageInfo *info = nullptr;
+    Image_ErrorCode code = OH_PixelmapImageInfo_Create(&info);
+    if (code != IMAGE_SUCCESS || info == nullptr) {
+        return code == IMAGE_SUCCESS ? IMAGE_BAD_PARAMETER : code;
+    }
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t row_stride = 0;
+    int32_t pixel_format = PIXEL_FORMAT_UNKNOWN;
+    bool is_hdr = true;
+    code = OH_PixelmapNative_GetImageInfo(pixelmap, info);
+    if (code == IMAGE_SUCCESS) {
+        code = OH_PixelmapImageInfo_GetWidth(info, &width);
+    }
+    if (code == IMAGE_SUCCESS) {
+        code = OH_PixelmapImageInfo_GetHeight(info, &height);
+    }
+    if (code == IMAGE_SUCCESS) {
+        code = OH_PixelmapImageInfo_GetRowStride(info, &row_stride);
+    }
+    if (code == IMAGE_SUCCESS) {
+        code = OH_PixelmapImageInfo_GetPixelFormat(info, &pixel_format);
+    }
+    if (code == IMAGE_SUCCESS) {
+        code = OH_PixelmapImageInfo_GetDynamicRange(info, &is_hdr);
+    }
+    OH_PixelmapImageInfo_Release(info);
+
+    if (code != IMAGE_SUCCESS) {
+        return code;
+    }
+    if (width == 0 || height == 0 || width > std::numeric_limits<uint32_t>::max() / 4) {
+        return IMAGE_TOO_LARGE;
+    }
+    if (row_stride < width * 4 || pixel_format != PIXEL_FORMAT_RGBA_8888 || is_hdr) {
+        return IMAGE_SOURCE_UNSUPPORTED_OPTIONS;
+    }
+    if (height > std::numeric_limits<size_t>::max() / row_stride) {
+        return IMAGE_TOO_LARGE;
+    }
+
+    const size_t expected_byte_count = static_cast<size_t>(row_stride) * height;
+    size_t byte_count = expected_byte_count;
+    try {
+        std::vector<uint8_t> pixels(expected_byte_count);
+        code = OH_PixelmapNative_ReadPixels(pixelmap, pixels.data(), &byte_count);
+        if (code == IMAGE_SUCCESS && byte_count != expected_byte_count) {
+            code = IMAGE_UNKNOWN_ERROR;
+        }
+    } catch (const std::bad_alloc &) {
+        code = IMAGE_ALLOC_FAILED;
+    }
+    return code;
+}
+
+static Image_ErrorCode CreateCanvasCompatiblePixelmap(OH_ImageSourceNative *source, OH_PixelmapNative **pixelmap) {
+    if (source == nullptr || pixelmap == nullptr) {
+        return IMAGE_BAD_PARAMETER;
+    }
+    *pixelmap = nullptr;
+
+    OH_DecodingOptions *options = nullptr;
+    Image_ErrorCode code = OH_DecodingOptions_Create(&options);
+    if (code != IMAGE_SUCCESS) {
+        return code;
+    }
+    if (options == nullptr) {
+        return IMAGE_BAD_PARAMETER;
+    }
+
+    // Canvas reads the decoded pixels through OH_Drawing. Keeping HDR in AUTO lets
+    // ImageSource select a hardware/surface-buffer PixelMap which is not reliably
+    // readable by that path. Tone-map to SDR, request the format Canvas consumes,
+    // and force shared memory so the resulting pixels are CPU-readable.
+    code = OH_DecodingOptions_SetDesiredDynamicRange(options, IMAGE_DYNAMIC_RANGE_SDR);
+    if (code == IMAGE_SUCCESS) {
+        code = OH_DecodingOptions_SetPixelFormat(options, PIXEL_FORMAT_RGBA_8888);
+    }
+    if (code == IMAGE_SUCCESS && OH_ImageSourceNative_CreatePixelmapUsingAllocator != nullptr) {
+        code = OH_ImageSourceNative_CreatePixelmapUsingAllocator(
+            source, options, IMAGE_ALLOCATOR_TYPE_SHARE_MEMORY, pixelmap);
+    } else if (code == IMAGE_SUCCESS) {
+        // API 12-14 have no allocator-selecting decoder. Decode only after the
+        // SDR/RGBA request, then prove the result is CPU-readable before it can
+        // enter the Canvas cache. A hardware-only/unknown-format result fails
+        // closed instead of silently restoring the old HDR AUTO behavior.
+        code = OH_ImageSourceNative_CreatePixelmap(source, options, pixelmap);
+        if (code == IMAGE_SUCCESS) {
+            code = ValidateCpuReadableRgbaPixelmap(*pixelmap);
+        }
+    }
+
+    OH_DecodingOptions_Release(options);
+    if (code != IMAGE_SUCCESS && *pixelmap != nullptr) {
+        OH_PixelmapNative_Release(*pixelmap);
+        *pixelmap = nullptr;
+    }
+    return code;
+}
 
 KRAnyValue KRMemoryCacheModule::Get(const std::string &key) {
     auto it = cache_map_.find(key);
@@ -119,16 +234,13 @@ KRAnyValue KRMemoryCacheModule::SetObject(const KRAnyValue &params) {
 
 OH_PixelmapNative *KRMemoryCacheModule::LoadPixelmapFromLocal(std::string &src) {
     OH_PixelmapNative *pixelmap = nullptr;
-    OH_ImageSourceNative *source;
+    OH_ImageSourceNative *source = nullptr;
     auto code = OH_ImageSourceNative_CreateFromUri(src.data(), src.length(), &source);
     if (code == IMAGE_SUCCESS) {
-        // 通过图片解码参数创建PixelMap对象
-        OH_DecodingOptions *ops;
-        if (OH_DecodingOptions_Create(&ops) == IMAGE_SUCCESS) {
-            // 设置为AUTO会根据图片资源格式解码，如果图片资源为HDR资源则会解码为HDR的pixelmap。
-            OH_DecodingOptions_SetDesiredDynamicRange(ops, IMAGE_DYNAMIC_RANGE_AUTO);
-            OH_ImageSourceNative_CreatePixelmap(source, ops, &pixelmap);
-            OH_DecodingOptions_Release(ops);
+        code = CreateCanvasCompatiblePixelmap(source, &pixelmap);
+        if (code != IMAGE_SUCCESS) {
+            KR_LOG_ERROR_WITH_TAG(kMemoryCacheModuleName)
+                << "failed to create Canvas-compatible SDR pixelmap, error code: " << code;
         }
         OH_ImageSourceNative_Release(source);
     } else {
