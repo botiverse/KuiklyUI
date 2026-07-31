@@ -53,6 +53,43 @@ class TextInputCallbackArbiterTest {
     }
 
     @Test
+    fun largeMarkedImeCommitPublishesFinalSelectionWithoutControlledWriteback() {
+        val callbackArbiter = TextInputCallbackArbiter()
+        val controlledStateArbiter = TextInputControlledStateArbiter()
+        val markedText = "p".repeat(31)
+        val markedState = TextInputState(
+            text = markedText,
+            selectionStart = markedText.length,
+            selectionEnd = markedText.length,
+            compositionStart = 0,
+            compositionEnd = markedText.length,
+        )
+
+        val markedValue = callbackArbiter.onCompleteState(markedState)
+        assertEquals(TextRange(0, 31), markedValue.composition)
+        assertNull(callbackArbiter.onLegacyTextChange(markedText, markedState))
+
+        // KRTextAreaView publishes this complete candidate-commit state before the legacy text
+        // callback. The legacy echo is consumed instead of transiently exposing selection=0.
+        val committedState = state(text = "中文输", selection = 3)
+        val committedValue = callbackArbiter.onCompleteState(committedState)
+        val commitGeneration = generation()
+        controlledStateArbiter.recordNativeValue(committedValue, commitGeneration)
+
+        assertEquals(3, committedValue.text.length)
+        assertEquals(TextRange(3), committedValue.selection)
+        assertNull(committedValue.composition)
+        assertNull(callbackArbiter.onLegacyTextChange(committedValue.text, committedState))
+        assertTrue(
+            controlledStateArbiter.shouldSuppressControlledUpdate(
+                value = committedValue,
+                updateGeneration = commitGeneration,
+                latestGeneration = commitGeneration,
+            ),
+        )
+    }
+
+    @Test
     fun legacyOnlyPlatformStillUpdatesText() {
         val arbiter = TextInputCallbackArbiter()
 
