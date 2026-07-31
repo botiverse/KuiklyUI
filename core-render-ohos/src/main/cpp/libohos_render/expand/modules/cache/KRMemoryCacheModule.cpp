@@ -128,6 +128,17 @@ static Image_ErrorCode ValidateCpuReadableRgbaPixelmap(OH_PixelmapNative *pixelm
     return code;
 }
 
+static void ReleaseAndClearPixelmap(OH_PixelmapNative **pixelmap) {
+    if (pixelmap != nullptr && *pixelmap != nullptr) {
+        if (OH_PixelmapNative_Destroy != nullptr) {
+            OH_PixelmapNative_Destroy(pixelmap);
+        } else {
+            OH_PixelmapNative_Release(*pixelmap);
+            *pixelmap = nullptr;
+        }
+    }
+}
+
 static Image_ErrorCode CreateCanvasCompatiblePixelmap(OH_ImageSourceNative *source, OH_PixelmapNative **pixelmap) {
     if (source == nullptr || pixelmap == nullptr) {
         return IMAGE_BAD_PARAMETER;
@@ -151,24 +162,40 @@ static Image_ErrorCode CreateCanvasCompatiblePixelmap(OH_ImageSourceNative *sour
     if (code == IMAGE_SUCCESS) {
         code = OH_DecodingOptions_SetPixelFormat(options, PIXEL_FORMAT_RGBA_8888);
     }
-    if (code == IMAGE_SUCCESS && OH_ImageSourceNative_CreatePixelmapUsingAllocator != nullptr) {
-        code = OH_ImageSourceNative_CreatePixelmapUsingAllocator(
-            source, options, IMAGE_ALLOCATOR_TYPE_SHARE_MEMORY, pixelmap);
-    } else if (code == IMAGE_SUCCESS) {
-        // API 12-14 have no allocator-selecting decoder. Decode only after the
-        // SDR/RGBA request, then prove the result is CPU-readable before it can
-        // enter the Canvas cache. A hardware-only/unknown-format result fails
-        // closed instead of silently restoring the old HDR AUTO behavior.
-        code = OH_ImageSourceNative_CreatePixelmap(source, options, pixelmap);
-        if (code == IMAGE_SUCCESS) {
-            code = ValidateCpuReadableRgbaPixelmap(*pixelmap);
+    if (code == IMAGE_SUCCESS) {
+        if (OH_ImageSourceNative_CreatePixelmapUsingAllocator != nullptr) {
+            code = OH_ImageSourceNative_CreatePixelmapUsingAllocator(
+                source, options, IMAGE_ALLOCATOR_TYPE_SHARE_MEMORY, pixelmap);
+            if (code == IMAGE_SUCCESS) {
+                // Some platform decoders report success while still returning a
+                // surface-buffer PixelMap. Treat the requested allocator as a
+                // preference, not proof that Canvas can read the result.
+                code = ValidateCpuReadableRgbaPixelmap(*pixelmap);
+            }
+            if (code != IMAGE_SUCCESS) {
+                ReleaseAndClearPixelmap(pixelmap);
+                KR_LOG_INFO_WITH_TAG(kMemoryCacheModuleName)
+                    << "shared-memory decode was not Canvas-readable; retrying validated legacy decode, error code: "
+                    << code;
+            }
+        }
+
+        if (OH_ImageSourceNative_CreatePixelmapUsingAllocator == nullptr || code != IMAGE_SUCCESS) {
+            // API 12-14 have no allocator-selecting decoder. API 15+ also uses
+            // this retry when the allocator call succeeds but its actual result
+            // fails the CPU-readable contract. The same SDR/RGBA options remain
+            // active, and the fallback is admitted only after full validation;
+            // this never restores the old unvalidated HDR AUTO path.
+            code = OH_ImageSourceNative_CreatePixelmap(source, options, pixelmap);
+            if (code == IMAGE_SUCCESS) {
+                code = ValidateCpuReadableRgbaPixelmap(*pixelmap);
+            }
         }
     }
 
     OH_DecodingOptions_Release(options);
-    if (code != IMAGE_SUCCESS && *pixelmap != nullptr) {
-        OH_PixelmapNative_Release(*pixelmap);
-        *pixelmap = nullptr;
+    if (code != IMAGE_SUCCESS) {
+        ReleaseAndClearPixelmap(pixelmap);
     }
     return code;
 }
@@ -408,9 +435,5 @@ void KRMemoryCacheModule::OnDestroy() {
 }
 
 void KRMemoryCacheModule::ReleasePixelmap(OH_PixelmapNative *pixelmap) {
-    if (OH_PixelmapNative_Destroy) {
-        OH_PixelmapNative_Destroy(&pixelmap);
-    } else {
-        OH_PixelmapNative_Release(pixelmap);
-    }
+    ReleaseAndClearPixelmap(&pixelmap);
 }
