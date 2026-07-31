@@ -29,6 +29,17 @@ class NativeSemanticsNodeRegistryTest {
         val parent: ProjectionNode? = null
     )
 
+    private data class LayoutProjectionNode(
+        val hidden: Boolean = false,
+        val parent: LayoutProjectionNode? = null
+    )
+
+    private data class SemanticProjectionNode(
+        val name: String,
+        val layoutNode: LayoutProjectionNode,
+        val semanticParent: SemanticProjectionNode? = null
+    )
+
     @Test
     fun invisibleNodeExcludesItsNativeSubtree() {
         assertEquals(
@@ -81,6 +92,30 @@ class NativeSemanticsNodeRegistryTest {
         )
 
         assertTrue(hiddenNodes.isEmpty())
+    }
+
+    @Test
+    fun layoutAncestryProjectsHiddenAcrossDisconnectedSemanticBranches() {
+        val hiddenLayoutRoot = LayoutProjectionNode(hidden = true)
+        val contentLayout = LayoutProjectionNode(parent = hiddenLayoutRoot)
+        val searchLayout = LayoutProjectionNode(parent = contentLayout)
+        val drawerLayout = LayoutProjectionNode()
+        val hiddenRoot = SemanticProjectionNode(name = "content", layoutNode = hiddenLayoutRoot)
+        val search = SemanticProjectionNode(
+            name = "search",
+            layoutNode = searchLayout,
+            semanticParent = null
+        )
+        val drawer = SemanticProjectionNode(name = "drawer", layoutNode = drawerLayout)
+
+        val hiddenNodes = effectivelyHiddenNodes(
+            nodes = listOf(hiddenRoot, search, drawer),
+            firstAncestor = SemanticProjectionNode::layoutNode,
+            isHidden = LayoutProjectionNode::hidden,
+            parentOf = LayoutProjectionNode::parent
+        )
+
+        assertEquals(setOf(hiddenRoot, search), hiddenNodes)
     }
 
     @Test
