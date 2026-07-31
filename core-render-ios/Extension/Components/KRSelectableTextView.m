@@ -75,6 +75,15 @@
 
 #pragma mark - setter (css property)
 
+// View capability: this surface's accessibility truth comes from the system
+// UITextView selection semantics. The compose semantics bridge derives its
+// clickable/long-clickable mask from compose click semantics (absent here);
+// applying it would overwrite the text view's native traits. Decline only
+// this mask — every other accessibility prop applies normally.
+- (void)setCss_accessibilityInfo:(NSString *)css_accessibilityInfo {
+    // Intentionally ignored.
+}
+
 - (void)setCss_text:(NSString *)css_text {
     if (_css_text != css_text) {
         _css_text = css_text;

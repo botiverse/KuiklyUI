@@ -22,6 +22,7 @@ import androidx.compose.runtime.collection.mutableVectorOf
 import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.Modifier
 import com.tencent.kuikly.compose.ui.layout.LayoutCoordinates
+import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy
 import com.tencent.kuikly.compose.ui.node.Nodes
 import com.tencent.kuikly.compose.ui.node.dispatchForKind
 import com.tencent.kuikly.compose.ui.node.layoutCoordinates
@@ -111,6 +112,8 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
             return HitPathDispatchResult(dispatched = false, nativeDispatchCaptured = false)
         }
         val nativeDispatchCaptured = root.capturesNativeDispatch()
+        // NOTE: capture resolution is branch-scoped (see resolveNativeDispatchPolicy):
+        // a RELEASE node only neutralizes CAPTURE ancestors on its own hit branch.
         var dispatchHit = root.dispatchMainEventPass(
             internalPointerEvent.changes,
             rootCoordinates,
@@ -159,7 +162,7 @@ internal data class HitPathDispatchResult(
  */
 /*@VisibleForTesting*/
 @OptIn(InternalCoreApi::class, ExperimentalComposeUiApi::class)
-internal open class NodeParent {
+internal open class NodeParent : NativeDispatchPolicyTreeNode {
     val children: MutableVector<Node> = mutableVectorOf()
 
     open fun buildCache(
@@ -226,8 +229,21 @@ internal open class NodeParent {
         return dispatched
     }
 
-    open fun capturesNativeDispatch(): Boolean =
-        children.any { it.capturesNativeDispatch() }
+    fun capturesNativeDispatch(): Boolean =
+        resolveNativeDispatchPolicyTree(this, NativeDispatchPolicy.INHERIT) ==
+            NativeDispatchPolicy.CAPTURE
+
+    /**
+     * The root has no modifiers and therefore no stance of its own; branch
+     * resolution semantics live in [resolveNativeDispatchPolicyTree], which
+     * this tree shares with the policy-tree tests.
+     */
+    override val ownNativeDispatchStance: NativeDispatchPolicy
+        get() = NativeDispatchPolicy.INHERIT
+
+    override fun forEachPolicyChild(action: (NativeDispatchPolicyTreeNode) -> Unit) {
+        children.forEach(action)
+    }
 
     /**
      * Dispatches the cancel event to all child [Node]s.
@@ -373,16 +389,23 @@ internal class Node(val modifierNode: Modifier.Node) : NodeParent() {
         return result
     }
 
-    override fun capturesNativeDispatch(): Boolean {
-        if (relevantChanges.isEmpty() || !modifierNode.isAttached) {
-            return super.capturesNativeDispatch()
+    /**
+     * This node's own stance from its pointer-input modifiers; branch
+     * resolution (top-down inherited stance, deepest-wins per path,
+     * any-capture-wins across siblings) is the shared
+     * resolveNativeDispatchPolicyTree traversal.
+     */
+    override val ownNativeDispatchStance: NativeDispatchPolicy
+        get() {
+            if (relevantChanges.isEmpty() || !modifierNode.isAttached) {
+                return NativeDispatchPolicy.INHERIT
+            }
+            var own = NativeDispatchPolicy.INHERIT
+            modifierNode.dispatchForKind(Nodes.PointerInput) {
+                own = combineSameNodeNativeDispatchPolicies(own, it.resolvedNativeDispatchPolicy())
+            }
+            return own
         }
-        var captures = false
-        modifierNode.dispatchForKind(Nodes.PointerInput) {
-            captures = captures || it.captureNativeDispatch()
-        }
-        return captures || super.capturesNativeDispatch()
-    }
 
     /**
      * Calculates cached properties that will be stored in this [Node] for the duration of both
