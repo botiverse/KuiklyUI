@@ -538,9 +538,10 @@ KRPoint KRScrollerView::MaxContentOffsetInContentInset(
         if (content_size <= frame_size) {
             return KRPoint();
         }
-        // 上越界
-        if (current_offset.y < -content_inset->top) {
-            return KRPoint{0, -content_inset->top};
+        // 上越界：OHOS 用 margin 实现 contentInset（物理下移 top），故静息 offset 应为 0，
+        // 不是 iOS 的 -inset.top——否则 offset(-top) 与 margin(top) 双计，刷新态留白 = 2×（task #110）。
+        if (current_offset.y < 0) {
+            return KRPoint{0, 0};
         }
         // 下越界
         float max_offset = content_size + content_inset->bottom - frame_size;
