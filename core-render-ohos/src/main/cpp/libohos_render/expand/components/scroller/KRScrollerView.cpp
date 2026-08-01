@@ -15,6 +15,7 @@
 
 #include <memory>
 
+#include "libohos_render/expand/components/scroller/KRScrollerContentOffset.h"
 #include "libohos_render/expand/components/scroller/KRScrollerView.h"
 
 #include <cfloat>
@@ -517,37 +518,15 @@ KRPoint KRScrollerView::MaxContentOffsetInContentInset(
     auto content_frame = content_view_->GetFrame();
     auto current_offset = GetContentOffset();
 
-    if (direction_row_) {
-        float content_size = content_frame.width;
-        float frame_size = frame.width;
-        if (content_size <= frame_size) {
-            return KRPoint();
-        }
-        // 上/左越界：offset 滚到了 inset 头部之前
-        if (current_offset.x < -content_inset->start) {
-            return KRPoint{-content_inset->start, 0};
-        }
-        // 下/右越界：offset 滚过了内容尾部
-        float max_offset = content_size + content_inset->end - frame_size;
-        if (current_offset.x > max_offset) {
-            return KRPoint{max_offset, 0};
-        }
-    } else {
-        float content_size = content_frame.height;
-        float frame_size = frame.height;
-        if (content_size <= frame_size) {
-            return KRPoint();
-        }
-        // 上越界：OHOS 用 margin 实现 contentInset（物理下移 top），故静息 offset 应为 0，
-        // 不是 iOS 的 -inset.top——否则 offset(-top) 与 margin(top) 双计，刷新态留白 = 2×（task #110）。
-        if (current_offset.y < 0) {
-            return KRPoint{0, 0};
-        }
-        // 下越界
-        float max_offset = content_size + content_inset->bottom - frame_size;
-        if (current_offset.y > max_offset) {
-            return KRPoint{0, max_offset};
-        }
+    const auto adjustment =
+        direction_row_
+            ? KRResolveMarginInsetAxisOffset(
+                  current_offset.x, content_frame.width, frame.width, content_inset->end)
+            : KRResolveMarginInsetAxisOffset(
+                  current_offset.y, content_frame.height, frame.height, content_inset->bottom);
+    if (adjustment.should_adjust) {
+        return direction_row_ ? KRPoint{adjustment.target_offset, 0}
+                              : KRPoint{0, adjustment.target_offset};
     }
 
     return current_offset;
