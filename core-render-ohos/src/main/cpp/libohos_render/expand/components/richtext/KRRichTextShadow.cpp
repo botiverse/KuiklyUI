@@ -36,6 +36,7 @@
 
 #include "libohos_render/api/src/KRTextPostProcessor.h"
 #include "libohos_render/expand/components/richtext/KRCustomEmojiPixmapCache.h"
+#include "libohos_render/expand/components/richtext/KRInlineBoxBoundaryGlue.h"
 #include "libohos_render/expand/components/richtext/KRParagraph.h"
 #include "libohos_render/expand/components/richtext/KRRichTextShadow.h"
 #include "libohos_render/foundation/thread/KRMainThread.h"
@@ -561,7 +562,16 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
             map.erase("inlineBoxChildren");
             map.erase("inlineBoxSemanticText");
         };
-        for (const auto &span : spans) {
+        auto span_text = [](const std::shared_ptr<KRRenderValue> &span) {
+            const auto map = span->toMap();
+            auto text = GetKRValue("value", map, map)->toString();
+            if (text.empty()) {
+                text = GetKRValue("text", map, map)->toString();
+            }
+            return text;
+        };
+        for (size_t span_position = 0; span_position < spans.size(); ++span_position) {
+            const auto &span = spans[span_position];
             auto group_map = span->toMap();
             auto children = GetKRValue("inlineBoxChildren", group_map, group_map)->toArray();
             if (children.empty()) {
@@ -605,6 +615,13 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
                 GetKRValue("inlineBoxCornerRadius", group_map, group_map)->toFloat() * group_dpi;
             inline_box_group_plans.push_back(plan);
 
+            const auto previous_text =
+                span_position > 0 ? span_text(spans[span_position - 1]) : std::string();
+            const auto next_text =
+                span_position + 1 < spans.size() ? span_text(spans[span_position + 1]) : std::string();
+            const auto bracket_glue =
+                KRResolveInlineBoxBracketBoundaryGlue(previous_text, next_text);
+
             auto make_part = [&](const char *part) {
                 auto map = group_map;
                 erase_box_style(map);
@@ -613,6 +630,18 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
                 map[kInlineBoxPartKey] = NewKRRenderValue(std::string(part));
                 return map;
             };
+
+            auto append_boundary_glue = [&]() {
+                auto glue = make_part(kInlineBoxPartGlue);
+                glue["value"] = NewKRRenderValue(
+                    KRUtf16ToUtf8(KRInlineBoxBoundaryGlueText(true)));
+                glue["text"] = glue["value"];
+                flattened.push_back(KRRenderValue::Make(glue));
+            };
+
+            if (bracket_glue.before) {
+                append_boundary_glue();
+            }
 
             auto leading = make_part(kInlineBoxPartLeading);
             leading["value"] = NewKRRenderValue(std::string(""));
@@ -650,6 +679,10 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
                 static_cast<double>(padding_end_vp + border_vp + margin_end_vp));
             trailing["placeholderHeight"] = NewKRRenderValue(static_cast<double>(box_height_vp));
             flattened.push_back(KRRenderValue::Make(trailing));
+
+            if (bracket_glue.after) {
+                append_boundary_glue();
+            }
 
             ++top_level_index;
         }
