@@ -1086,6 +1086,7 @@ internal class LayoutNodeSubcompositionsState(
             nodeState.activeState = mutableStateOf(true)
             nodeState.forceReuse = true
             nodeState.forceRecompose = true
+            node.invalidateDrawAfterSubcomposeSlotReuse()
             node
         }
     }
@@ -1388,6 +1389,20 @@ internal class LayoutNodeSubcompositionsState(
             }
         } ?: emptyList()
     }
+}
+
+/**
+ * Wakes the draw path when a retained lazy slot becomes active again.
+ *
+ * [disposeOrReuseStartingFromIndex] hides a retained slot's native descendants after placement.
+ * The next measure can take the same slot back from the reusable section without moving it or
+ * changing its modifier chain. In that case placement restores the descendants' visibility props,
+ * but a clean virtual slot container can still prevent an already-dirty descendant from reaching
+ * the render root. This reuse-specific invalidation deliberately crosses consecutive dirty
+ * ancestors; ordinary [LayoutNode.invalidateDraw] coalescing cannot repair that boundary.
+ */
+internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotReuse() {
+    (this as? KNode<*>)?.invalidateDrawForReuse()
 }
 
 private val ReusedSlotId =

@@ -92,6 +92,12 @@ kotlin {
                 // 保留现有依赖...
             }
         }
+
+        val androidUnitTest by getting {
+            dependencies {
+                implementation("org.robolectric:robolectric:4.12.2")
+            }
+        }
     }
 }
 
