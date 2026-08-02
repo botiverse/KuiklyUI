@@ -226,8 +226,15 @@ static const NSUInteger kKRSlockInlineCodeAtomizeThreshold = 16;
         CGFloat trailingAdvance = trailingEdge ? edgeAdvance : 0.0;
         CGFloat atomHeight = textSize * kKRSlockInlineCodeLineHeightRatio;
         CGFloat totalWidth = textWidth + leadingAdvance + trailingAdvance;
+        // A composed grapheme can legitimately reserve zero typographic
+        // advance (for example a format/control atom in a long atomized run).
+        // UIKit rejects a zero-sized bitmap context, but the attachment must
+        // keep that zero logical advance so surrounding glyph layout, chrome,
+        // wrapping and copy semantics remain unchanged.
+        CGFloat bitmapWidth = MAX(1.0, totalWidth);
+        CGFloat bitmapHeight = MAX(1.0, atomHeight);
 
-        UIGraphicsBeginImageContextWithOptions(CGSizeMake(totalWidth, atomHeight), NO, 0.0);
+        UIGraphicsBeginImageContextWithOptions(CGSizeMake(bitmapWidth, bitmapHeight), NO, 0.0);
         CGContextRef context = UIGraphicsGetCurrentContext();
         if (context) {
             CGContextSaveGState(context);
