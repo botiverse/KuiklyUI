@@ -131,6 +131,25 @@ class SubcomposeSlotDrawReactivationTest {
             assertSame(retainedSlot, root.foldedChildren.single())
             assertTrue(retainedSlot.isDrawInvalidatedForTest())
             assertTrue(root.isDrawInvalidatedForTest())
+
+            // A precomposed slot can be drawn past while it is still unplaced. The render root is
+            // then clean even though the slot's descendants remain dirty. Consuming that exact
+            // precomposed key through the real measure/subcompose path must wake the ancestors
+            // again; otherwise the now-visible lazy item is placed in Compose but stays absent in
+            // the native render tree.
+            retainedLeaf.invalidateDraw()
+            retainedSlot.clearDrawInvalidationForTest()
+            root.clearDrawInvalidationForTest()
+            root.measurePolicy = state.createMeasurePolicy {
+                subcompose("message-b") {}
+                layout(1, 1) {}
+            }
+            assertTrue(root.remeasure(Constraints.fixed(1, 1)))
+
+            assertSame(retainedSlot, root.foldedChildren.single())
+            assertTrue(retainedLeaf.isDrawInvalidatedForTest())
+            assertTrue(retainedSlot.isDrawInvalidatedForTest())
+            assertTrue(root.isDrawInvalidatedForTest())
         } finally {
             recomposer.close()
             PagerManager.destroyPager(pagerId)
