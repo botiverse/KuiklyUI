@@ -800,6 +800,7 @@ internal class LayoutNodeSubcompositionsState(
                     @Suppress("ExceptionMessage")
                     checkPrecondition(precomposedCount > 0)
                     precomposedCount--
+                    precomposed.invalidateDrawAfterSubcomposeSlotActivation()
                     precomposed
                 } else {
                     takeNodeFromReusables(slotId)
@@ -1086,7 +1087,7 @@ internal class LayoutNodeSubcompositionsState(
             nodeState.activeState = mutableStateOf(true)
             nodeState.forceReuse = true
             nodeState.forceRecompose = true
-            node.invalidateDrawAfterSubcomposeSlotReuse()
+            node.invalidateDrawAfterSubcomposeSlotActivation()
             node
         }
     }
@@ -1392,16 +1393,18 @@ internal class LayoutNodeSubcompositionsState(
 }
 
 /**
- * Wakes the draw path when a retained lazy slot becomes active again.
+ * Wakes the draw path when a retained or precomposed lazy slot becomes active again.
  *
  * [disposeOrReuseStartingFromIndex] hides a retained slot's native descendants after placement.
  * The next measure can take the same slot back from the reusable section without moving it or
  * changing its modifier chain. In that case placement restores the descendants' visibility props,
  * but a clean virtual slot container can still prevent an already-dirty descendant from reaching
- * the render root. This reuse-specific invalidation deliberately crosses consecutive dirty
- * ancestors; ordinary [LayoutNode.invalidateDraw] coalescing cannot repair that boundary.
+ * the render root. The same stranded-dirty state can occur when a precomposed slot is drawn past
+ * while unplaced and is only made active by a later measure. This activation-specific invalidation
+ * deliberately crosses consecutive dirty ancestors; ordinary [LayoutNode.invalidateDraw]
+ * coalescing cannot repair either boundary.
  */
-internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotReuse() {
+internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotActivation() {
     (this as? KNode<*>)?.invalidateDrawForReuse()
 }
 
