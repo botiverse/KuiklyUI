@@ -16,6 +16,7 @@
 package com.tencent.kuikly.compose.ui.layout
 
 import androidx.compose.runtime.Recomposer
+import com.tencent.kuikly.compose.layout.hideOffsetScreenView
 import com.tencent.kuikly.compose.ui.focus.FocusOwner
 import com.tencent.kuikly.compose.ui.graphics.Canvas
 import com.tencent.kuikly.compose.ui.input.InputModeManager
@@ -42,6 +43,7 @@ import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import org.junit.runner.RunWith
@@ -86,8 +88,15 @@ class SubcomposeSlotDrawReactivationTest {
         try {
             val firstHandle = state.precompose("message-a") {}
             val retainedSlot = root.foldedChildren.single() as KNode<*>
-            val retainedLeaf = KNode(DivView())
+            val retainedLeaf = KNode<DeclarativeBaseView<*, *>>(DivView())
+            retainedSlot.insertTopDown(0, retainedLeaf)
             retainedSlot.insertAt(0, retainedLeaf)
+            assertEquals(pagerId, retainedLeaf.view.pagerId)
+            assertEquals(retainedSlot.view.nativeRef, retainedLeaf.view.parentRef)
+            assertSame(
+                retainedLeaf.view,
+                PagerManager.getPager(pagerId).getViewWithNativeRef(retainedLeaf.view.nativeRef)
+            )
             root.clearDrawInvalidationForTest()
             retainedSlot.clearDrawInvalidationForTest()
             retainedLeaf.clearDrawInvalidationForTest()
@@ -132,21 +141,32 @@ class SubcomposeSlotDrawReactivationTest {
             assertTrue(retainedSlot.isDrawInvalidatedForTest())
             assertTrue(root.isDrawInvalidatedForTest())
 
-            // A precomposed slot can be drawn past while it is still unplaced. The render root is
-            // then clean even though the slot's descendants remain dirty. Consuming that exact
-            // precomposed key through the real measure/subcompose path must wake the ancestors
-            // again; otherwise the now-visible lazy item is placed in Compose but stays absent in
-            // the native render tree.
-            retainedLeaf.invalidateDraw()
+            // A precomposed slot can be hidden offscreen and then drawn completely clean while it
+            // is still unplaced. Consuming that exact key wakes the slot ancestry, but placement
+            // must also dirty the clean descendant whose native visibility prop is restored;
+            // otherwise Compose reports the item placed while the native render tree stays blank.
+            retainedSlot.hideOffsetScreenView()
+            assertEquals(true, retainedLeaf.viewVisible)
             retainedSlot.clearDrawInvalidationForTest()
+            retainedLeaf.clearDrawInvalidationForTest()
             root.clearDrawInvalidationForTest()
+            retainedLeaf.measurePolicy = MeasurePolicy { _, _ -> layout(1, 1) {} }
             root.measurePolicy = state.createMeasurePolicy {
-                subcompose("message-b") {}
-                layout(1, 1) {}
+                val placeable = subcompose("message-b") {}.single().measure(Constraints.fixed(1, 1))
+                layout(1, 1) { placeable.place(0, 0) }
             }
             assertTrue(root.remeasure(Constraints.fixed(1, 1)))
 
             assertSame(retainedSlot, root.foldedChildren.single())
+            assertFalse(retainedLeaf.isDrawInvalidatedForTest())
+            assertTrue(retainedSlot.isDrawInvalidatedForTest())
+            assertTrue(root.isDrawInvalidatedForTest())
+
+            // Execute the real placement path. NodeCoordinator.placeSelf calls
+            // KNode.updateKuiklyViewFrame, which owns the production visibility restore.
+            root.place(0, 0)
+
+            assertNull(retainedLeaf.viewVisible)
             assertTrue(retainedLeaf.isDrawInvalidatedForTest())
             assertTrue(retainedSlot.isDrawInvalidatedForTest())
             assertTrue(root.isDrawInvalidatedForTest())
