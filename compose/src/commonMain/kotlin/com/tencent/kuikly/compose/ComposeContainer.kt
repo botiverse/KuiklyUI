@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-@file:OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
+@file:OptIn(ExperimentalComposeUiApi::class)
 
 package com.tencent.kuikly.compose
 
@@ -22,9 +22,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.InternalComposeApi
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
-import com.tencent.kuikly.compose.foundation.ExperimentalFoundationApi
-import com.tencent.kuikly.compose.foundation.lazy.layout.LocalKuiklyPrefetchScheduler
-import com.tencent.kuikly.compose.foundation.lazy.layout.PrefetchScheduler
 import com.tencent.kuikly.compose.container.LocalSlotProvider
 import com.tencent.kuikly.compose.container.SlotProvider
 import com.tencent.kuikly.compose.coroutines.internal.ComposeDispatcher
@@ -179,8 +176,8 @@ open class ComposeContainer :
         if (pageData.isOhOs || pageData.isMiniApp || pageData.isWeb) {
             mediator?.startFrameDispatcher()
         } else {
-            getModule<VsyncModule>(VsyncModule.MODULE_NAME)?.registerVsyncWithFrameInterval { frameIntervalNanos ->
-                mediator?.renderFrame(frameIntervalNanos)
+            getModule<VsyncModule>(VsyncModule.MODULE_NAME)?.registerVsync {
+                mediator?.renderFrame()
             }
         }
     }
@@ -226,7 +223,6 @@ open class ComposeContainer :
     private fun createComposeScene(
         invalidate: () -> Unit,
         coroutineContext: CoroutineContext,
-        prefetchScheduler: PrefetchScheduler,
     ): ComposeScene =
         KuiklyComposeScene(
             rootKView,
@@ -235,7 +231,6 @@ open class ComposeContainer :
             boundsInWindow = IntRect(0, 0, windowInfo.containerSize.width, windowInfo.containerSize.height),
             invalidate = invalidate,
             coroutineContext = coroutineContext,
-            prefetchScheduler = prefetchScheduler,
         )
 
     private fun createMediatorIfNeeded() {
@@ -315,8 +310,7 @@ open class ComposeContainer :
             LocalActivity provides this,
             LocalOnBackPressedDispatcherOwner provides this,
             LocalSlotProvider provides slotProvider,
-            LocalConfiguration provides configuration!!,
-            LocalKuiklyPrefetchScheduler provides mediator!!.prefetchScheduler,
+            LocalConfiguration provides configuration!!
         ) {
             content()
             LocalSlotProvider.current.slots.forEach { slotContent ->

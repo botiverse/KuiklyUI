@@ -25,7 +25,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.withFrameNanos
 import com.tencent.kuikly.compose.foundation.layout.Box
 import com.tencent.kuikly.compose.foundation.layout.fillMaxWidth
 import com.tencent.kuikly.compose.foundation.layout.height
@@ -236,12 +235,6 @@ internal fun PullToRefreshItem(
 
     scrollState.kuiklyInfo.pullToRefreshTopInsetPx = with(density) { topInset.roundToPx() }
 
-    // Tracks whether the next IDLE was triggered by the failsafe below.
-    // When true, the IDLE branch skips the inset reset animation to avoid
-    // restarting an animation that will soon be re-triggered by the real
-    // REFRESHING -> IDLE transition.
-    var suppressIdleInsetReset by remember { mutableStateOf(false) }
-
     // Monitor scroll state changes inspired by RefreshView logic
     LaunchedEffect(scrollState) {
         snapshotFlow {
@@ -285,13 +278,7 @@ internal fun PullToRefreshItem(
                     // (true -> false) within a single frame interval, Compose may never
                     // observe the intermediate true value. This leaves pullState stuck
                     // in REFRESHING. Detect and force reset to IDLE.
-                    // Wait one frame to give onRefresh's coroutine a chance to set
-                    // isRefreshing = true before concluding the state is stuck.
                     if (!state.isRefreshing) {
-                        withFrameNanos { }
-                    }
-                    if (!state.isRefreshing && state.pullState == PullState.REFRESHING) {
-                        suppressIdleInsetReset = true
                         state.updatePullState(PullState.IDLE)
                         state.updateProgress(0f)
                     }
@@ -342,7 +329,6 @@ internal fun PullToRefreshItem(
         val isDragging = scrollView?.isDragging == true
         when (state.pullState) {
             PullState.REFRESHING -> {
-                suppressIdleInsetReset = false
                 pullToRefreshLog { "apply inset REFRESHING top=$refreshThresholdLogical animated=true" }
                 scrollView?.setContentInset(top = refreshThresholdLogical, animated = true)
             }
@@ -351,9 +337,7 @@ internal fun PullToRefreshItem(
                 // - iOS: animated inset also animates contentOffset back to bounds
                 // - Android: non-animated inset calls setFinalTranslation and snaps overscroll to 0
                 scrollView?.setContentInsetWhenEndDrag(top = 0f)
-                if (suppressIdleInsetReset) {
-                    suppressIdleInsetReset = false
-                } else if (!isDragging) {
+                if (!isDragging) {
                     pullToRefreshLog { "apply inset IDLE top=0 animated=true isDragging=false" }
                     scrollView?.setContentInset(top = 0f, animated = true)
                 } else {

@@ -124,8 +124,7 @@ internal class RootNodeOwner(
     private val semanticsKuiklyHandler = KuiklySemantisHandler()
 
     val isSemanticsRunnnng: Boolean
-        get() = rootKView.getPager().isAccessibilityRunning() ||
-            rootKView.getPager().debugUIInspector()
+        get() = rootKView.getPager().isAccessibilityRunning()
     var size: IntSize? = size
         set(value) {
             field = value
