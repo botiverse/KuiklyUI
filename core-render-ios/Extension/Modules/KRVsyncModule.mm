@@ -24,9 +24,9 @@
 
 - (void)registerVsync:(NSDictionary *)args {
     _tipCb = args[KR_CALLBACK_KEY];
-    
+
     dispatch_queue_t contextQueue = [KuiklyRenderThreadManager contextQueue];
-    
+
     if (!contextQueue) {
         return ;
     }
