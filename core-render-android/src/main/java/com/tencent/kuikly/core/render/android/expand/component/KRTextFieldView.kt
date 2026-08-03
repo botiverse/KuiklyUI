@@ -92,7 +92,6 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
     private var selectionChangeCallback: KuiklyRenderCallback? = null
 
     private var isSettingTextInputState = false
-    private val textInputSyncRevisionState = TextInputSyncRevisionState()
 
     /**
      * 聚焦回调
@@ -706,7 +705,6 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
     private fun setTextInputState(params: String?) {
         val json = runCatching { JSONObject(params ?: "{}") }.getOrElse { JSONObject() }
-        textInputSyncRevisionState.apply(json.optIntOrNull(KEY_SYNC_REVISION))
         val rawText = json.optString(KEY_TEXT, "")
         if (shouldRejectProgrammaticShortcodeInput(rawText)) {
             textLengthBeyondLimitCallback?.invoke(null)
@@ -895,7 +893,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         }
         val result = mutableMapOf<String, Any>(KEY_TEXT to rawText.toString())
         length?.let { result[KEY_LENGTH] = it }
-        return textInputSyncRevisionState.snapshot(result)
+        return result
     }
 
     private fun createFocusCallbackParamMap(requestId: Long?): Map<String, Any> {
@@ -923,7 +921,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             null
         }
         length?.let { result[KEY_LENGTH] = it }
-        return textInputSyncRevisionState.snapshot(result)
+        return result
     }
 
     private fun resetDefaultStyle() {
@@ -1147,7 +1145,6 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val KEY_FOCUS_REQUEST_ID = "focusRequestId"
         private const val KEY_COMPOSITION_END = "compositionEnd"
         private const val KEY_LENGTH = "length"
-        private const val KEY_SYNC_REVISION = "syncRevision"
         private const val NO_COMPOSITION = -1
 
         private const val LENGTH_LIMIT_TYPE_UNSET = -1
@@ -1156,25 +1153,6 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val LENGTH_LIMIT_TYPE_VISUAL_WIDTH = 2
     }
 }
-
-internal class TextInputSyncRevisionState {
-    var current: Int = 0
-        private set
-
-    fun apply(requestedRevision: Int?) {
-        if (requestedRevision != null) {
-            current = requestedRevision
-        }
-    }
-
-    fun snapshot(payload: MutableMap<String, Any>): Map<String, Any> {
-        payload["syncRevision"] = current
-        return payload
-    }
-}
-
-private fun JSONObject.optIntOrNull(key: String): Int? =
-    if (has(key)) optInt(key) else null
 
 private val PROGRAMMATIC_SHORTCODE_REGEX = Regex("\\[[a-zA-Z0-9_\\-]+\\]")
 

@@ -73,8 +73,7 @@ class TextInputCallbackArbiterTest {
         // callback. The legacy echo is consumed instead of transiently exposing selection=0.
         val committedState = state(text = "中文输", selection = 3)
         val committedValue = callbackArbiter.onCompleteState(committedState)
-        val commitGeneration = generation()
-        controlledStateArbiter.recordNativeValue(committedValue, commitGeneration)
+        controlledStateArbiter.recordNativeValue(committedValue)
 
         assertEquals(3, committedValue.text.length)
         assertEquals(TextRange(3), committedValue.selection)
@@ -83,8 +82,6 @@ class TextInputCallbackArbiterTest {
         assertTrue(
             controlledStateArbiter.shouldSuppressControlledUpdate(
                 value = committedValue,
-                updateGeneration = commitGeneration,
-                latestGeneration = commitGeneration,
             ),
         )
     }
@@ -204,23 +201,133 @@ class TextInputCallbackArbiterTest {
         val arbiter = TextInputControlledStateArbiter()
         val firstNativeValue = value(text = "1234567", selection = 7)
         val secondNativeValue = value(text = "123456789", selection = 9)
-        val firstGeneration = generation()
-        val secondGeneration = generation()
-        arbiter.recordNativeValue(firstNativeValue, firstGeneration)
-        arbiter.recordNativeValue(secondNativeValue, secondGeneration)
+        arbiter.recordNativeValue(firstNativeValue)
+        arbiter.recordNativeValue(secondNativeValue)
 
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = firstNativeValue,
-                updateGeneration = firstGeneration,
-                latestGeneration = secondGeneration,
             ),
         )
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = secondNativeValue,
-                updateGeneration = secondGeneration,
-                latestGeneration = secondGeneration,
+            ),
+        )
+    }
+
+    @Test
+    fun staleNativeIdentityCannotRollbackNewerNativeEditingState() {
+        val scenarios = listOf(
+            "Android selection" to Pair(
+                TextFieldValue(text = "a", selection = TextRange(1)),
+                TextFieldValue(text = "ab", selection = TextRange(2)),
+            ),
+            "iOS marked text" to Pair(
+                TextFieldValue(
+                    text = "n",
+                    selection = TextRange(1),
+                    composition = TextRange(0, 1),
+                ),
+                TextFieldValue(
+                    text = "ni",
+                    selection = TextRange(2),
+                    composition = TextRange(0, 2),
+                ),
+            ),
+            "OHOS full editing state" to Pair(
+                TextFieldValue(
+                    text = "中",
+                    selection = TextRange(0, 1),
+                    composition = TextRange(0, 1),
+                ),
+                TextFieldValue(
+                    text = "中文",
+                    selection = TextRange(1, 2),
+                    composition = TextRange(0, 2),
+                ),
+            ),
+        )
+
+        scenarios.forEach { (platform, nativeValues) ->
+            val arbiter = TextInputControlledStateArbiter()
+            val firstNativeValue = nativeValues.first
+            val latestNativeValue = nativeValues.second
+            arbiter.recordNativeValue(firstNativeValue)
+            arbiter.recordNativeValue(latestNativeValue)
+
+            // The caller can still expose an earlier exact callback object after native state has
+            // advanced. That object is still a direct echo of the older native snapshot and
+            // must not write text, selection, or composition back over the latest editor state.
+            val shouldSuppress = arbiter.shouldSuppressControlledUpdate(
+                value = firstNativeValue,
+            )
+            var survivingNativeValue = latestNativeValue
+            if (!shouldSuppress) {
+                survivingNativeValue = firstNativeValue
+            }
+
+            assertTrue(shouldSuppress, "$platform stale native token must be fenced")
+            assertEquals(
+                latestNativeValue,
+                survivingNativeValue,
+                "$platform latest text/selection/composition must survive",
+            )
+
+            val laterText = latestNativeValue.text + "!"
+            val laterNativeValue = TextFieldValue(
+                text = laterText,
+                selection = TextRange(laterText.length),
+                composition = latestNativeValue.composition?.let {
+                    TextRange(it.start, laterText.length)
+                },
+            )
+            arbiter.recordNativeValue(laterNativeValue)
+            assertTrue(
+                arbiter.shouldSuppressControlledUpdate(
+                    value = firstNativeValue,
+                ),
+                "$platform stale token must remain fenced across multiple native callbacks",
+            )
+
+            val lateArbiter = TextInputControlledStateArbiter()
+            lateArbiter.recordNativeValue(firstNativeValue)
+            lateArbiter.recordNativeValue(latestNativeValue)
+            assertTrue(
+                lateArbiter.shouldSuppressControlledUpdate(
+                    value = latestNativeValue,
+                ),
+                "$platform latest direct echo must not write back",
+            )
+            assertTrue(
+                lateArbiter.shouldSuppressControlledUpdate(
+                    value = firstNativeValue,
+                ),
+                "$platform late stale token must stay fenced after the latest echo",
+            )
+        }
+    }
+
+    @Test
+    fun newControlledEditingStateRemainsAuthoritativeAfterLatestNativeSnapshot() {
+        val arbiter = TextInputControlledStateArbiter()
+        val nativeValue = TextFieldValue(
+            text = "marked",
+            selection = TextRange(6),
+            composition = TextRange(0, 6),
+        )
+        arbiter.recordNativeValue(nativeValue)
+
+        val externalReplacement = TextFieldValue(
+            text = nativeValue.text,
+            selection = TextRange(1, 4),
+            composition = null,
+        )
+
+        assertFalse(nativeValue === externalReplacement)
+        assertFalse(
+            arbiter.shouldSuppressControlledUpdate(
+                value = externalReplacement,
             ),
         )
     }
@@ -230,23 +337,17 @@ class TextInputCallbackArbiterTest {
         val arbiter = TextInputControlledStateArbiter()
         val firstNativeValue = value(text = "1234567", selection = 7)
         val secondNativeValue = value(text = "123456789", selection = 9)
-        val firstGeneration = generation()
-        val secondGeneration = generation()
-        arbiter.recordNativeValue(firstNativeValue, firstGeneration)
-        arbiter.recordNativeValue(secondNativeValue, secondGeneration)
+        arbiter.recordNativeValue(firstNativeValue)
+        arbiter.recordNativeValue(secondNativeValue)
 
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = secondNativeValue,
-                updateGeneration = secondGeneration,
-                latestGeneration = secondGeneration,
             ),
         )
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = firstNativeValue,
-                updateGeneration = firstGeneration,
-                latestGeneration = secondGeneration,
             ),
         )
     }
@@ -255,14 +356,11 @@ class TextInputCallbackArbiterTest {
     fun legacyZeroSelectionEchoIsNotWrittenBackToNative() {
         val arbiter = TextInputControlledStateArbiter()
         val nativeValue = value(text = "1234567", selection = 0)
-        val currentGeneration = generation()
-        arbiter.recordNativeValue(nativeValue, currentGeneration)
+        arbiter.recordNativeValue(nativeValue)
 
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = nativeValue,
-                updateGeneration = currentGeneration,
-                latestGeneration = currentGeneration,
             ),
         )
     }
@@ -270,30 +368,22 @@ class TextInputCallbackArbiterTest {
     @Test
     fun transformedControlledValueRemainsAuthoritative() {
         val arbiter = TextInputControlledStateArbiter()
-        val currentGeneration = generation()
-        arbiter.recordNativeValue(
-            value(text = "draft", selection = 5),
-            currentGeneration,
-        )
+        arbiter.recordNativeValue(value(text = "draft", selection = 5))
 
         assertFalse(
             arbiter.shouldSuppressControlledUpdate(
                 value = value(text = "DRAFT", selection = 5),
-                updateGeneration = currentGeneration,
-                latestGeneration = currentGeneration,
             ),
         )
     }
 
     @Test
-    fun equivalentHistoricalValueFromBusinessRemainsAuthoritative() {
+    fun distinctEquivalentHistoricalBusinessValueIsNotSuppressedByIdentityFence() {
         val arbiter = TextInputControlledStateArbiter()
         val firstNativeValue = value(text = "draft", selection = 1)
         val secondNativeValue = value(text = "draft", selection = 2)
-        val firstGeneration = generation()
-        val secondGeneration = generation()
-        arbiter.recordNativeValue(firstNativeValue, firstGeneration)
-        arbiter.recordNativeValue(secondNativeValue, secondGeneration)
+        arbiter.recordNativeValue(firstNativeValue)
+        arbiter.recordNativeValue(secondNativeValue)
 
         val normalizedBusinessValue = value(text = "draft", selection = 1)
 
@@ -302,86 +392,90 @@ class TextInputCallbackArbiterTest {
         assertFalse(
             arbiter.shouldSuppressControlledUpdate(
                 value = normalizedBusinessValue,
-                updateGeneration = secondGeneration,
-                latestGeneration = secondGeneration,
             ),
         )
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = firstNativeValue,
-                updateGeneration = firstGeneration,
-                latestGeneration = secondGeneration,
             ),
         )
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = secondNativeValue,
-                updateGeneration = secondGeneration,
-                latestGeneration = secondGeneration,
             ),
         )
     }
 
     @Test
-    fun structurallyRetainedHistoricalCallbackIsAuthoritativeInCurrentGeneration() {
+    fun retainedHistoricalNativeInstanceIsFailClosedInMountedSession() {
         val arbiter = TextInputControlledStateArbiter()
         val firstNativeValue = value(text = "draft", selection = 1)
         val secondNativeValue = value(text = "draft", selection = 2)
-        val firstGeneration = generation()
-        val secondGeneration = generation()
-        arbiter.recordNativeValue(firstNativeValue, firstGeneration)
-        arbiter.recordNativeValue(secondNativeValue, secondGeneration)
+        arbiter.recordNativeValue(firstNativeValue)
+        arbiter.recordNativeValue(secondNativeValue)
 
-        assertFalse(
+        assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = firstNativeValue,
-                updateGeneration = secondGeneration,
-                latestGeneration = secondGeneration,
+            ),
+        )
+
+        // Reusing the exact native callback instance is ambiguous after native state advances.
+        // A distinguishable business replacement remains authoritative as a new object/editing state.
+        val explicitBusinessReplacement = firstNativeValue.copy(selection = TextRange(0, 1))
+        assertFalse(firstNativeValue === explicitBusinessReplacement)
+        assertFalse(
+            arbiter.shouldSuppressControlledUpdate(
+                value = explicitBusinessReplacement,
             ),
         )
         assertTrue(
             arbiter.shouldSuppressControlledUpdate(
                 value = secondNativeValue,
-                updateGeneration = secondGeneration,
-                latestGeneration = secondGeneration,
             ),
         )
     }
 
     @Test
     fun remountedSessionCannotMatchPreviousSessionToken() {
-        val arbiter = TextInputControlledStateArbiter()
-        val oldSessionGeneration = generation()
-        val remountedSessionGeneration = generation()
+        val oldSessionArbiter = TextInputControlledStateArbiter()
         val oldSessionValue = value(text = "draft", selection = 5)
-        arbiter.recordNativeValue(oldSessionValue, oldSessionGeneration)
+        oldSessionArbiter.recordNativeValue(oldSessionValue)
+
+        // CoreTextField remembers the arbiter inside the editor session, so a true remount creates
+        // a fresh token scope rather than trying to infer session identity from event ordering.
+        val remountedSessionArbiter = TextInputControlledStateArbiter()
 
         assertFalse(
-            arbiter.shouldSuppressControlledUpdate(
+            remountedSessionArbiter.shouldSuppressControlledUpdate(
                 value = oldSessionValue,
-                updateGeneration = remountedSessionGeneration,
-                latestGeneration = remountedSessionGeneration,
             ),
         )
     }
 
     @Test
-    fun inputStateGenerationForcesEqualHistoricalValueReconciliation() {
-        val historicalValue = value(text = "draft", selection = 1)
-        val normalizedHistoricalValue = value(text = "draft", selection = 1)
-        val previousGeneration = generation()
-        val nextGeneration = generation()
-
-        assertEquals(historicalValue, normalizedHistoricalValue)
-        assertFalse(historicalValue === normalizedHistoricalValue)
-        assertFalse(previousGeneration === nextGeneration)
+    fun nativeIdentityProvenanceWindowIsBounded() {
+        val arbiter = TextInputControlledStateArbiter()
+        val nativeValues = (0..64).map { index ->
+            val text = "draft-$index"
+            value(text = text, selection = text.length)
+        }
+        nativeValues.forEach(arbiter::recordNativeValue)
+        // Retain enough history to cover rapid snapshot convergence without retaining every text
+        // object for the full lifetime of a long-lived editor.
         assertFalse(
-            TextInputControlledUpdate(
-                value = historicalValue,
-                inputStateGeneration = previousGeneration,
-            ) == TextInputControlledUpdate(
-                value = normalizedHistoricalValue,
-                inputStateGeneration = nextGeneration,
+            arbiter.shouldSuppressControlledUpdate(
+                value = nativeValues.first(),
+            ),
+        )
+        assertTrue(
+            arbiter.shouldSuppressControlledUpdate(
+                value = nativeValues[1],
+            ),
+        )
+        assertTrue(
+            arbiter.shouldSuppressControlledUpdate(
+                value = nativeValues.last(),
             ),
         )
     }
@@ -396,6 +490,4 @@ class TextInputCallbackArbiterTest {
         text = text,
         selection = TextRange(selection),
     )
-
-    private fun generation(): TextInputStateGeneration = TextInputStateGeneration()
 }
