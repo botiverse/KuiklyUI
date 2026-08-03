@@ -237,6 +237,8 @@ jobs:
         run: python3 tools/check-compose-node-event-freshness.py --self-test
       - name: Preserve active user motion when RecyclerView enters dragging
         run: python3 tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
+      - name: Keep DrawModifierNode view-aware production dispatch
+        run: python3 tools/check-draw-modifier-view-dispatch.py --self-test
       - name: Reject non-finite iOS scroll event values
         run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
       - name: Preserve profiler observer composition and thread ownership
