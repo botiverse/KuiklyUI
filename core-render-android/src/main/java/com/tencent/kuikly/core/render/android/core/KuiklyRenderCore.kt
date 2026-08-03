@@ -50,7 +50,6 @@ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreTask
 import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreUIScheduler
 import com.tencent.tdf.module.TDFBaseModule
 import org.json.JSONObject
-import java.util.Locale
 
 class KuiklyRenderCore(
     private var contextHandler: IKuiklyRenderContextHandler? = null
@@ -438,14 +437,7 @@ class KuiklyRenderCore(
                 args.fourthArg()
             )
         )
-        return if (size == null) {
-            "0|0"
-        } else {
-            // %.2f 会四舍五入，第三位小数 <5 时会被舍去（如 10.999 -> 10.99），
-            // 导致回传尺寸比真实值偏小，可能引发布局截断。这里给宽高各加 0.005 再格式化，
-            // 整体抬高半个最小精度，使回传尺寸倾向于向上取整，避免变小。
-            String.format(Locale.ENGLISH, "%.2f|%.2f", size.width + 0.005f, size.height + 0.005f)
-        }
+        return formatLayoutSizeForReport(size?.width, size?.height)
     }
 
     private fun callViewMethod(method: KuiklyRenderNativeMethod, args: List<Any?>): Any? {

@@ -54,6 +54,8 @@ import org.json.JSONArray
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+internal fun layoutParamsWidthIsUnresolved(width: Int): Boolean = width <= 0
+
 /**
  * KTV 富文本组件，支持简单文本和富文本两种模式
  */
@@ -318,7 +320,7 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
      * A value of 0 also indicates that a fixed size has not yet been determined.
      */
     private fun layoutParamsNotHasSize(params: ViewGroup.LayoutParams): Boolean =
-        params.width <= 0
+        layoutParamsWidthIsUnresolved(params.width)
 
     private fun clearActiveLongPressSpanIndex() {
         activeLongPressSpanIndex = -1
