@@ -15,10 +15,16 @@
 
 #import "KuiklyRenderThreadManager.h"
 #import "KRLogModule.h"
+#import <CoreFoundation/CoreFoundation.h>
+#import <pthread/qos.h>
+#include <limits.h>
+#include <stdatomic.h>
 
 NSString *const KRRenderContextQueueName = @"com.tencent.kuikly.context";
 NSString *const KRRenderLogQueueName = @"com.tencent.kuikly.log";
 @implementation KuiklyRenderThreadManager
+
+static _Atomic(uint64_t) gContextNormalGeneration = 0;
 
 // 指定Context线程执行闭包
 + (void)performOnContextQueueWithBlock:(dispatch_block_t)block {
@@ -27,6 +33,7 @@ NSString *const KRRenderLogQueueName = @"com.tencent.kuikly.log";
 
 // 指定Context线程执行闭包
 + (void)performOnContextQueueWithBlock:(dispatch_block_t)block sync:(BOOL)sync {
+    atomic_fetch_add_explicit(&gContextNormalGeneration, 1, memory_order_relaxed);
     if (sync) {
         if ([self isContextQueue]) {
             block();
@@ -38,15 +45,64 @@ NSString *const KRRenderLogQueueName = @"com.tencent.kuikly.log";
     }
 }
 
++ (void)performOnContextQueueWhenIdleWithBlock:(dispatch_block_t)block {
+    if (!block) {
+        return;
+    }
+    uint64_t generation = atomic_load_explicit(&gContextNormalGeneration, memory_order_relaxed);
+    dispatch_async([KuiklyRenderThreadManager contextQueue], ^{
+        if (atomic_load_explicit(&gContextNormalGeneration, memory_order_relaxed) != generation) {
+            [KuiklyRenderThreadManager performOnContextQueueWhenIdleWithBlock:block];
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CFRunLoopObserverRef observer = CFRunLoopObserverCreateWithHandler(
+                kCFAllocatorDefault,
+                kCFRunLoopBeforeWaiting,
+                false,
+                INT_MAX,
+                ^(CFRunLoopObserverRef observerRef, CFRunLoopActivity activity) {
+                    dispatch_async([KuiklyRenderThreadManager contextQueue], ^{
+                        if (atomic_load_explicit(&gContextNormalGeneration, memory_order_relaxed) != generation) {
+                            [KuiklyRenderThreadManager performOnContextQueueWhenIdleWithBlock:block];
+                            return;
+                        }
+                        if (atomic_load_explicit(&gContextNormalGeneration, memory_order_relaxed) != generation) {
+                            [KuiklyRenderThreadManager performOnContextQueueWhenIdleWithBlock:block];
+                            return;
+                        }
+                        // A QoS-bearing dispatch block still inherits this queue's
+                        // user-interactive class. Lower the context worker itself for
+                        // the bounded idle callback, then restore it even on exception.
+                        qos_class_t previousQoS = qos_class_self();
+                        int qosResult = pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+                        @try {
+                            block();
+                        } @finally {
+                            if (qosResult == 0) {
+                                pthread_set_qos_class_self_np(previousQoS, 0);
+                            }
+                        }
+                    });
+                }
+            );
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+            CFRelease(observer);
+            CFRunLoopWakeUp(CFRunLoopGetMain());
+        });
+    });
+}
+
 + (void)performOnLogQueueWithBlock:(dispatch_block_t)block {
     dispatch_async([KuiklyRenderThreadManager logQueue], block);
 }
 
 + (void)performOnContextQueueImmediatelyWithBlock:(dispatch_block_t)block {
     if ([self isContextQueue]) {
+        atomic_fetch_add_explicit(&gContextNormalGeneration, 1, memory_order_relaxed);
         block();
     } else {
-        dispatch_async([KuiklyRenderThreadManager contextQueue], block);
+        [self performOnContextQueueWithBlock:block sync:NO];
     }
 }
 

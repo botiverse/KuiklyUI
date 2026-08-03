@@ -19,6 +19,7 @@ import android.os.ConditionVariable
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.MessageQueue
 import android.os.Process
 import com.tencent.kuikly.core.nvi.NativeBridge
 import com.tencent.kuikly.core.render.android.adapter.KuiklyRenderAdapterManager
@@ -38,9 +39,52 @@ object KuiklyRenderCoreContextScheduler : IKuiklyRenderCoreScheduler {
             KRHandlerThread(THREAD_NAME, Process.THREAD_PRIORITY_FOREGROUND, stackSize).apply { start() }.looper
         })
     }
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     override fun scheduleTask(delayMs: Long, task: Runnable) {
         handler.postDelayed(task, delayMs)
+    }
+
+    /**
+     * Runs one bounded task after this context looper has drained normal work.
+     *
+     * The callback temporarily uses background thread priority so speculative
+     * work yields CPU to interactive threads. A task already executing is not
+     * forcibly interrupted; callers must keep each callback bounded.
+     */
+    fun scheduleIdleTask(task: Runnable) {
+        scheduleAfterContextIdle {
+            mainHandler.post {
+                Looper.myQueue().addIdleHandler(
+                    MessageQueue.IdleHandler {
+                        // Foreground context work may have arrived while the
+                        // main queue was draining. Re-admit on context idle.
+                        scheduleAfterContextIdle {
+                            val threadId = Process.myTid()
+                            val previousPriority = Process.getThreadPriority(threadId)
+                            try {
+                                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+                                task.run()
+                            } finally {
+                                Process.setThreadPriority(previousPriority)
+                            }
+                        }
+                        false
+                    }
+                )
+            }
+        }
+    }
+
+    private fun scheduleAfterContextIdle(task: Runnable) {
+        handler.post {
+            Looper.myQueue().addIdleHandler(
+                MessageQueue.IdleHandler {
+                    task.run()
+                    false
+                }
+            )
+        }
     }
 
     override fun destroy() {

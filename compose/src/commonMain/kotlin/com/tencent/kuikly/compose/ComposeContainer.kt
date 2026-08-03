@@ -35,6 +35,9 @@ import com.tencent.kuikly.core.module.FileModule
 import com.tencent.kuikly.core.module.Module
 import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.InternalComposeUiApi
+import com.tencent.kuikly.compose.ui.input.key.Key
+import com.tencent.kuikly.compose.ui.input.key.KeyEvent
+import com.tencent.kuikly.compose.ui.input.key.KeyEventType
 import com.tencent.kuikly.compose.ui.platform.WindowInfoImpl
 import com.tencent.kuikly.compose.ui.scene.ComposeScene
 import com.tencent.kuikly.compose.ui.scene.KuiklyComposeScene
@@ -80,6 +83,22 @@ open class ComposeContainer :
          * 建议在ComposeContainer.willInit方法内使用，在setContent之前设置
          */
         var enableConsumeSnapshot: Boolean = true
+
+        /**
+         * Pager event name that render hosts can use to send hardware key events to Compose.
+         */
+        const val PAGER_EVENT_KEY_EVENT = "keyEvent"
+
+        const val KEY_EVENT_KEY_CODE = "keyCode"
+        const val KEY_EVENT_TYPE = "type"
+        const val KEY_EVENT_TYPE_UNKNOWN = KeyEventType.UnknownValue
+        const val KEY_EVENT_TYPE_UP = KeyEventType.KeyUpValue
+        const val KEY_EVENT_TYPE_DOWN = KeyEventType.KeyDownValue
+        const val KEY_EVENT_UTF16_CODE_POINT = "utf16CodePoint"
+        const val KEY_EVENT_ALT_PRESSED = "altPressed"
+        const val KEY_EVENT_CTRL_PRESSED = "ctrlPressed"
+        const val KEY_EVENT_META_PRESSED = "metaPressed"
+        const val KEY_EVENT_SHIFT_PRESSED = "shiftPressed"
     }
 
     override var ignoreLayout = true
@@ -115,11 +134,26 @@ open class ComposeContainer :
      * Profiler 生命周期监听器，负责在 Profiler start 时把 FileModule 实例传入。
      * 页面销毁时注销，避免内存泄漏。
      */
+    private var profilerFileModule: FileModule? = null
+
+    private fun registerProfilerFileModule() {
+        val module = getModule<FileModule>(FileModule.MODULE_NAME) ?: return
+        val previous = profilerFileModule
+        if (previous !== module) {
+            previous?.let { RecompositionProfiler.unregisterFileModule(it) }
+            profilerFileModule = module
+        }
+        RecompositionProfiler.registerFileModule(module)
+    }
+
+    private fun unregisterProfilerFileModule() {
+        profilerFileModule?.let { RecompositionProfiler.unregisterFileModule(it) }
+        profilerFileModule = null
+    }
+
     private val fileModuleListener = object : RecompositionProfiler.ProfilerLifecycleListener {
         override fun onProfilerStarted(tracker: RecompositionTracker) {
-            getModule<FileModule>(FileModule.MODULE_NAME)?.let {
-                RecompositionProfiler.setFileModule(it)
-            }
+            registerProfilerFileModule()
         }
         override fun onProfilerStopped() { /* nothing */ }
     }
@@ -164,9 +198,7 @@ open class ComposeContainer :
 
         // 如果 Profiler 已启用（start 先于页面创建），此时补传 FileModule
         if (RecompositionProfiler.isEnabled) {
-            getModule<FileModule>(FileModule.MODULE_NAME)?.let {
-                RecompositionProfiler.setFileModule(it)
-            }
+            registerProfilerFileModule()
         }
     }
 
@@ -208,11 +240,13 @@ open class ComposeContainer :
 
     override fun pageWillDestroy() {
         super.pageWillDestroy()
+        // Native bridge 被销毁前先从进程级 Profiler 解绑，使待写文件可回退到其他 live Pager。
+        unregisterProfilerFileModule()
+        RecompositionProfiler.removeLifecycleListener(fileModuleListener)
         stopFrameDispatcher()
         mediator?.updateAppState(false)
         dispose()
         updateLifecycleState(Lifecycle.State.DESTROYED)
-        RecompositionProfiler.removeLifecycleListener(fileModuleListener)
     }
 
     private fun updateLifecycleState(state: Lifecycle.State) {
@@ -261,6 +295,15 @@ open class ComposeContainer :
         return mediator
     }
 
+    /**
+     * Dispatch a hardware key event into the Compose focus tree.
+     *
+     * Platform render hosts can normalize their native key event into [KeyEvent] and call this
+     * method to drive [Modifier.onPreviewKeyEvent] and [Modifier.onKeyEvent] handlers.
+     */
+    fun sendKeyEvent(keyEvent: KeyEvent): Boolean =
+        mediator?.sendKeyEvent(keyEvent) ?: false
+
     override fun onReceivePagerEvent(pagerEvent: String, eventData: JSONObject) {
         super.onReceivePagerEvent(pagerEvent, eventData)
         if (pagerEvent == PAGER_EVENT_ROOT_VIEW_SIZE_CHANGED) {
@@ -283,8 +326,34 @@ open class ComposeContainer :
             val fontWeightScale = eventData.optDouble("fontWeightScale", 1.0)
             val fontSizeScale = eventData.optDouble("fontSizeScale", 1.0)
             configuration?.onFontConfigChange(fontSizeScale, fontWeightScale)
+        } else if (pagerEvent == PAGER_EVENT_KEY_EVENT) {
+            sendKeyEvent(eventData.toKeyEvent())
         }
     }
+
+    private fun JSONObject.toKeyEvent(): KeyEvent =
+        KeyEvent(
+            key = Key(optLong(KEY_EVENT_KEY_CODE, Key.Unknown.keyCode)),
+            type = optKeyEventType(),
+            utf16CodePoint = optInt(KEY_EVENT_UTF16_CODE_POINT, 0),
+            isAltPressed = optBoolean(KEY_EVENT_ALT_PRESSED, false),
+            isCtrlPressed = optBoolean(KEY_EVENT_CTRL_PRESSED, false),
+            isMetaPressed = optBoolean(KEY_EVENT_META_PRESSED, false),
+            isShiftPressed = optBoolean(KEY_EVENT_SHIFT_PRESSED, false),
+        )
+
+    private fun JSONObject.optKeyEventType(): KeyEventType =
+        when (optInt(KEY_EVENT_TYPE, KEY_EVENT_TYPE_UNKNOWN)) {
+            KEY_EVENT_TYPE_UP -> KeyEventType.KeyUp
+            KEY_EVENT_TYPE_DOWN -> KeyEventType.KeyDown
+            else -> {
+                when (optString(KEY_EVENT_TYPE, "")) {
+                    "KeyUp", "keyUp", "up" -> KeyEventType.KeyUp
+                    "KeyDown", "keyDown", "down" -> KeyEventType.KeyDown
+                    else -> KeyEventType.Unknown
+                }
+            }
+        }
 
     private fun updateWindowContainer(frame: Frame) {
         windowInfo.containerSize = IntSize(
@@ -356,4 +425,5 @@ open class ComposeContainer :
     override fun createExternalModules(): Map<String, Module>? {
         return null
     }
+
 }

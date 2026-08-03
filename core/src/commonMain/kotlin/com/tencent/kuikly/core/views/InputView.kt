@@ -394,7 +394,10 @@ class InputAttr : Attr() {
 data class InputParams(
     val text: String,
     val imeAction: String? = null,
-    val length: Int? = null
+    val length: Int? = null,
+    val syncRevision: Int? = null,
+    val focusRequestId: Long? = null,
+    val focusIntentOnly: Boolean = false,
 )
 
 data class KeyboardParams(
@@ -419,7 +422,8 @@ class InputEvent : Event() {
             it as JSONObject
             val text = it.optString("text")
             val length = if (it.has("length")) it.optInt("length") else null
-            handler(InputParams(text, length = length))
+            val syncRevision = if (it.has("syncRevision")) it.optInt("syncRevision") else null
+            handler(InputParams(text, length = length, syncRevision = syncRevision))
         }, isSync = isSyncEdit)
     }
 
@@ -457,7 +461,14 @@ class InputEvent : Event() {
         register(INPUT_FOCUS){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(
+                InputParams(
+                    text = text,
+                    focusRequestId = focusRequestId,
+                    focusIntentOnly = it.optBoolean("focusIntentOnly"),
+                ),
+            )
         }
     }
 
@@ -469,7 +480,8 @@ class InputEvent : Event() {
         register(INPUT_BLUR){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(InputParams(text, focusRequestId = focusRequestId))
         }
     }
 

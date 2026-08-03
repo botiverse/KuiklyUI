@@ -352,6 +352,11 @@ open class TextAreaAttr : Attr() {
         return this
     }
 
+    fun fontFamily(fontFamily: String): TextAreaAttr {
+        TextConst.FONT_FAMILY with fontFamily
+        return this
+    }
+
     fun textAlignCenter(): TextAreaAttr {
         TextConst.TEXT_ALIGN with "center"
         return this
@@ -649,7 +654,8 @@ open class TextAreaEvent : Event() {
                 it as JSONObject
                 val text = it.optString("text")
                 val length = if (it.has("length")) it.optInt("length") else null
-                val params = InputParams(text, length = length)
+                val syncRevision = if (it.has("syncRevision")) it.optInt("syncRevision") else null
+                val params = InputParams(text, length = length, syncRevision = syncRevision)
                 syncTextDidChangeObservers.forEach { observer -> observer.invoke(params) }
                 textDidChangeHandler?.invoke(params)
             }, isSync = isSyncEdit || syncTextDidChangeObservers.isNotEmpty())
@@ -717,7 +723,14 @@ open class TextAreaEvent : Event() {
         this.register(INPUT_FOCUS){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(
+                InputParams(
+                    text = text,
+                    focusRequestId = focusRequestId,
+                    focusIntentOnly = it.optBoolean("focusIntentOnly"),
+                ),
+            )
         }
     }
     /**
@@ -728,7 +741,8 @@ open class TextAreaEvent : Event() {
         this.register(INPUT_BLUR){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(InputParams(text, focusRequestId = focusRequestId))
         }
     }
 

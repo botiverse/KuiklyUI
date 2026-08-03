@@ -22,6 +22,7 @@ import com.tencent.kuikly.compose.foundation.lazy.grid.LazyGridMeasureResult
 import com.tencent.kuikly.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridMeasureResult
 import com.tencent.kuikly.compose.foundation.pager.PagerMeasureResult
 import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
+import com.tencent.kuikly.compose.gestures.invalidateDeferredScrollOffsetAlignmentOwnersOnReuse
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
 import com.tencent.kuikly.compose.ui.layout.LayoutNodeSubcompositionsState
 import com.tencent.kuikly.compose.ui.layout.MeasureResult
@@ -121,6 +122,20 @@ internal fun transferScrollToTopCallback(old: KuiklyScrollInfo?, new: KuiklyScro
     }
 }
 
+internal fun invalidateDeferredScrollOffsetAlignmentOnReuse(
+    old: KuiklyScrollInfo?,
+    new: KuiklyScrollInfo
+) {
+    invalidateDeferredScrollOffsetAlignmentOwnersOnReuse(
+        oldCoordinator = old?.deferredScrollOffsetAlignmentCoordinator,
+        newCoordinator = new.deferredScrollOffsetAlignmentCoordinator,
+        cancelPendingAlignment = { it.cancel() }
+    )
+    if (old != null && old !== new) {
+        old.scrollView = null
+    }
+}
+
 /**
  * Restore ScrollerView state during the update block (both first creation and reuse).
  *
@@ -147,8 +162,6 @@ internal fun restoreScrollerViewOnReuse(
     sv.prepareForComposeReuse()
 
     kuiklyInfo.ignoreScrollOffset = null
-    kuiklyInfo.appleScrollViewOffsetJob?.cancel()
-    kuiklyInfo.appleScrollViewOffsetJob = null
     kuiklyInfo.realContentSize = null
 
     // Restore contentSize first (UIKit clamps contentOffset to contentSize bounds)

@@ -87,6 +87,8 @@ import kotlin.math.roundToInt
  * position will be maintained based on the key, which means if you add/remove items before the
  * current visible item the item with the given key will be kept as the first visible one. If null
  * is passed the position in the list will represent the key.
+ * @param keepItemAlive whether all pages should stay composed and laid out even when outside the
+ * visible viewport, matching PageList's `keepItemAlive(true)` semantics for small tab/page sets.
  * @param pageNestedScrollConnection A [NestedScrollConnection] that dictates how this [Pager]
  * behaves with nested lists. The default behavior will see [Pager] to consume all nested deltas.
  * @param snapPosition The calculation of how this Pager will perform snapping of pages.
@@ -109,6 +111,7 @@ fun HorizontalPager(
     userScrollEnabled: Boolean = true,
 //    reverseLayout: Boolean = false,
     key: ((index: Int) -> Any)? = null,
+    keepItemAlive: Boolean = false,
 //    pageNestedScrollConnection: NestedScrollConnection = PagerDefaults.pageNestedScrollConnection(
 //        state,
 //        Orientation.Horizontal
@@ -130,6 +133,7 @@ fun HorizontalPager(
         userScrollEnabled = userScrollEnabled,
 //        reverseLayout = reverseLayout,
         key = key,
+        keepItemAlive = keepItemAlive,
 //        pageNestedScrollConnection = pageNestedScrollConnection,
         snapPosition = SnapPosition.Start,
         pageContent = pageContent
@@ -174,6 +178,8 @@ fun HorizontalPager(
  * position will be maintained based on the key, which means if you add/remove items before the
  * current visible item the item with the given key will be kept as the first visible one. If null
  * is passed the position in the list will represent the key.
+ * @param keepItemAlive whether all pages should stay composed and laid out even when outside the
+ * visible viewport, matching PageList's `keepItemAlive(true)` semantics for small tab/page sets.
  * @param pageNestedScrollConnection A [NestedScrollConnection] that dictates how this [Pager] behaves
  * with nested lists. The default behavior will see [Pager] to consume all nested deltas.
  * @param snapPosition The calculation of how this Pager will perform snapping of Pages.
@@ -196,6 +202,7 @@ fun VerticalPager(
     userScrollEnabled: Boolean = true,
 //    reverseLayout: Boolean = false,
     key: ((index: Int) -> Any)? = null,
+    keepItemAlive: Boolean = false,
 //    pageNestedScrollConnection: NestedScrollConnection = PagerDefaults.pageNestedScrollConnection(
 //        state,
 //        Orientation.Vertical
@@ -217,6 +224,7 @@ fun VerticalPager(
         userScrollEnabled = userScrollEnabled,
 //        reverseLayout = reverseLayout,
         key = key,
+        keepItemAlive = keepItemAlive,
 //        pageNestedScrollConnection = pageNestedScrollConnection,
         snapPosition = SnapPosition.Start,
         pageContent = pageContent

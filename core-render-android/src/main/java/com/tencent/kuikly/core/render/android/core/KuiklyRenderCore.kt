@@ -29,6 +29,7 @@ import com.tencent.kuikly.core.render.android.context.KuiklyRenderNativeMethodCa
 import com.tencent.kuikly.core.render.android.context.IKuiklyRenderContextHandler
 import com.tencent.kuikly.core.render.android.context.KuiklyRenderNativeMethod
 import com.tencent.kuikly.core.render.android.context.KuiklyRenderJvmContextHandler
+import com.tencent.kuikly.core.render.android.context.kuiklyNativeMethodRequiresContextThread
 import com.tencent.kuikly.core.render.android.context.nativeMethodCallCounts
 import com.tencent.kuikly.core.render.android.css.ktx.fifthArg
 import com.tencent.kuikly.core.render.android.css.ktx.fourthArg
@@ -611,25 +612,7 @@ class KuiklyRenderCore(
     }
 
     private fun isSyncMethodCall(method: KuiklyRenderNativeMethod, args: List<Any?>): Boolean {
-        if (method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallModuleMethod ||
-            method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod
-        ) {
-            val fifthArg = if (args.size >= IKuiklyRenderContextHandler.CALL_ARGS_COUNT) {
-                args[KRExtConst.SIXTH_ARG_INDEX] as? Int ?: KRExtConst.FIRST_ARG_INDEX
-            } else {
-                KRExtConst.FIRST_ARG_INDEX
-            }
-            return fifthArg == SYNC_CALL_TYPE
-        }
-
-        return method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCalculateRenderViewSize ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCreateShadow ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodRemoveShadow ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowForView ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowProp ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetTimeout ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallShadowMethod ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSyncFlushUI
+        return kuiklyNativeMethodRequiresContextThread(method, args)
     }
 
     /**
@@ -666,7 +649,6 @@ class KuiklyRenderCore(
 
     companion object {
         private var instanceIdProducer = 0L
-        private const val SYNC_CALL_TYPE = 1
         private const val LAYOUT_VIEW_MAX_LOG_COUNT = 10
     }
 

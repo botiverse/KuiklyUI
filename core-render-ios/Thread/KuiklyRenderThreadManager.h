@@ -33,6 +33,14 @@ NS_ASSUME_NONNULL_BEGIN
  * @param sync 是否同步执行
  */
 + (void)performOnContextQueueWithBlock:(dispatch_block_t)block sync:(BOOL)sync;
+
+/*
+ * Runs one bounded speculative block after the context queue has remained
+ * free of newly enqueued normal work until the admission marker executes.
+ * The block runs with utility QoS and is rescheduled behind foreground work
+ * when the normal-work generation changes.
+ */
++ (void)performOnContextQueueWhenIdleWithBlock:(dispatch_block_t)block;
 /*
  * 如果是在context线程的话，立即在context线程执行，否则next runloop执行
  */

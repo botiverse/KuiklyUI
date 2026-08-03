@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ComposeNode
 import androidx.compose.runtime.ComposeNodeLifecycleCallback
 import androidx.compose.runtime.CompositionContext
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ReusableComposeNode
 import androidx.compose.runtime.ReusableComposition
@@ -71,6 +72,7 @@ import com.tencent.kuikly.compose.views.VirtualNodeView
 import com.tencent.kuikly.compose.layout.bindKuiklyInfo
 import com.tencent.kuikly.compose.layout.checkOffScreenNode
 import com.tencent.kuikly.compose.layout.hideOffsetScreenView
+import com.tencent.kuikly.compose.layout.invalidateDeferredScrollOffsetAlignmentOnReuse
 import com.tencent.kuikly.compose.layout.restoreScrollerViewOnReuse
 import com.tencent.kuikly.compose.layout.transferScrollToTopCallback
 import com.tencent.kuikly.compose.scroller.handleScrollToTopCallback
@@ -328,21 +330,30 @@ fun SubcomposeLayout(
                     return@scroll
                 }
 
-                val prevOffset = kuiklyInfo.contentOffset
                 kuiklyInfo.contentOffset = offset
                 (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
 
-                if (kuiklyInfo.ignoreScrollOffset != null) {
-                    val ignoreOffset = kuiklyInfo.ignoreScrollOffset!!
-                    val epsilon = 0.5 * kuiklyInfo.getDensity()  // 使用 0.5dp 作为误差值
-                    val matched = abs(ignoreOffset.x.minus(scaleParams.offsetX)) <= epsilon
-                        && abs(ignoreOffset.y.minus(scaleParams.offsetY)) <= epsilon
-                    if (matched) {
-                        kuiklyInfo.ignoreScrollOffset = null
+                when (
+                    kuiklyInfo.resolveNativeScrollEvent(
+                        offsetX = scaleParams.offsetX,
+                        offsetY = scaleParams.offsetY,
+                        epsilon = 0.5 * kuiklyInfo.getDensity(),
+                    )
+                ) {
+                    KuiklyScrollInfo.NativeScrollEventDisposition.Consume -> return@scroll
+                    KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly -> {
+                        // Off-target echo of our own programmatic move (native
+                        // clamped or split it). Adopt the reported offset so
+                        // future deltas use the true base, but do not dispatch
+                        // a compose scroll: offsetDirty stays set, so a later
+                        // alignment pass converges once the render-side content
+                        // size has caught up (task #318 joint first-open stall).
+                        kuiklyInfo.composeOffset = offset.toFloat()
+                        return@scroll
                     }
-                    return@scroll
+                    KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch -> Unit
                 }
 
                 // 忽略较小的滑动
@@ -395,6 +406,15 @@ fun SubcomposeLayout(
         scrollViewRef?.listenScrollEvent()
     }
 
+    DisposableEffect(scrollViewRef, scrollableState) {
+        val boundScrollView = scrollViewRef
+        onDispose {
+            if (scrollableState.kuiklyInfo.scrollView === boundScrollView) {
+                scrollableState.kuiklyInfo.scrollView = null
+            }
+        }
+    }
+
     ReusableComposeNode<KNode<*>, KuiklyApplier>(
         factory = {
             val newView = ScrollerView<ScrollerAttr, ScrollerEvent>()
@@ -437,6 +457,8 @@ fun SubcomposeLayout(
                 scrollViewRef = sv
 
                 val oldKuiklyInfo = sv.extProps[KuiklyInfoKey] as? KuiklyScrollInfo
+                val newKuiklyInfo = scrollableState.kuiklyInfo
+                invalidateDeferredScrollOffsetAlignmentOnReuse(oldKuiklyInfo, newKuiklyInfo)
                 val kuiklyInfo = bindKuiklyInfo(sv, scrollableState, orientation)
                 transferScrollToTopCallback(oldKuiklyInfo, kuiklyInfo)
                 restoreScrollerViewOnReuse(sv, kuiklyInfo, isPagerView, orientation, oldKuiklyInfo?.contentOffset)
@@ -778,6 +800,7 @@ internal class LayoutNodeSubcompositionsState(
                     @Suppress("ExceptionMessage")
                     checkPrecondition(precomposedCount > 0)
                     precomposedCount--
+                    precomposed.invalidateDrawAfterSubcomposeSlotActivation()
                     precomposed
                 } else {
                     takeNodeFromReusables(slotId)
@@ -1064,6 +1087,7 @@ internal class LayoutNodeSubcompositionsState(
             nodeState.activeState = mutableStateOf(true)
             nodeState.forceReuse = true
             nodeState.forceRecompose = true
+            node.invalidateDrawAfterSubcomposeSlotActivation()
             node
         }
     }
@@ -1366,6 +1390,22 @@ internal class LayoutNodeSubcompositionsState(
             }
         } ?: emptyList()
     }
+}
+
+/**
+ * Wakes the draw path when a retained or precomposed lazy slot becomes active again.
+ *
+ * [disposeOrReuseStartingFromIndex] hides a retained slot's native descendants after placement.
+ * The next measure can take the same slot back from the reusable section without moving it or
+ * changing its modifier chain. In that case placement restores the descendants' visibility props,
+ * but a clean virtual slot container can still prevent an already-dirty descendant from reaching
+ * the render root. The same stranded-dirty state can occur when a precomposed slot is drawn past
+ * while unplaced and is only made active by a later measure. This activation-specific invalidation
+ * deliberately crosses consecutive dirty ancestors; ordinary [LayoutNode.invalidateDraw]
+ * coalescing cannot repair either boundary.
+ */
+internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotActivation() {
+    (this as? KNode<*>)?.invalidateDrawForReuse()
 }
 
 private val ReusedSlotId =

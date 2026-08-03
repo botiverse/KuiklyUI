@@ -222,6 +222,24 @@ class KRViewDecoration(targetView: View) : IKRViewDecoration {
         return isCustomClipPathMode
     }
 
+    /**
+     * Clears every native drawable/clip surface owned by this decoration before the View enters
+     * the reuse pool. Radius is copied into the foreground border drawable, so dropping only the
+     * background and decorator metadata can leave rounded foreground state on the next owner.
+     */
+    internal fun resetForReuse() {
+        targetViewWeakRef.get()?.also { view ->
+            view.background = null
+            if (!isBeforeM) {
+                view.foreground = null
+            }
+            view.outlineProvider = null
+            view.clipToOutline = false
+            view.invalidate()
+        }
+        customForegroundDrawable = null
+    }
+
     private fun clipPath(w: Int, h: Int, canvas: Canvas) {
         if (!needClip) { // 没有设置圆角或路径的情况
             return

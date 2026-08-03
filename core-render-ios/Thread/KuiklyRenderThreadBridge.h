@@ -24,6 +24,9 @@ extern "C" {
 /// The provided callback will be invoked on the context queue with the same pagerId C string.
 FOUNDATION_EXPORT void com_tencent_kuikly_ScheduleContextTask(const char * _Nullable pagerId, void (* _Nullable onSchedule)(const char * _Nullable pagerId));
 
+/// C-callable: Schedule one bounded task after normal Kuikly context work drains.
+FOUNDATION_EXPORT void com_tencent_kuikly_ScheduleContextIdleTask(const char * _Nullable pagerId, void (* _Nullable onSchedule)(const char * _Nullable pagerId));
+
 /// C-callable: Return true if the current thread is the context thread.
 /// `pagerId` parameter currently ignored but kept for API compatibility.
 FOUNDATION_EXPORT bool com_tencent_kuikly_IsCurrentOnContextThread(const char * _Nullable pagerId);
@@ -31,4 +34,3 @@ FOUNDATION_EXPORT bool com_tencent_kuikly_IsCurrentOnContextThread(const char * 
 #ifdef __cplusplus
 }
 #endif
-

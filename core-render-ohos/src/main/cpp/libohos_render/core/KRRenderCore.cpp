@@ -50,6 +50,11 @@ void com_tencent_kuikly_ScheduleContextTask(const char *pagerId, void (*onSchedu
         0, [instanceId = std::string(pagerId), onSchedule]() { onSchedule(instanceId.c_str()); });
 }
 
+void com_tencent_kuikly_ScheduleContextIdleTask(const char *pagerId, void (*onSchedule)(const char *pagerId)) {
+    KRContextScheduler::ScheduleIdleTask(
+        [instanceId = std::string(pagerId), onSchedule]() { onSchedule(instanceId.c_str()); });
+}
+
 bool com_tencent_kuikly_IsCurrentOnContextThread(const char *pagerId) {
     return KRContextScheduler::IsCurrentOnContextThread();
 }
@@ -228,18 +233,7 @@ KRRenderCore::OnCallNative(const KuiklyRenderNativeMethod &method, std::shared_p
 
 // 判断事件是否需要同步调用
 bool KRRenderCore::ShouldSyncCallMethod(const KuiklyRenderNativeMethod &method, std::shared_ptr<KRRenderValue> &arg5) {
-    if (method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallModuleMethod) {
-        return IsSyncCallback(arg5);
-    }
-    return method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCalculateRenderViewSize ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCreateShadow ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodRemoveShadow ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowProp ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowForView ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetTimeout ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallShadowMethod ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSyncFlushUI ||
-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallTDFNativeMethod;
+    return KRNativeMethodRequiresContextThread(method, arg5);
 }
 
 KRAnyValue KRRenderCore::PerformNativeCallback(const KuiklyRenderNativeMethod &method, const KRAnyValue &arg1,

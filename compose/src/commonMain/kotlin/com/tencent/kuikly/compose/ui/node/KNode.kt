@@ -143,6 +143,21 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         super.detach()
     }
 
+    override fun onReuse() {
+        super.onReuse()
+        // A reusable Compose slot keeps the same native view while its modifier chain can now
+        // represent semantically different content. Always redraw so reset() -> flush() clears
+        // render-only state (for example borderRadius and clipPath) left by the previous item,
+        // even when the replacement modifiers are structurally equal and emit no invalidation.
+        //
+        // Reuse can start while this node is already dirty because onDeactivate/resetModifierState
+        // invalidated it under its previous parent. A normal invalidateDraw() is intentionally a
+        // no-op in that state, but the new parent may still be clean and therefore skip traversing
+        // this dirty child. Force propagation across the reuse boundary so the pending redraw is
+        // reachable from the new tree.
+        invalidateDrawForReuse()
+    }
+
     override fun onRelease() {
         // Release child subcompositions before clearing the Kuikly view tree. Otherwise nested
         // applier removeAt calls may observe an already-cleared ViewContainer.children list.
@@ -231,6 +246,22 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             parent?.invalidateDraw()
         }
     }
+
+    internal fun invalidateDrawForReuse() {
+        drawInvalidated = true
+        val currentParent = parent
+        if (currentParent is KNode<*>) {
+            currentParent.invalidateDrawForReuse()
+        } else {
+            currentParent?.invalidateDraw()
+        }
+    }
+
+    internal fun clearDrawInvalidationForTest() {
+        drawInvalidated = false
+    }
+
+    internal fun isDrawInvalidatedForTest(): Boolean = drawInvalidated
 
     override fun onWillStartMeasure() {
         super.onWillStartMeasure()

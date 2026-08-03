@@ -16,11 +16,16 @@
 package com.tencent.kuikly.core.render.android.expand.component.text
 
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.os.Build
 import android.text.Layout
 import android.text.Spanned
+import android.text.TextPaint
+import android.text.style.CharacterStyle
 import android.text.style.ReplacementSpan
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
 import com.tencent.kuikly.core.render.android.expand.component.SelectionEdge
@@ -28,8 +33,24 @@ import com.tencent.kuikly.core.render.android.expand.component.SelectionType
 import java.lang.ref.WeakReference
 import java.text.BreakIterator
 import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
 
 private const val INVALID_OFFSET = -1
+// react baseline: MarkdownContent inline `code` = bg-soft-signal/40, and
+// soft-signal == brutal-yellow == #FFD440 (web index.css). 0x66 == 40% alpha.
+// Was 0x66FFD84D (D84D) — a drift off the brand yellow that mismatched both
+// react and the app's own tag/self-mention fills (D440, below). Single source: D440.
+private const val SLOCK_INLINE_CODE_FILL_COLOR = 0x66FFD440
+private const val SLOCK_INLINE_CODE_BORDER_COLOR = 0xFF000000.toInt()
+private const val SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO = 4f / 15f
+private const val SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO = 2f / 15f
+private const val SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO = 2f / 15f
+private const val SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO = 24f / 15f
+private const val SLOCK_INLINE_CODE_BORDER_WIDTH_DP = 1f
+private const val SLOCK_INLINE_CODE_BORDER_MIN_WIDTH = 2f
 
 /**
  * 富文本绘制器，封装 [Layout]，用于富文本视图的测量与绘制。
@@ -44,6 +65,38 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     private var selectionStart = -1
     private var selectionEnd = -1
     internal val hasSelection: Boolean get() = 0 <= selectionStart && selectionStart < selectionEnd
+    private val slockInlineCodeFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+        color = SLOCK_INLINE_CODE_FILL_COLOR
+    }
+    private val slockInlineCodeBorderPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = SLOCK_INLINE_CODE_BORDER_COLOR
+        isAntiAlias = false
+    }
+    private val slockInlineCodeRect = RectF()
+    private val inlineBoxFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val inlineBoxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
+    private val inlineBoxRect = RectF()
+    private val inlineBoxSelectionPath = Path()
+    private val inlineBoxLineClipPath = Path()
+    private val inlineBoxSelectionBounds = RectF()
+    private val customUnderlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
+    private val customUnderlineClearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL_AND_STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+    }
+    private val customUnderlineSelectionPath = Path()
+    private val customUnderlineGlyphPath = Path()
+    private val customUnderlineGlyphBounds = RectF()
 
     private val wordIterator by lazy(LazyThreadSafetyMode.NONE) {
         WordIterator(textLayout.text, 0, textLayout.text.length, Locale.getDefault())
@@ -67,7 +120,395 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
      * 将文本内容绘制到 [canvas]，对接到 [Layout.draw]。
      */
     fun draw(canvas: Canvas) {
+        drawInlineBoxChrome(canvas, drawFill = true, drawBorder = false)
+        drawSlockInlineCodeChrome(canvas, drawFill = true, drawBorder = false)
         textLayout.draw(canvas)
+        drawCustomUnderlines(canvas)
+        drawSlockInlineCodeChrome(canvas, drawFill = false, drawBorder = true)
+        drawInlineBoxChrome(canvas, drawFill = false, drawBorder = true)
+    }
+
+    private fun drawCustomUnderlines(canvas: Canvas) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRSkipInkCustomUnderlineSpan::class.java)
+        if (spans.isEmpty()) return
+
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+
+            val layer = canvas.saveLayer(
+                0f,
+                0f,
+                textLayout.width.toFloat(),
+                textLayout.height.toFloat(),
+                null,
+            )
+            val startLine = textLayout.getLineForOffset(start)
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val segmentStart = max(start, textLayout.getLineStart(line))
+                val segmentEnd = min(end, textLayout.getLineVisibleEnd(line))
+                if (segmentEnd <= segmentStart) continue
+
+                customUnderlineSelectionPath.reset()
+                textLayout.getSelectionPath(segmentStart, segmentEnd, customUnderlineSelectionPath)
+                if (customUnderlineSelectionPath.isEmpty) continue
+                val clipped = canvas.save()
+                val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+                val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+                canvas.clipRect(
+                    lineLeft,
+                    textLayout.getLineTop(line).toFloat(),
+                    lineRight,
+                    textLayout.getLineBottom(line).toFloat(),
+                )
+                canvas.clipPath(customUnderlineSelectionPath)
+                val resolvedPaint = resolveTextPaint(spanned, segmentStart, span)
+                customUnderlinePaint.color = span.color ?: resolvedPaint.color
+                customUnderlinePaint.strokeWidth =
+                    span.thickness ?: defaultUnderlineThickness(resolvedPaint)
+                val underlineY =
+                    textLayout.getLineBaseline(line).toFloat() +
+                        (span.offset ?: underlinePosition(resolvedPaint))
+                canvas.drawLine(
+                    0f,
+                    underlineY,
+                    textLayout.width.toFloat(),
+                    underlineY,
+                    customUnderlinePaint,
+                )
+                clearGlyphInkGaps(
+                    canvas = canvas,
+                    spanned = spanned,
+                    start = segmentStart,
+                    end = segmentEnd,
+                    line = line,
+                    underlineY = underlineY,
+                    thickness = customUnderlinePaint.strokeWidth,
+                    marker = span,
+                )
+                canvas.restoreToCount(clipped)
+            }
+            canvas.restoreToCount(layer)
+        }
+    }
+
+    private fun resolveTextPaint(
+        spanned: Spanned,
+        offset: Int,
+        marker: KRSkipInkCustomUnderlineSpan,
+    ): TextPaint = TextPaint(textLayout.paint).also { resolved ->
+        val queryEnd = (offset + 1).coerceAtMost(spanned.length)
+        spanned.getSpans(offset, queryEnd, CharacterStyle::class.java).forEach { style ->
+            if (style !== marker) style.updateDrawState(resolved)
+        }
+    }
+
+    private fun clearGlyphInkGaps(
+        canvas: Canvas,
+        spanned: Spanned,
+        start: Int,
+        end: Int,
+        line: Int,
+        underlineY: Float,
+        thickness: Float,
+        marker: KRSkipInkCustomUnderlineSpan,
+    ) {
+        var offset = start
+        val halfThickness = thickness / 2f
+        // Clear the actual glyph outline plus a restrained halo. A full glyph-bounds rectangle
+        // makes descenders erase the underline across their complete advance; no halo makes the
+        // skip nearly invisible at production scale. One underline thickness keeps the gap
+        // legible while remaining shaped by the glyph rather than by its bounding box.
+        customUnderlineClearPaint.strokeWidth = max(1f, thickness)
+        while (offset < end) {
+            val codePoint = Character.codePointAt(spanned, offset)
+            val next = (offset + Character.charCount(codePoint)).coerceAtMost(end)
+            val glyph = spanned.subSequence(offset, next).toString()
+            val resolvedPaint = resolveTextPaint(spanned, offset, marker)
+            val advance = resolvedPaint.measureText(glyph)
+            val caretX = textLayout.getPrimaryHorizontal(offset)
+            val glyphX = if (textLayout.isRtlCharAt(offset)) caretX - advance else caretX
+            customUnderlineGlyphPath.reset()
+            resolvedPaint.getTextPath(
+                glyph,
+                0,
+                glyph.length,
+                glyphX,
+                textLayout.getLineBaseline(line).toFloat(),
+                customUnderlineGlyphPath,
+            )
+            if (!customUnderlineGlyphPath.isEmpty) {
+                customUnderlineGlyphPath.computeBounds(customUnderlineGlyphBounds, true)
+                val bandTop = underlineY - halfThickness
+                val bandBottom = underlineY + halfThickness
+                if (
+                    customUnderlineGlyphBounds.bottom >= bandTop &&
+                    customUnderlineGlyphBounds.top <= bandBottom
+                ) {
+                    canvas.drawPath(customUnderlineGlyphPath, customUnderlineClearPaint)
+                }
+            }
+            offset = next
+        }
+    }
+
+    private fun defaultUnderlineThickness(paint: Paint): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            paint.underlineThickness.takeIf { it > 0f }
+                ?: (paint.textSize / 18f).coerceAtLeast(1f)
+        } else {
+            (paint.textSize / 18f).coerceAtLeast(1f)
+        }
+
+    private fun underlinePosition(paint: Paint): Float =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            paint.underlinePosition.takeIf { it > 0f }
+                ?: (paint.textSize / 9f).coerceAtLeast(1f)
+        } else {
+            (paint.textSize / 9f).coerceAtLeast(1f)
+        }
+
+    private fun drawInlineBoxChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRInlineBoxSpan::class.java)
+        if (spans.isEmpty()) return
+
+        val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
+        val metrics = textLayout.paint.fontMetrics
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+            val style = span.style
+            val atomicSpan =
+                spanned.getSpans(start, end, KRInlineBoxAtomicTextSpan::class.java)
+                    .firstOrNull { atomicSpan ->
+                        spanned.getSpanStart(atomicSpan) == start &&
+                            spanned.getSpanEnd(atomicSpan) == end
+                    }
+            val startLine = textLayout.getLineForOffset((start + 1).coerceAtMost(end - 1))
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val lineStart = textLayout.getLineStart(line)
+                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
+                val segmentStart = max(start, lineStart)
+                val segmentEnd = min(end, lineVisibleEnd)
+                if (segmentEnd <= segmentStart) continue
+                val atomicBounds =
+                    atomicSpan?.let { atomicInlineBoxBounds(start, end, line, it) }
+                val clipToSelectionPath = atomicBounds == null
+                val segmentLeft: Float
+                val segmentRight: Float
+                if (atomicBounds != null) {
+                    // ReplacementSpan caret affinity can still resolve to adjacent
+                    // text. The selection path keeps the visual anchor, while the
+                    // span's measured width avoids line-end selection expansion.
+                    segmentLeft = atomicBounds.left
+                    segmentRight = atomicBounds.right
+                } else {
+                    val segmentBounds = inlineBoxSelectionBounds(segmentStart, segmentEnd, line)
+                        ?: continue
+                    segmentLeft = segmentBounds.left
+                    segmentRight = segmentBounds.right
+                }
+                val left = (
+                    segmentLeft + if (segmentStart == start) style.marginStart else 0f
+                    )
+                    .coerceAtLeast(layoutLeft)
+                val right = (
+                    segmentRight - if (segmentEnd == end) style.marginEnd else 0f
+                    )
+                    .coerceAtMost(layoutRight)
+                if (right <= left) continue
+
+                val baseline = textLayout.getLineBaseline(line).toFloat()
+                val top = baseline + metrics.ascent - style.paddingTop - style.borderWidth
+                val bottom = baseline + metrics.descent + style.paddingBottom + style.borderWidth
+                if (bottom <= top) continue
+                inlineBoxRect.set(left, top, right, bottom)
+                val saveCount =
+                    if (clipToSelectionPath) {
+                        canvas.save().also { canvas.clipPath(inlineBoxSelectionPath) }
+                    } else {
+                        null
+                    }
+                if (drawFill && style.backgroundColor != null) {
+                    inlineBoxFillPaint.color = style.backgroundColor
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        style.cornerRadius,
+                        style.cornerRadius,
+                        inlineBoxFillPaint
+                    )
+                }
+                if (drawBorder && style.borderColor != null && style.borderWidth > 0f) {
+                    inlineBoxBorderPaint.color = style.borderColor
+                    inlineBoxBorderPaint.strokeWidth = style.borderWidth
+                    val inset = style.borderWidth / 2f
+                    inlineBoxRect.inset(inset, inset)
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        max(0f, style.cornerRadius - inset),
+                        max(0f, style.cornerRadius - inset),
+                        inlineBoxBorderPaint
+                    )
+                }
+                if (saveCount != null) canvas.restoreToCount(saveCount)
+            }
+        }
+    }
+
+    private fun atomicInlineBoxBounds(
+        start: Int,
+        end: Int,
+        line: Int,
+        atomicSpan: KRInlineBoxAtomicTextSpan,
+    ): RectF? {
+        val measuredWidth = atomicSpan.measuredWidth.toFloat()
+        if (measuredWidth <= 0f) return null
+        val bounds = inlineBoxSelectionBounds(start, end, line) ?: return null
+        if (textLayout.getParagraphDirection(line) >= 0) {
+            bounds.right = min(textLayout.width.toFloat(), bounds.left + measuredWidth)
+        } else {
+            bounds.left = max(0f, bounds.right - measuredWidth)
+        }
+        return bounds
+    }
+
+    private fun inlineBoxSelectionBounds(start: Int, end: Int, line: Int): RectF? {
+        inlineBoxSelectionPath.reset()
+        textLayout.getSelectionPath(start, end, inlineBoxSelectionPath)
+        inlineBoxLineClipPath.reset()
+        val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+        val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+        inlineBoxLineClipPath.addRect(
+            lineLeft,
+            textLayout.getLineTop(line).toFloat(),
+            lineRight,
+            textLayout.getLineBottom(line).toFloat(),
+            Path.Direction.CW,
+        )
+        if (!inlineBoxSelectionPath.op(inlineBoxLineClipPath, Path.Op.INTERSECT)) {
+            return null
+        }
+        inlineBoxSelectionPath.computeBounds(inlineBoxSelectionBounds, true)
+        if (inlineBoxSelectionBounds.isEmpty) return null
+        return inlineBoxSelectionBounds
+    }
+
+    private fun drawSlockInlineCodeChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRSlockInlineCodeSpan::class.java)
+        if (spans.isEmpty()) return
+
+        val paint = textLayout.paint
+        val horizontalPadding = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_PADDING_RATIO
+        val horizontalMargin = paint.textSize * SLOCK_INLINE_CODE_HORIZONTAL_MARGIN_RATIO
+        val verticalPadding = paint.textSize * SLOCK_INLINE_CODE_VERTICAL_PADDING_RATIO
+        val minHeight = paint.textSize * SLOCK_INLINE_CODE_MIN_HEIGHT_RATIO
+        val fontMetrics = paint.fontMetrics
+        val layoutLeft = 0f
+
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+
+            val startLine = textLayout.getLineForOffset(start)
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val lineStart = textLayout.getLineStart(line)
+                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
+                val segmentStart = max(start, lineStart)
+                val segmentEnd = min(end, lineVisibleEnd)
+                if (segmentEnd <= segmentStart) continue
+
+                val startX =
+                    if (segmentStart <= lineStart) {
+                        layoutLeft
+                    } else {
+                        textLayout.getPrimaryHorizontal(segmentStart)
+                    }
+                val endX =
+                    if (segmentEnd >= lineVisibleEnd) {
+                        textLayout.getLineRight(line)
+                    } else {
+                        textLayout.getPrimaryHorizontal(segmentEnd)
+                    }
+                val segmentLeft = min(startX, endX)
+                val segmentRight = max(startX, endX)
+                val left = if (segmentStart == start) {
+                    segmentLeft + horizontalMargin
+                } else {
+                    segmentLeft - horizontalPadding
+                }
+                val right = if (segmentEnd == end) {
+                    // Mirror the leading edge. The final atom reserves edgePadding
+                    // (padding + margin) after its glyphs, so pull the border IN by
+                    // horizontalMargin to land it exactly horizontalPadding past the
+                    // last glyph — same inner padding as the start side — instead of
+                    // pushing OUT by horizontalPadding (which put the border ~10/15
+                    // past the glyphs, the "right side too big" regression, #394/#54).
+                    segmentRight - horizontalMargin
+                } else {
+                    segmentRight + horizontalPadding
+                }
+                if (right <= left) continue
+
+                val baseline = textLayout.getLineBaseline(line).toFloat()
+                val textTop = baseline + fontMetrics.ascent - verticalPadding
+                val textBottom = baseline + fontMetrics.descent + verticalPadding
+                val height = max(textBottom - textTop, minHeight)
+                val centerY = (textTop + textBottom) / 2f
+                val top = centerY - height / 2f
+                val bottom = centerY + height / 2f
+                if (bottom <= top) continue
+
+                slockInlineCodeRect.set(left, top, right, bottom)
+                if (drawFill) {
+                    canvas.drawRect(slockInlineCodeRect, slockInlineCodeFillPaint)
+                }
+                if (drawBorder) {
+                    canvas.drawSlockInlineCodeBorder(left, top, right, bottom)
+                }
+            }
+        }
+    }
+
+    // Paint.density is a bitmap-scaling field that defaults to 1 (it is NOT the
+    // display density), so `paint.density * 1dp` collapsed to 1 and the
+    // MIN_WIDTH clamp left every chip border at 2 physical px — thinner than
+    // react's 1 css px (= 3 px @3x). Use the real display density instead
+    // (task #407 follow-up, artin's border-width report).
+    private val slockChipBorderWidthPx: Float =
+        max(
+            SLOCK_INLINE_CODE_BORDER_MIN_WIDTH,
+            android.content.res.Resources.getSystem().displayMetrics.density * SLOCK_INLINE_CODE_BORDER_WIDTH_DP
+        )
+
+    private fun Canvas.drawSlockInlineCodeBorder(left: Float, top: Float, right: Float, bottom: Float) {
+        val borderWidth = slockChipBorderWidthPx
+        val borderLeft = floor(left)
+        val borderTop = floor(top)
+        val borderRight = ceil(right)
+        val borderBottom = ceil(bottom)
+        drawRect(borderLeft, borderTop, borderRight, borderTop + borderWidth, slockInlineCodeBorderPaint)
+        drawRect(borderLeft, borderBottom - borderWidth, borderRight, borderBottom, slockInlineCodeBorderPaint)
+        drawRect(borderLeft, borderTop, borderLeft + borderWidth, borderBottom, slockInlineCodeBorderPaint)
+        drawRect(borderRight - borderWidth, borderTop, borderRight, borderBottom, slockInlineCodeBorderPaint)
+    }
+
+    private fun Layout.slockInlineCodeVisibleEnd(line: Int): Int {
+        val lineStart = getLineStart(line)
+        val ellipsisCount = getEllipsisCount(line)
+        if (ellipsisCount > 0) {
+            return (lineStart + getEllipsisStart(line)).coerceAtLeast(lineStart)
+        }
+        return getLineVisibleEnd(line)
     }
 
     internal fun setSelectionByCoordinate(
@@ -194,7 +635,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     internal fun getSelectionText(): String? {
         return if (hasSelection) {
-            textLayout.text.substring(selectionStart, selectionEnd)
+            textLayout.text.inlineBoxSemanticSubstring(selectionStart, selectionEnd)
         } else {
             null
         }
@@ -202,7 +643,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     internal fun getPreSelectionText(): String? {
         return if (hasSelection && selectionStart > 0) {
-            textLayout.text.substring(0, selectionStart)
+            textLayout.text.inlineBoxSemanticSubstring(0, selectionStart)
         } else {
             null
         }
@@ -211,7 +652,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     internal fun getPostSelectionText(): String? {
         val length = textLayout.text.length
         return if (hasSelection && selectionEnd < length) {
-            textLayout.text.substring(selectionEnd, length)
+            textLayout.text.inlineBoxSemanticSubstring(selectionEnd, length)
         } else {
             null
         }
@@ -462,4 +903,37 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     }
 
+}
+
+private fun String.withoutInlineBoxLayoutCharacters(): String =
+    replace("\uFFFC", "").replace(INLINE_BOX_LAYOUT_JOINER.toString(), "")
+
+private fun CharSequence.inlineBoxSemanticSubstring(start: Int, end: Int): String {
+    if (start >= end) return ""
+    val spanned = this as? Spanned
+        ?: return substring(start, end).withoutInlineBoxLayoutCharacters()
+    val semanticSpans = spanned.getSpans(start, end, KRInlineBoxSemanticSpan::class.java)
+    if (semanticSpans.isEmpty()) return substring(start, end).withoutInlineBoxLayoutCharacters()
+
+    val result = StringBuilder()
+    var cursor = start
+    semanticSpans.sortedBy(spanned::getSpanStart).forEach { span ->
+        val spanStart = spanned.getSpanStart(span)
+        val spanEnd = spanned.getSpanEnd(span)
+        if (spanStart > cursor) {
+            result.append(substring(cursor, min(spanStart, end)).withoutInlineBoxLayoutCharacters())
+        }
+        val overlapStart = max(cursor, spanStart)
+        val overlapEnd = min(end, spanEnd)
+        if (overlapEnd > overlapStart) {
+            if (overlapStart == spanStart && overlapEnd == spanEnd && span.text.isNotEmpty()) {
+                result.append(span.text)
+            } else {
+                result.append(substring(overlapStart, overlapEnd).withoutInlineBoxLayoutCharacters())
+            }
+            cursor = overlapEnd
+        }
+    }
+    if (cursor < end) result.append(substring(cursor, end).withoutInlineBoxLayoutCharacters())
+    return result.toString()
 }

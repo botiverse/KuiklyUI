@@ -676,6 +676,10 @@ open class Attr : Props(), IStyleAttr, ILayoutAttr {
         StyleConst.CONSUME_DOWN with enable
     }
 
+    fun nativeDispatchCapture(enable: Boolean) {
+        StyleConst.NATIVE_DISPATCH_CAPTURE with enable
+    }
+
     fun superTouch(enable: Boolean) {
         StyleConst.SUPER_TOUCH with enable
     }
@@ -716,6 +720,7 @@ open class Attr : Props(), IStyleAttr, ILayoutAttr {
         const val DEBUG_NAME = "debugName"
         const val PREVENT_TOUCH = "preventTouch"
         const val CONSUME_DOWN = "consumeDown"
+        const val NATIVE_DISPATCH_CAPTURE = "nativeDispatchCapture"
         const val SUPER_TOUCH = "superTouch"
         
         // glass effect

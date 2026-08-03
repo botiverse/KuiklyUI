@@ -66,6 +66,10 @@ import com.tencent.kuikly.core.render.android.export.IKuiklyRenderViewExport
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderCallback
 import org.json.JSONObject
 
+// POINT_POINT moves past the first insertion when the editor is empty. MARK_POINT
+// expands over it, so the first glyph is measured with the configured line height.
+internal const val TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS = Spanned.SPAN_INCLUSIVE_INCLUSIVE
+
 /**
  * KTV单行输入组件
  */
@@ -88,6 +92,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
     private var selectionChangeCallback: KuiklyRenderCallback? = null
 
     private var isSettingTextInputState = false
+    private val textInputSyncRevisionState = TextInputSyncRevisionState()
 
     /**
      * 聚焦回调
@@ -142,6 +147,8 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
      * 如果这两者没处于 focus 时，收到显示键盘的请求, lazy 住，等两者都 focus 时，才显示键盘
      */
     private var pendingFocus = false
+    private var pendingFocusRequestId: Long? = null
+    private var pendingBlurRequestId: Long? = null
 
     private var currentKeyboardHeight = 0
     private var lengthLimitType: Int = -1
@@ -267,8 +274,9 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
     override fun call(method: String, params: String?, callback: KuiklyRenderCallback?): Any? {
         return when (method) {
             METHOD_SET_TEXT -> setInputText(params)
-            METHOD_FOCUS -> setFocus()
-            METHOD_BLUR -> setBlur()
+            METHOD_FOCUS -> setFocus(params)
+            METHOD_BLUR -> setBlur(params)
+            METHOD_CANCEL_PENDING_FOCUS -> cancelPendingFocus()
             METHOD_GET_CURSOR_INDEX -> getCursorIndex(callback)
             METHOD_SET_CURSOR_INDEX -> setCursorIndex(params)
             METHOD_SET_TEXT_INPUT_STATE -> setTextInputState(params)
@@ -316,9 +324,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         val text = params ?: KRCssConst.EMPTY_STRING
         lineHeightSpan?.let { span ->
             val spannable = SpannableString(text)
-            if (text.isNotEmpty()) {
-                spannable.setSpan(span, 0, text.length, Spanned.SPAN_EXCLUSIVE_INCLUSIVE)
-            }
+            spannable.setSpan(span, 0, text.length, TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS)
             super.setText(spannable, BufferType.EDITABLE)
         } ?: super.setText(text, BufferType.EDITABLE)
         setSelection(getText()?.length ?: 0)
@@ -617,10 +623,22 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         return true
     }
 
-    private fun setFocus() {
+    private fun setFocus(params: String? = null) {
+        pendingFocusRequestId = params?.toLongOrNull()
+        pendingBlurRequestId = null
         isFocusable = true
         isFocusableInTouchMode = true
-        requestFocus()
+        if (hasFocus()) {
+            pendingFocusRequestId = null
+            showKeyboard()
+            return
+        }
+        if (!requestFocus()) {
+            // A failed/no-op command must not label a later real user callback as programmatic.
+            pendingFocusRequestId = null
+            pendingFocus = false
+            return
+        }
         post {
             if (hasWindowFocus() && hasFocus()) {
                 showKeyboard()
@@ -651,12 +669,28 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
 
-    private fun setBlur() {
-        clearFocus()
-        post {
-            val imm = context.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.hideSoftInputFromWindow(windowToken, 0)
+    private fun setBlur(params: String? = null) {
+        pendingBlurRequestId = params?.toLongOrNull()
+        pendingFocusRequestId = null
+        pendingFocus = false
+        if (!hasFocus()) {
+            pendingBlurRequestId = null
         }
+        clearFocus()
+        if (hasFocus()) {
+            pendingBlurRequestId = null
+        }
+        post {
+            if (rootView.findFocus() == null) {
+                val imm = context.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(windowToken, 0)
+            }
+        }
+    }
+
+    private fun cancelPendingFocus() {
+        pendingFocusRequestId = null
+        pendingFocus = false
     }
 
     private fun getCursorIndex(callback: KuiklyRenderCallback?) {
@@ -672,6 +706,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
     private fun setTextInputState(params: String?) {
         val json = runCatching { JSONObject(params ?: "{}") }.getOrElse { JSONObject() }
+        textInputSyncRevisionState.apply(json.optIntOrNull(KEY_SYNC_REVISION))
         val rawText = json.optString(KEY_TEXT, "")
         if (shouldRejectProgrammaticShortcodeInput(rawText)) {
             textLengthBeyondLimitCallback?.invoke(null)
@@ -686,11 +721,13 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             setInputEditorAdapterIfNeed()
             lineHeightSpan?.let { span ->
                 val spannable = SpannableString(limitedRawText)
-                if (limitedRawText.isNotEmpty()) {
-                    spannable.setSpan(span, 0, limitedRawText.length, Spanned.SPAN_EXCLUSIVE_INCLUSIVE)
-                }
+                spannable.setSpan(span, 0, limitedRawText.length, TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS)
                 super.setText(spannable, BufferType.EDITABLE)
             } ?: super.setText(limitedRawText, BufferType.EDITABLE)
+            // A custom Editable.Factory may rebuild the source and drop spans.
+            // Reattach after TextView creates its final Editable while the
+            // programmatic-state watcher is intentionally suppressed.
+            editableText?.also(::ensureLineHeightSpan)
             applyEmojiSpans(editableText)
             // 程序化文本也可能被长度限制截断，需要基于实际文本长度调整 selection
             val actualLength = editableText?.length ?: 0
@@ -794,9 +831,14 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
         setOnFocusChangeListener { _, focus ->
             if (focus) {
-                inputFocusCallback?.invoke(createCallbackParamMap())
+                pendingBlurRequestId = null
+                inputFocusCallback?.invoke(createFocusCallbackParamMap(pendingFocusRequestId))
+                pendingFocusRequestId = null
             } else {
-                inputBlurCallback?.invoke(createCallbackParamMap())
+                pendingFocusRequestId = null
+                pendingFocus = false
+                inputBlurCallback?.invoke(createFocusCallbackParamMap(pendingBlurRequestId))
+                pendingBlurRequestId = null
             }
         }
         return true
@@ -851,16 +893,15 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         } else {
             null
         }
-        return if (length == null) {
-            mapOf(
-                KEY_TEXT to rawText.toString()
-            )
-        } else {
-            mapOf(
-                KEY_TEXT to rawText.toString(),
-                KEY_LENGTH to length!!
-            )
-        }
+        val result = mutableMapOf<String, Any>(KEY_TEXT to rawText.toString())
+        length?.let { result[KEY_LENGTH] = it }
+        return textInputSyncRevisionState.snapshot(result)
+    }
+
+    private fun createFocusCallbackParamMap(requestId: Long?): Map<String, Any> {
+        val result = createCallbackParamMap().toMutableMap()
+        requestId?.let { result[KEY_FOCUS_REQUEST_ID] = it }
+        return result
     }
 
     private fun createTextInputStateParamMap(): Map<String, Any> {
@@ -882,7 +923,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
             null
         }
         length?.let { result[KEY_LENGTH] = it }
-        return result
+        return textInputSyncRevisionState.snapshot(result)
     }
 
     private fun resetDefaultStyle() {
@@ -980,11 +1021,16 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
                 }
                 val outputText = textPostProcessorAdapter.onTextPostProcess(kuiklyRenderContext, TextPostProcessorInput(textPostProcessor,
                     source, tp)).text
-                return if (outputText is Editable) {
+                val editable = if (outputText is Editable) {
                     outputText
                 } else {
                     SpannableStringBuilder(source)
                 }
+                // TextView measures the Editable returned here. Attach the
+                // global line-height span before setText builds its layout;
+                // post-set span mutation may only invalidate a fixed layout.
+                this@KRTextFieldView.ensureLineHeightSpan(editable)
+                return editable
             }
         })
     }
@@ -1020,8 +1066,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         val span = lineHeightSpan ?: return
         text.apply {
             if (getSpanStart(span) != 0 || getSpanEnd(span) != length) {
-                // range changed, call setSpan to update
-                setSpan(span, 0, length, Spanned.SPAN_EXCLUSIVE_INCLUSIVE)
+                setSpan(span, 0, length, TEXT_FIELD_LINE_HEIGHT_SPAN_FLAGS)
             }
         }
     }
@@ -1083,6 +1128,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val METHOD_SET_TEXT = "setText"
         private const val METHOD_FOCUS = "focus"
         private const val METHOD_BLUR = "blur"
+        private const val METHOD_CANCEL_PENDING_FOCUS = "cancelPendingFocus"
         private const val METHOD_GET_CURSOR_INDEX = "getCursorIndex"
         private const val METHOD_SET_CURSOR_INDEX = "setCursorIndex"
         private const val METHOD_SET_TEXT_INPUT_STATE = "setTextInputState"
@@ -1098,8 +1144,10 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val KEY_SELECTION_START = "selectionStart"
         private const val KEY_SELECTION_END = "selectionEnd"
         private const val KEY_COMPOSITION_START = "compositionStart"
+        private const val KEY_FOCUS_REQUEST_ID = "focusRequestId"
         private const val KEY_COMPOSITION_END = "compositionEnd"
         private const val KEY_LENGTH = "length"
+        private const val KEY_SYNC_REVISION = "syncRevision"
         private const val NO_COMPOSITION = -1
 
         private const val LENGTH_LIMIT_TYPE_UNSET = -1
@@ -1108,6 +1156,25 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
         private const val LENGTH_LIMIT_TYPE_VISUAL_WIDTH = 2
     }
 }
+
+internal class TextInputSyncRevisionState {
+    var current: Int = 0
+        private set
+
+    fun apply(requestedRevision: Int?) {
+        if (requestedRevision != null) {
+            current = requestedRevision
+        }
+    }
+
+    fun snapshot(payload: MutableMap<String, Any>): Map<String, Any> {
+        payload["syncRevision"] = current
+        return payload
+    }
+}
+
+private fun JSONObject.optIntOrNull(key: String): Int? =
+    if (has(key)) optInt(key) else null
 
 private val PROGRAMMATIC_SHORTCODE_REGEX = Regex("\\[[a-zA-Z0-9_\\-]+\\]")
 

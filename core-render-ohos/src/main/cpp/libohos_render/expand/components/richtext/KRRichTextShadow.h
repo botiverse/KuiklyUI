@@ -63,6 +63,21 @@ constexpr bool KR_TEXT_RENDER_V2_ENABLED = false;
  */
 using KRTypographyHandle = std::shared_ptr<OH_Drawing_Typography>;
 
+struct KRSlockChromeRun {
+    int start = 0;
+    int end = 0;
+    uint32_t fill_color = 0;
+    uint32_t border_color = 0xFF000000;
+    float border_width_px = 0;
+    float padding_start_px = 0;
+    float padding_end_px = 0;
+    float margin_start_px = 0;
+    float margin_end_px = 0;
+    float box_height_px = 0;
+    float corner_radius_px = 0;
+    bool includes_reserved_edges = false;
+};
+
 inline KRTypographyHandle KRMakeTypographyHandle(OH_Drawing_Typography *raw) {
     if (raw == nullptr) {
         return KRTypographyHandle();
@@ -183,8 +198,18 @@ class KRRichTextShadow : public IKRRenderShadowExport {
     }
 
     std::string GetTextContent() const {
-        return text_content_;
+        return main_thread_text_content_;
     }
+
+    std::string GetSemanticTextContent() const {
+        return main_thread_semantic_text_content_;
+    }
+
+    const std::vector<KRSlockChromeRun> &SlockChromeRuns() const {
+        return main_thread_slock_chrome_runs_;
+    }
+
+    std::string SemanticSelection(int layout_start, int layout_end, std::string &pre, std::string &post) const;
 
     KRSize MainMeasureSize() {
         return main_measure_size_;
@@ -272,7 +297,14 @@ class KRRichTextShadow : public IKRRenderShadowExport {
     // 通知 view markDirty。shadow 销毁时 weak_from_this 自动断链。
     void TriggerImagePrefetchIfNeed();
  private:
-    std::string text_content_;
+    std::string context_thread_text_content_;
+    std::string main_thread_text_content_;
+    std::string context_thread_semantic_text_content_;
+    std::string main_thread_semantic_text_content_;
+    std::vector<size_t> context_thread_layout_to_semantic_offsets_;
+    std::vector<size_t> main_thread_layout_to_semantic_offsets_;
+    std::vector<KRSlockChromeRun> context_thread_slock_chrome_runs_;
+    std::vector<KRSlockChromeRun> main_thread_slock_chrome_runs_;
     KRRenderValue::Map props_;
     KRRenderValue::Array values_;
     OH_Drawing_Array *text_lines_ = nullptr;
@@ -294,7 +326,7 @@ class KRRichTextShadow : public IKRRenderShadowExport {
 
     KRSize context_measure_size_;
     KRSize main_measure_size_;
-    std::unordered_map<int, int> placeholder_index_map_;
+    std::unordered_map<std::string, int> placeholder_index_map_;
     std::vector<std::tuple<int, int, int>> span_offsets_;  // span, begin, end
     std::shared_ptr<KRParagraph> paragraph_;
     KRSpinLock paragraph_lock_;
@@ -323,7 +355,7 @@ class KRRichTextShadow : public IKRRenderShadowExport {
     /**
      * 调用获取Span位置方法
      */
-    KRAnyValue SpanRect(int spanIndex);
+    KRAnyValue SpanRect(const std::string &spanPath);
 
     int SpanIndexAt(float x, float y);
     int ResolveLongPressSpanIndex(const KRRenderValueMap &params);

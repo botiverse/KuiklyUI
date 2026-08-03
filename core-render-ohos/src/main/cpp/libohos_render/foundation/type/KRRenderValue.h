@@ -97,7 +97,7 @@ class KRRenderValue : public std::enable_shared_from_this<KRRenderValue> {
     /**
      * 统一的工厂方法，确保所有实例都通过 shared_ptr 管理
      * 用法: KRRenderValue::Make(), KRRenderValue::Make(42), KRRenderValue::Make("hello")
-     * 
+     *
      * 特殊优化：Make() 和 Make("") 返回复用的静态单例对象，避免重复创建和析构
      */
     template<typename... Args>

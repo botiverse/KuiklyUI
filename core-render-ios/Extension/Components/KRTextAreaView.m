@@ -16,13 +16,20 @@
 #import "KRTextAreaView.h"
 #import "KRComponentDefine.h"
 #import "KRConvertUtil.h"
+#import "KRLogModule.h"
 #import "KRRichTextView.h"
+#import "KRTextInputEventSequencer.h"
 #import "KuiklyRenderBridge.h"
+#import "KuiklyRenderView.h"
 #import "NSObject+KR.h"
 
 // 字典key常量
 NSString *const KRFontSizeKey = @"fontSize";
 NSString *const KRFontWeightKey = @"fontWeight";
+NSString *const KRFontFamilyKey = @"fontFamily";
+NSString *const KRFontContextParamKey = @"contextParam";
+static const NSInteger KRTextAreaViewKeyEventTypeDown = 2;
+static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 
 /*
  * @brief 暴露给Kotlin侧调用的多行输入框组件
@@ -38,6 +45,8 @@ NSString *const KRFontWeightKey = @"fontWeight";
 @property (nonatomic, strong)  NSNumber *KUIKLY_PROP(fontSize);
 /** attr is fontWeight */
 @property (nonatomic, strong)  NSString *KUIKLY_PROP(fontWeight);
+/** attr is fontFamily */
+@property (nonatomic, strong)  NSString *KUIKLY_PROP(fontFamily);
 #if TARGET_OS_OSX
 /** clipPath for macOS - 使用 KUIKLY_PROP 命名规范，仅在 macOS 声明避免覆盖 iOS 上 UIView+CSS category */
 @property (nonatomic, copy) NSString *KUIKLY_PROP(clipPath);
@@ -97,14 +106,27 @@ NSString *const KRFontWeightKey = @"fontWeight";
 - (BOOL)p_shouldReapplyTextPostProcessorForIncomingRawText:(NSString *)rawText;
 - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
 - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
+- (NSDictionary *)p_currentTextInputStatePayload;
+- (void)p_notifyTextChangeCallbacksWithState:(NSDictionary *)state;
+- (void)p_recordImeTextChangeWithMarkedText:(BOOL)hasMarkedText state:(NSDictionary *)state;
+#if !TARGET_OS_OSX
+- (BOOL)p_shouldForwardHardwareTabKey;
+- (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
+#endif
+- (void)p_updateFont;
 
 @end
 
 @implementation KRTextAreaView {
     NSString *_text;
     BOOL _didAddKeyboardNotification;
+    NSNumber *_pendingFocusRequestId;
+    NSNumber *_pendingBlurRequestId;
+    NSUInteger _focusRequestEpoch;
+    NSInteger _textInputSyncRevision;
     NSMutableDictionary *_props;
     BOOL _ignoreTextDidChanged;
+    KRTextInputEventSequencer *_textInputEventSequencer;
     /** 显式设置的光标颜色 */
     UIColor *_cursorColor;
     /** 显式设置的选中高亮颜色 */
@@ -141,6 +163,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
         self.textContainer.lineFragmentPadding = 0;
         self.backgroundColor = [UIColor clearColor];
         _props = [NSMutableDictionary new];
+        _textInputEventSequencer = [KRTextInputEventSequencer new];
     }
     return self;
 }
@@ -180,6 +203,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
     NSString *lastText = self.text ?: @"";
     NSString *newText = css_text ?: @"";
     if (![lastText isEqualToString:newText]) {
+        [_textInputEventSequencer invalidatePendingMarkedText];
         self.text = css_text;
         [self textViewDidChange:self];
         [self updateLineHeightIfApplicable];
@@ -225,6 +249,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
 - (void)setCss_values:(NSString *)css_values {
     if (_css_values != css_values) {
+        [_textInputEventSequencer invalidatePendingMarkedText];
         _css_values = css_values;
         if (_css_values.length) {
             KRRichTextShadow *textShadow = [KRRichTextShadow new];
@@ -286,14 +311,17 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
 - (void)setCss_fontSize:(NSNumber *)css_fontSize {
     _css_fontSize = css_fontSize;
-    self.font = [KRConvertUtil UIFont:@{KRFontSizeKey: css_fontSize ?: @(16),
-                                        KRFontWeightKey: _css_fontWeight ?: @"400"}];
-    [self setNeedsLayout];
+    [self p_updateFont];
 }
 
 - (void)setCss_fontWeight:(NSString *)css_fontWeight {
     _css_fontWeight = css_fontWeight;
-    [self setCss_fontSize:_css_fontSize];
+    [self p_updateFont];
+}
+
+- (void)setCss_fontFamily:(NSString *)css_fontFamily {
+    _css_fontFamily = css_fontFamily;
+    [self p_updateFont];
 }
 
 - (void)setCss_placeholder:(NSString *)css_placeholder {
@@ -311,7 +339,16 @@ NSString *const KRFontWeightKey = @"fontWeight";
 }
 
 - (void)setCss_keyboardType:(NSString *)css_keyboardType {
+    _css_keyboardType = css_keyboardType;
     self.keyboardType = [KRConvertUtil hr_keyBoardType:css_keyboardType];
+    BOOL isPassword = [css_keyboardType isEqualToString:@"password"];
+    BOOL isEmail = [css_keyboardType isEqualToString:@"email"];
+    self.secureTextEntry = isPassword;
+    if (isEmail || isPassword) {
+        self.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        self.autocorrectionType = UITextAutocorrectionTypeNo;
+        self.spellCheckingType = UITextSpellCheckingTypeNo;
+    }
 }
 
 - (void)setCss_returnKeyType:(NSString *)css_returnKeyType {
@@ -335,13 +372,40 @@ NSString *const KRFontWeightKey = @"fontWeight";
 #pragma mark - css method
 
 - (void)css_focus:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    NSUInteger requestEpoch = ++_focusRequestEpoch;
+    _pendingFocusRequestId = requestId;
+    _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self becomeFirstResponder];
+        // Keep cancellation independent from the optional request id so legacy focus(nil) can be
+        // invalidated before this main-queue block runs.
+        if (requestEpoch != self->_focusRequestEpoch) {
+            return;
+        }
+        if (self.isFirstResponder) {
+            self->_pendingFocusRequestId = nil;
+            return;
+        }
+        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
+            self->_pendingFocusRequestId = nil;
+        }
     });
 }
 
 - (void)css_blur:(NSDictionary *)args  {
-    [self resignFirstResponder];
+    ++_focusRequestEpoch;
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = nil;
+    if (!self.isFirstResponder || ![self resignFirstResponder]) {
+        _pendingBlurRequestId = nil;
+    }
+}
+
+- (void)css_cancelPendingFocus:(NSDictionary *)args {
+    ++_focusRequestEpoch;
+    _pendingFocusRequestId = nil;
 }
 
 - (void)css_getCursorIndex:(NSDictionary *)args {
@@ -372,6 +436,10 @@ NSString *const KRFontWeightKey = @"fontWeight";
     NSError *error = nil;
     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
     if (!json) return;
+    [_textInputEventSequencer invalidatePendingMarkedText];
+    if (json[@"syncRevision"] != nil) {
+        _textInputSyncRevision = [json[@"syncRevision"] integerValue];
+    }
 
     NSString *requestedRawText = json[@"text"] ?: @"";
     NSInteger requestedSelectionStart = json[@"selectionStart"] ? [json[@"selectionStart"] integerValue] : requestedRawText.length;
@@ -381,16 +449,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
             self.css_textLengthBeyondLimit(@{});
         }
         if (self.css_textInputStateChange) {
-            NSString *outputText = [self p_outputText];
-            NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-            self.css_textInputStateChange(@{
-                @"text": outputText ?: @"",
-                @"selectionStart": @(outputSelectionRange.location),
-                @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-                @"compositionStart": @(-1),
-                @"compositionEnd": @(-1),
-                @"length": @([self p_calculateLengthForText:outputText])
-            });
+            self.css_textInputStateChange([self p_currentTextInputStatePayload]);
         }
         return;
     }
@@ -405,9 +464,8 @@ NSString *const KRFontWeightKey = @"fontWeight";
     NSInteger selectionStart = MAX(0, MIN(requestedSelectionStart, (NSInteger)rawText.length));
     NSInteger selectionEnd = MAX(0, MIN(requestedSelectionEnd, (NSInteger)rawText.length));
 
-    if (![self isFirstResponder] && rawText.length > 0 && [self.css_autoFocusOnTextInputState boolValue]) {
-        [self becomeFirstResponder];
-    }
+    BOOL shouldRequestComposeFocus =
+        ![self isFirstResponder] && rawText.length > 0 && [self.css_autoFocusOnTextInputState boolValue];
     _ignoreTextDidChanged = YES;
     NSString *currentRawText = [self p_outputText];
     BOOL textChanged = ![currentRawText isEqualToString:rawText];
@@ -440,15 +498,21 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
     // 触发 textInputStateChange 回调，通知长度变化
     if (self.css_textInputStateChange) {
-        NSString *outputText = [self p_outputText];
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        self.css_textInputStateChange(@{
-            @"text": outputText ?: @"",
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"length": @([self p_calculateLengthForText:outputText])
+        self.css_textInputStateChange([self p_currentTextInputStatePayload]);
+    }
+    if (shouldRequestComposeFocus && self.css_inputFocus) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.isFirstResponder || ![self.css_autoFocusOnTextInputState boolValue] || !self.css_inputFocus) {
+                return;
+            }
+            // Programmatic auto-focus is an intent, not native authority. Route
+            // it through the same request-id/generation arbiter as a user focus
+            // event so Compose FocusOwner can accept or reject it before the
+            // editor becomes first responder.
+            self.css_inputFocus(@{
+                @"text" : [self p_outputText] ?: @"",
+                @"focusIntentOnly" : @YES
+            });
         });
     }
 }
@@ -456,16 +520,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
 - (void)css_getTextInputState:(NSDictionary *)args {
     KuiklyRenderCallback callback = args[KRC_CALLBACK_KEY];
     if (callback) {
-        NSString *rawText = [self p_outputText];
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        callback(@{
-            @"text": rawText ?: @"",
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"length": @([self p_calculateLengthForText:rawText])
-        });
+        callback([self p_currentTextInputStatePayload]);
     }
 }
 
@@ -479,6 +534,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
 - (void)css_setText:(NSDictionary *)args {
     NSString *text = args[KRC_PARAM_KEY];
+    [_textInputEventSequencer invalidatePendingMarkedText];
     self.text = text;
     [self textViewDidChange:self];
 }
@@ -544,6 +600,61 @@ NSString *const KRFontWeightKey = @"fontWeight";
     for (UIView *subview in view.subviews) {
         [self p_restoreCursorColorInView:subview];
     }
+}
+#endif
+
+#if !TARGET_OS_OSX
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if ([self p_shouldForwardHardwareTabKey]) {
+        for (UIPress *press in presses) {
+            if (@available(iOS 13.4, *)) {
+                UIKey *key = press.key;
+                if ([key.charactersIgnoringModifiers isEqualToString:@"\t"]) {
+                    BOOL shiftPressed = (key.modifierFlags & UIKeyModifierShift) == UIKeyModifierShift;
+                    [self p_forwardHardwareTabKeyWithShiftPressed:shiftPressed];
+                    return;
+                }
+            }
+        }
+    }
+    [super pressesBegan:presses withEvent:event];
+}
+
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    NSArray<UIKeyCommand *> *superCommands = [super keyCommands];
+    if (![self p_shouldForwardHardwareTabKey]) {
+        return superCommands;
+    }
+    NSMutableArray<UIKeyCommand *> *commands = [NSMutableArray array];
+    [commands addObject:[UIKeyCommand keyCommandWithInput:@"\t"
+                                            modifierFlags:0
+                                                   action:@selector(p_handleHardwareTabKeyCommand:)]];
+    [commands addObject:[UIKeyCommand keyCommandWithInput:@"\t"
+                                            modifierFlags:UIKeyModifierShift
+                                                   action:@selector(p_handleHardwareTabKeyCommand:)]];
+    [commands addObjectsFromArray:superCommands ?: @[]];
+    return commands;
+}
+
+- (BOOL)p_shouldForwardHardwareTabKey {
+    return [_css_keyboardType isEqualToString:@"email"] ||
+        [_css_keyboardType isEqualToString:@"password"] ||
+        self.secureTextEntry;
+}
+
+- (void)p_handleHardwareTabKeyCommand:(UIKeyCommand *)command {
+    BOOL shiftPressed = (command.modifierFlags & UIKeyModifierShift) == UIKeyModifierShift;
+    [self p_forwardHardwareTabKeyWithShiftPressed:shiftPressed];
+}
+
+- (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed {
+    [self.hr_rootView sendKeyEventWithKeyCode:KRTextAreaViewKeyCodeTab
+                                         type:KRTextAreaViewKeyEventTypeDown
+                              utf16CodePoint:KRTextAreaViewKeyCodeTab
+                                   altPressed:NO
+                                  ctrlPressed:NO
+                                  metaPressed:NO
+                                 shiftPressed:shiftPressed];
 }
 #endif
 
@@ -684,12 +795,14 @@ NSString *const KRFontWeightKey = @"fontWeight";
     [self p_updatePlaceholder];
     // 如果有拼音输入，根据配置决定是否触发回调
     if (textView.markedTextRange) {
+        NSDictionary *state = [self p_currentTextInputStatePayload];
+        [self p_recordImeTextChangeWithMarkedText:YES state:state];
         BOOL enablePinyinCallback = [self.css_enablePinyinCallback boolValue];
         if (enablePinyinCallback) {
-            if (self.css_textDidChange) {
-                NSString *text = [self p_outputText].copy ?: @"";
-                self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text])});
-            }
+            // Complete editing state must lead the legacy text callback. Compose then preserves
+            // the marked range and pairs/drops the legacy echo instead of hoisting a null
+            // composition back into the controlled TextFieldValue.
+            [self p_notifyTextChangeCallbacksWithState:state];
         }
         return;
     }
@@ -697,23 +810,15 @@ NSString *const KRFontWeightKey = @"fontWeight";
     // 实时应用 textPostProcessor（emoji attachment）
     [self p_applyTextPostProcessorIfNeed];
 
-    if (self.css_textDidChange) {
-        NSString *text = [self p_outputText].copy ?: @"";
-        self.css_textDidChange(@{@"text": text, @"length": @([self p_calculateLengthForText:text])});
-    }
-
-    if (self.css_textInputStateChange) {
-        NSString *rawText = [self p_outputText];
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        self.css_textInputStateChange(@{
-            @"text": rawText ?: @"",
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"length": @([self p_calculateLengthForText:rawText])
-        });
-    }
+    NSDictionary *state = [self p_currentTextInputStatePayload];
+    [self p_recordImeTextChangeWithMarkedText:NO state:state];
+    // Keep the same complete-before-legacy ordering used while marked text is active. A Chinese
+    // IME candidate commit can shrink the backing store dramatically (for example 31 -> 3). If
+    // the legacy callback leads, Compose briefly observes selection=0/composition=null before the
+    // authoritative native selection arrives. Publishing one frozen native snapshot in the
+    // complete callback first lets the callback arbiter consume the following legacy echo without
+    // exposing that invalid intermediate editing state or feeding it back to UIKit.
+    [self p_notifyTextChangeCallbacksWithState:state];
 }
 
 - (void)textViewDidChangeSelection:(UITextView *)textView {
@@ -723,15 +828,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
     if (!self.css_selectionChange) {
         return;
     }
-    NSString *rawText = [self p_outputText];
-    NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-    self.css_selectionChange(@{
-        @"text": rawText ?: @"",
-        @"selectionStart": @(outputSelectionRange.location),
-        @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-        @"compositionStart": @(-1),
-        @"compositionEnd": @(-1)
-    });
+    self.css_selectionChange([self p_currentTextInputStatePayload]);
 }
 
 - (void)copy:(id)sender {
@@ -813,18 +910,10 @@ NSString *const KRFontWeightKey = @"fontWeight";
         self.css_textLengthBeyondLimit(@{});
     }
     if (self.css_textDidChange) {
-        self.css_textDidChange(@{@"text": newRawText, @"length": @([self p_calculateLengthForText:newRawText])});
+        self.css_textDidChange(@{@"text": newRawText, @"length": @([self p_calculateLengthForText:newRawText]), @"syncRevision": @(_textInputSyncRevision)});
     }
     if (self.css_textInputStateChange) {
-        NSRange outputSelectionRange = [self p_getOutputSelectionRange];
-        self.css_textInputStateChange(@{
-            @"text": newRawText,
-            @"selectionStart": @(outputSelectionRange.location),
-            @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
-            @"compositionStart": @(-1),
-            @"compositionEnd": @(-1),
-            @"length": @([self p_calculateLengthForText:newRawText])
-        });
+        self.css_textInputStateChange([self p_currentTextInputStatePayload]);
     }
     [self scrollRangeToVisible:self.selectedRange];
 }
@@ -833,6 +922,12 @@ NSString *const KRFontWeightKey = @"fontWeight";
     if (_ignoreTextDidChanged) {
         return  NO;
     }
+#if !TARGET_OS_OSX
+    if ([text isEqualToString:@"\t"] && [self p_shouldForwardHardwareTabKey]) {
+        [self p_forwardHardwareTabKeyWithShiftPressed:NO];
+        return NO;
+    }
+#endif
     if (text == nil || [text isEqualToString:@""]) { // 删除操作
         return YES;
             // It's a delete operation
@@ -921,16 +1016,29 @@ NSString *const KRFontWeightKey = @"fontWeight";
 }
 
 - (void)textViewDidBeginEditing:(UITextView *)textView { // 获焦
+    _pendingBlurRequestId = nil;
     if (self.css_inputFocus) {
-        self.css_inputFocus(@{@"text": textView.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
+        if (_pendingFocusRequestId) {
+            payload[@"focusRequestId"] = _pendingFocusRequestId;
+        }
+        self.css_inputFocus(payload);
     }
+    _pendingFocusRequestId = nil;
 }
 
 
 - (void)textViewDidEndEditing:(UITextView *)textView{ // 失焦
+    [_textInputEventSequencer invalidatePendingMarkedText];
+    _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
-        self.css_inputBlur(@{@"text": textView.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
+        if (_pendingBlurRequestId) {
+            payload[@"focusRequestId"] = _pendingBlurRequestId;
+        }
+        self.css_inputBlur(payload);
     }
+    _pendingBlurRequestId = nil;
 }
 
 #pragma mark - notication
@@ -985,6 +1093,21 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
 
 #pragma mark - private
+
+- (void)p_updateFont {
+    NSMutableDictionary *fontStyle = [@{
+        KRFontSizeKey: _css_fontSize ?: @(16),
+        KRFontWeightKey: _css_fontWeight ?: @"400"
+    } mutableCopy];
+    if (_css_fontFamily.length > 0) {
+        fontStyle[KRFontFamilyKey] = _css_fontFamily;
+    }
+    if (self.hr_rootView.contextParam) {
+        fontStyle[KRFontContextParamKey] = self.hr_rootView.contextParam;
+    }
+    self.font = [KRConvertUtil UIFont:fontStyle];
+    [self setNeedsLayout];
+}
 
 /// iOS 17+ 使用公开属性 insertionPointColor 独立设置光标颜色，避免与 tintColor（选中高亮色）冲突
 #if !TARGET_OS_OSX
@@ -1403,6 +1526,61 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
 - (NSRange)p_getOutputSelectionRange {
     return [self p_getOutputRangeWithInputRange:self.selectedRange];
+}
+
+- (NSDictionary *)p_currentTextInputStatePayload {
+    NSString *rawText = [self p_outputText] ?: @"";
+    NSRange outputSelectionRange = [self p_getOutputSelectionRange];
+    NSInteger compositionStart = -1;
+    NSInteger compositionEnd = -1;
+    UITextRange *markedRange = self.markedTextRange;
+    if (markedRange) {
+        NSInteger inputStart = [self offsetFromPosition:self.beginningOfDocument toPosition:markedRange.start];
+        NSInteger inputEnd = [self offsetFromPosition:self.beginningOfDocument toPosition:markedRange.end];
+        if (inputStart >= 0 && inputEnd >= inputStart) {
+            NSRange outputMarkedRange =
+                [self p_getOutputRangeWithInputRange:NSMakeRange((NSUInteger)inputStart, (NSUInteger)(inputEnd - inputStart))];
+            compositionStart = (NSInteger)outputMarkedRange.location;
+            compositionEnd = (NSInteger)NSMaxRange(outputMarkedRange);
+        }
+    }
+    return @{
+        @"text": rawText,
+        @"selectionStart": @(outputSelectionRange.location),
+        @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
+        @"compositionStart": @(compositionStart),
+        @"compositionEnd": @(compositionEnd),
+        @"syncRevision": @(_textInputSyncRevision),
+        @"length": @([self p_calculateLengthForText:rawText])
+    };
+}
+
+- (void)p_notifyTextChangeCallbacksWithState:(NSDictionary *)state {
+    [_textInputEventSequencer notifyState:state
+                         completeCallback:self.css_textInputStateChange
+                           legacyCallback:self.css_textDidChange];
+}
+
+- (void)p_recordImeTextChangeWithMarkedText:(BOOL)hasMarkedText state:(NSDictionary *)state {
+    NSString *rawText = state[@"text"] ?: @"";
+    NSDictionary *diagnostic = [_textInputEventSequencer recordRawTextLength:rawText.length
+                                                               hasMarkedText:hasMarkedText];
+    if (!diagnostic) {
+        return;
+    }
+
+    // Keep this diagnostic sparse and content-free. The sequencer only returns metadata for a
+    // large contraction inside one uninterrupted native edit session; blur or controlled text
+    // mutation invalidates the pending marked observation.
+    [KRLogModule logInfo:[NSString stringWithFormat:
+        @"[KRTextAreaView] ime_commit_large_shrink generation=%lu markedLength=%lu committedLength=%lu storageLength=%lu selectionStart=%lu selectionEnd=%lu firstResponder=%@",
+        (unsigned long)[diagnostic[@"generation"] unsignedIntegerValue],
+        (unsigned long)[diagnostic[@"markedLength"] unsignedIntegerValue],
+        (unsigned long)[diagnostic[@"committedLength"] unsignedIntegerValue],
+        (unsigned long)self.textStorage.length,
+        (unsigned long)[state[@"selectionStart"] unsignedIntegerValue],
+        (unsigned long)[state[@"selectionEnd"] unsignedIntegerValue],
+        self.isFirstResponder ? @"true" : @"false"]];
 }
 
 - (NSRange)p_getOutputRangeWithInputRange:(NSRange)inputRange {

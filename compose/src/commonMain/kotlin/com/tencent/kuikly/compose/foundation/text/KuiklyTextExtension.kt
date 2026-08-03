@@ -44,6 +44,8 @@ import com.tencent.kuikly.compose.ui.unit.isSpecified
 import com.tencent.kuikly.core.base.Attr
 import com.tencent.kuikly.core.base.Attr.StyleConst
 import com.tencent.kuikly.core.views.ISpan
+import com.tencent.kuikly.core.views.InlineBoxGroupSpan
+import com.tencent.kuikly.core.views.InlineBoxSpanStyle as CoreInlineBoxSpanStyle
 import com.tencent.kuikly.core.base.BoxShadow
 import com.tencent.kuikly.core.collection.fastArrayListOf
 import com.tencent.kuikly.core.collection.fastMutableSetOf
@@ -53,6 +55,9 @@ import com.tencent.kuikly.core.views.TextAttr
 import com.tencent.kuikly.core.views.TextConst
 import com.tencent.kuikly.core.views.TextSpan
 
+private const val SLOCK_INLINE_CODE_ANNOTATION_TAG = "raft.build.markdown.inlineCode"
+private const val SLOCK_INLINE_CODE_TRAILING_MARGIN_ANNOTATION_TAG =
+    "raft.build.markdown.inlineCodeTrailingMargin"
 
 // Returns platform-specific default font size
 private fun TextAttr.defaultFontSize(): Float {
@@ -263,6 +268,9 @@ internal fun TextAttr.applySoftWrap(softWrap: Boolean) {
     val target = if (softWrap) "wordWrapping" else "clip"
 
     val current = getProp(TextConst.TEXT_OVERFLOW) as? String
+    if (softWrap && current == "tail") {
+        return
+    }
     if (softWrap && (current == null || current == target) && getProp(TextConst.LINES) == null) {
         return
     }
@@ -322,12 +330,6 @@ internal fun RichTextAttr.applyAnnotatedString(
         positions.add(range.end)
     }
 
-    // Collect ParagraphStyle positions
-    annoText.paragraphStyles.forEach { range ->
-        positions.add(range.start)
-        positions.add(range.end)
-    }
-
     // Collect LinkAnnotation positions
     val linkAnnotations = annoText.getLinkAnnotations(0, annoText.length)
     linkAnnotations.forEach { range ->
@@ -335,6 +337,56 @@ internal fun RichTextAttr.applyAnnotatedString(
         positions.add(range.end)
     }
 
+    data class InlineBoxRange(
+        val style: com.tencent.kuikly.compose.ui.text.InlineBoxSpanStyle,
+        val start: Int,
+        val end: Int,
+    )
+
+    val rawInlineBoxRanges = (
+        annoText.spanStyles.mapNotNull { range ->
+            range.item.inlineBoxStyle?.let { InlineBoxRange(it, range.start, range.end) }
+        } +
+            linkAnnotations.mapNotNull { range ->
+                range.item.styles?.style?.inlineBoxStyle?.let {
+                    InlineBoxRange(it, range.start, range.end)
+                }
+            }
+        )
+    require(rawInlineBoxRanges.groupBy { it.start to it.end }.values.all { sameRange ->
+        sameRange.map { it.style }.distinct().size == 1
+    }) {
+        "Conflicting InlineBoxSpanStyle values on the same range are not supported"
+    }
+    val inlineBoxRanges = rawInlineBoxRanges
+        .distinctBy { it.start to it.end }
+        .sortedWith(compareBy({ it.start }, { it.end }))
+    require(inlineBoxRanges.zipWithNext().none { (left, right) ->
+        right.start < left.end
+    }) {
+        "Overlapping InlineBoxSpanStyle ranges are not supported"
+    }
+
+    // Collect ParagraphStyle positions
+    annoText.paragraphStyles.forEach { range ->
+        positions.add(range.start)
+        positions.add(range.end)
+    }
+
+    // Slock fork-only inline-code marker. The Android RichText renderer uses this
+    // metadata span to draw old inline-code chrome from the final text layout.
+    val slockInlineCodeAnnotations =
+        annoText.getStringAnnotations(SLOCK_INLINE_CODE_ANNOTATION_TAG, 0, annoText.length)
+    slockInlineCodeAnnotations.forEach { range ->
+        positions.add(range.start)
+        positions.add(range.end)
+    }
+    val slockInlineCodeTrailingMarginAnnotations =
+        annoText.getStringAnnotations(SLOCK_INLINE_CODE_TRAILING_MARGIN_ANNOTATION_TAG, 0, annoText.length)
+    slockInlineCodeTrailingMarginAnnotations.forEach { range ->
+        positions.add(range.start)
+        positions.add(range.end)
+    }
     // Collect placeholder info and positions
     val (placeholders, _) = if (annoText.hasInlineContent()) {
         annoText.resolveInlineContent(inlineContent)
@@ -350,10 +402,41 @@ internal fun RichTextAttr.applyAnnotatedString(
 
     val sortedPositions = positions.sorted()
 
-    // Process segments by positions
+    var activeInlineBoxRange: InlineBoxRange? = null
+    var activeInlineBoxGroup: InlineBoxGroupSpan? = null
+
+    fun flushInlineBoxGroup() {
+        activeInlineBoxGroup?.let(spans::add)
+        activeInlineBoxGroup = null
+        activeInlineBoxRange = null
+    }
+
+    // Process segments by positions. An InlineBoxSpanStyle range is preserved
+    // as one explicit core group instead of being copied onto each flattened
+    // child span.
     for (i in 0 until sortedPositions.size - 1) {
         val start = sortedPositions[i]
         val end = sortedPositions[i + 1]
+        val inlineBoxRange = inlineBoxRanges.firstOrNull { range ->
+            start >= range.start && end <= range.end
+        }
+
+        if (inlineBoxRange != activeInlineBoxRange) {
+            flushInlineBoxGroup()
+            if (inlineBoxRange != null) {
+                activeInlineBoxRange = inlineBoxRange
+                activeInlineBoxGroup = InlineBoxGroupSpan(
+                    inlineBoxRange.style.toCoreInlineBoxStyle()
+                ).apply {
+                    pagerId = this@applyAnnotatedString.pagerId
+                    semanticText(
+                        annoText.text
+                            .substring(inlineBoxRange.start, inlineBoxRange.end)
+                            .replace("\uFFFC", "")
+                    )
+                }
+            }
+        }
 
         // Check if this range is a placeholder
         val isPlaceholder = placeholders?.any {
@@ -363,24 +446,72 @@ internal fun RichTextAttr.applyAnnotatedString(
         if (isPlaceholder) {
             // Create PlaceholderSpan
             placeholders!!.find { it.start == start }?.let { placeholder ->
-                spans.add(PlaceholderSpan().apply {
+                val span = PlaceholderSpan().apply {
                     placeholderSize(
                         this@applyAnnotatedString.scaleToDensity(density, placeholder.item.width.value),
                         this@applyAnnotatedString.scaleToDensity(density, placeholder.item.height.value),
                     )
-                })
+                    // Preserve the AnnotatedString alternate text so native
+                    // selection/copy and accessibility do not degrade an
+                    // inline composable to PlaceholderSpan's default space.
+                    description(annoText.text.substring(start, end))
+                }
+                activeInlineBoxGroup?.addChild(span) ?: spans.add(span)
             }
         } else if (start < end) {
             // Create TextSpan for normal text
-            spans.add(TextSpan().apply {
+            val span = TextSpan().apply {
                 this.pagerId = this@applyAnnotatedString.pagerId
                 text(annoText.text.substring(start, end))
 
-                // Apply SpanStyle
-                annoText.spanStyles
+                val linkAnnotation = linkAnnotations
+                    .firstOrNull { range -> !(end <= range.start || start >= range.end) }
+                val overlappingSpanStyles = annoText.spanStyles
                     .filter { range -> !(end <= range.start || start >= range.end) }
-                    .forEach { range -> applySpanStyle(range.item, density) }
 
+                if (inlineBoxRange != null) {
+                    // Paragraph/body spans commonly cover the whole link range. Apply
+                    // those inherited defaults first so the link's typography remains
+                    // authoritative, while strictly inner spans can still override it.
+                    overlappingSpanStyles
+                        .filter { range ->
+                            range.start <= inlineBoxRange.start && range.end >= inlineBoxRange.end
+                        }
+                        .forEach { range ->
+                            applySpanStyle(range.item, density, includeInlineBox = false)
+                        }
+
+                    // Geometry and background belong to the outer group. Children keep
+                    // only link typography/foreground/decoration.
+                    linkAnnotation?.item?.styles?.style?.let { linkStyle ->
+                        applySpanStyle(
+                            linkStyle.copy(
+                                background = Color.Unspecified,
+                                inlineBoxStyle = null,
+                            ),
+                            density,
+                        )
+                    }
+
+                    overlappingSpanStyles
+                        .filter { range ->
+                            range.start > inlineBoxRange.start || range.end < inlineBoxRange.end
+                        }
+                        .forEach { range ->
+                            applySpanStyle(range.item, density, includeInlineBox = false)
+                        }
+                } else {
+                    overlappingSpanStyles.forEach { range ->
+                        applySpanStyle(range.item, density)
+                    }
+                }
+
+                if (slockInlineCodeAnnotations.any { range -> start >= range.start && end <= range.end }) {
+                    slockInlineCode()
+                }
+                if (slockInlineCodeTrailingMarginAnnotations.any { range -> start >= range.start && end <= range.end }) {
+                    slockInlineCodeTrailingMargin()
+                }
                 // Apply ParagraphStyle
                 annoText.paragraphStyles
                     .filter { range -> !(end <= range.start || start >= range.end) }
@@ -392,14 +523,16 @@ internal fun RichTextAttr.applyAnnotatedString(
                         }
                     }
 
-                // Handle LinkAnnotation for current range
-                val linkAnnotation = linkAnnotations
-                    .firstOrNull { range -> !(end <= range.start || start >= range.end) }
-
-                // Apply LinkAnnotation styles if found
                 linkAnnotation?.let { range ->
-                    val spanStyle = range.item.styles?.style ?: SpanStyle()
-                    applySpanStyle(spanStyle, density)
+                    if (inlineBoxRange == null) {
+                        // A style-less link is interaction metadata only. Applying
+                        // an empty SpanStyle writes empty font props onto the core
+                        // span and erases inherited/custom families (for example
+                        // Space Grotesk on a whole-body click annotation).
+                        range.item.styles?.style?.let { spanStyle ->
+                            applySpanStyle(spanStyle, density)
+                        }
+                    }
 
                     // Add click event handler
                     click { _ ->
@@ -409,9 +542,11 @@ internal fun RichTextAttr.applyAnnotatedString(
                     // Call applyLinkStyle for future extensions
                     applyLinkStyle(range.item)
                 }
-            })
+            }
+            activeInlineBoxGroup?.addChild(span) ?: spans.add(span)
         }
     }
+    flushInlineBoxGroup()
 
     if (spans.isEmpty()) {
         spans.add(TextSpan().apply {
@@ -428,16 +563,29 @@ internal fun TextSpan.applyLinkStyle(link: LinkAnnotation) {
 }
 
 // Helper method to apply SpanStyle
-internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+internal fun TextSpan.applySpanStyle(
+    spanStyle: SpanStyle,
+    density: Density,
+    includeInlineBox: Boolean = true,
+) {
     // Apply font styles
     if (spanStyle.fontSize.isSpecified) {
         fontSize(scaleToDensity(density, spanStyle.fontSize.value))
     }
+    applyFontFamily(spanStyle.fontFamily)
     applyFontWeight(spanStyle.fontWeight)
     applyFontStyle(spanStyle.fontStyle)
     applyShadow(spanStyle.shadow)
 
     applyStyleColor(spanStyle)
+    if (spanStyle.background.isSpecified) {
+        setProp(Attr.StyleConst.BACKGROUND_COLOR, spanStyle.background.toKuiklyColor().toString())
+    }
+    if (includeInlineBox) {
+        spanStyle.inlineBoxStyle?.let { box ->
+            inlineBoxStyle(box.toCoreInlineBoxStyle())
+        }
+    }
     if (spanStyle.brush is SolidColor) {
         color((spanStyle.brush as SolidColor).value.toKuiklyColor())
     } else if (spanStyle.brush is LinearGradient) {
@@ -454,9 +602,32 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
 
     // Apply text decoration
     spanStyle.textDecoration?.let { applyTextDecoration(it) }
+    if (spanStyle.textDecorationColor.isSpecified) {
+        setProp(TextConst.TEXT_DECORATION_COLOR, spanStyle.textDecorationColor.toKuiklyColor().toString())
+    }
+    if (spanStyle.textDecorationThickness.isSpecified) {
+        setProp(TextConst.TEXT_DECORATION_THICKNESS, scaleToDensity(density, spanStyle.textDecorationThickness.value))
+    }
+    if (spanStyle.textDecorationOffset.isSpecified) {
+        setProp(TextConst.TEXT_DECORATION_OFFSET, scaleToDensity(density, spanStyle.textDecorationOffset.value))
+    }
 
     // Apply letter spacing
     if (spanStyle.letterSpacing.isSpecified) {
         letterSpacing(spanStyle.letterSpacing.value)
     }
 }
+
+private fun com.tencent.kuikly.compose.ui.text.InlineBoxSpanStyle.toCoreInlineBoxStyle() =
+    CoreInlineBoxSpanStyle(
+        backgroundColor = backgroundColor.takeIf { it.isSpecified }?.toKuiklyColor(),
+        borderColor = borderColor.takeIf { it.isSpecified }?.toKuiklyColor(),
+        borderWidth = borderWidth.value,
+        paddingStart = paddingStart.value,
+        paddingEnd = paddingEnd.value,
+        paddingTop = paddingTop.value,
+        paddingBottom = paddingBottom.value,
+        marginStart = marginStart.value,
+        marginEnd = marginEnd.value,
+        cornerRadius = cornerRadius.value,
+    )

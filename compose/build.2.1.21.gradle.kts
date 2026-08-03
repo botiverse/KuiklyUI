@@ -80,7 +80,8 @@ kotlin {
         }
 
         commonTest.dependencies {
-//            implementation(libs.kotlin.test)
+            implementation(kotlin("test"))
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
         }
 
         // Android 特有源集中添加 ProfileInstaller 依赖
@@ -89,6 +90,12 @@ kotlin {
                 compileOnly(project(":core-render-android"))
                 implementation("androidx.profileinstaller:profileinstaller:1.3.1")
                 // 保留现有依赖...
+            }
+        }
+
+        val androidUnitTest by getting {
+            dependencies {
+                implementation("org.robolectric:robolectric:4.12.2")
             }
         }
     }

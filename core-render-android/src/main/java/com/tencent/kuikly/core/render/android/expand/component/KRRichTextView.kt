@@ -193,22 +193,78 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
 
         // 2. 计算spanIndex
         var spanIndex = -1
-        val textLayout = textDrawer?.textLayout
-        val line = textLayout?.getLineForVertical(y) ?: 0
-        val lineLeft: Float = textLayout?.getLineLeft(line) ?: Float.MIN_VALUE
-        val lineRight: Float = textLayout?.getLineRight(line) ?: Float.MAX_VALUE
+        val textLayout = textDrawer?.textLayout ?: return spanIndex
+        val line = textLayout.getLineForVertical(y)
+        val lineLeft = textLayout.getLineLeft(line)
+        val lineRight = textLayout.getLineRight(line)
 
         if (x < lineLeft || x > lineRight) { // 点击区域超出文本区域
             spanIndex = -1
         } else {
-            val off = textLayout?.getOffsetForHorizontal(line, x) ?: 0
-            (textLayout?.text as? Spanned)?.getSpans(off, off, FontWeightSpan::class.java)?.also {
-                if (it.isNotEmpty()) {
-                    spanIndex = it[0].index
-                }
+            val off = textLayout.getOffsetForHorizontal(line, x)
+            (textLayout.text as? Spanned)?.also { spanned ->
+                spanIndex =
+                    textLayout.findSpanIndexAtBoundary(spanned, off, line, x)
+                        ?: spanIndex
             }
         }
         return spanIndex
+    }
+
+    private fun Layout.findSpanIndexAtBoundary(
+        spanned: Spanned,
+        offset: Int,
+        touchedLine: Int,
+        touchX: Float,
+    ): Int? {
+        val selectionPath = Path()
+        val lineClipPath = Path()
+        val selectionBounds = RectF()
+        val ranges =
+            spanned.getSpans(offset, offset, KRInlineBoxAtomicTextSpan::class.java)
+                .mapNotNull { atomicSpan ->
+                    val start = spanned.getSpanStart(atomicSpan)
+                    val end = spanned.getSpanEnd(atomicSpan)
+                    if (start < 0 || end <= start) return@mapNotNull null
+                    val owner =
+                        spanned.getSpans(start, end, FontWeightSpan::class.java)
+                            .firstOrNull { weightSpan ->
+                                spanned.getSpanStart(weightSpan) <= start &&
+                                    spanned.getSpanEnd(weightSpan) >= end
+                            }
+                            ?: return@mapNotNull null
+                    val atomicLine = getLineForOffset(start + (end - start - 1) / 2)
+                    selectionPath.reset()
+                    getSelectionPath(start, end, selectionPath)
+                    lineClipPath.reset()
+                    lineClipPath.addRect(
+                        0f,
+                        getLineTop(atomicLine).toFloat(),
+                        width.toFloat(),
+                        getLineBottom(atomicLine).toFloat(),
+                        Path.Direction.CW,
+                    )
+                    if (!selectionPath.op(lineClipPath, Path.Op.INTERSECT)) {
+                        return@mapNotNull null
+                    }
+                    selectionPath.computeBounds(selectionBounds, true)
+                    if (selectionBounds.isEmpty) return@mapNotNull null
+                    KRInlineBoxAtomicHitRange(
+                        line = atomicLine,
+                        left = selectionBounds.left,
+                        right = selectionBounds.right,
+                        spanIndex = owner.index,
+                    )
+                }
+        val fallbackSpanIndices =
+            spanned.getSpans(offset, offset, FontWeightSpan::class.java)
+                .map(FontWeightSpan::index)
+        return resolveKRInlineBoxBoundaryHit(
+            touchedLine = touchedLine,
+            touchX = touchX,
+            ranges = ranges,
+            fallbackSpanIndices = fallbackSpanIndices,
+        )
     }
 
     private fun initTextLayout(richTextShadow: KRRichTextShadow?) {
@@ -602,8 +658,10 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
     override fun call(methodName: String, params: String): Any? {
         when(methodName) {
             METHOD_GET_PLACEHOLDER_SPAN_RECT -> {
-                val index = params.toInt()
-                val spanRect = getPlaceholderSpanRect(index)
+                val path = params.split(" ")
+                val index = path.firstOrNull()?.toIntOrNull() ?: -1
+                val childIndex = path.getOrNull(1)?.toIntOrNull()
+                val spanRect = getPlaceholderSpanRect(index, childIndex)
                 return "${spanRect.left} ${spanRect.top} ${spanRect.width()} ${spanRect.height()}"
             }
             METHOD_IS_LINE_BREAK_MARGIN -> {
@@ -616,10 +674,12 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper 
     /**
      * 根据 index 获取 PlaceholderSpan 的绘制区域
      */
-    private fun getPlaceholderSpanRect(index: Int) : Rect {
+    private fun getPlaceholderSpanRect(index: Int, childIndex: Int? = null) : Rect {
         var rect = Rect(0, 0, 0, 0)
         textDrawer?.textLayout?.let { layout ->
-            var phSpanTextRange: SpanTextRange? = spanTextRanges.find { it.index == index }
+            val phSpanTextRange: SpanTextRange? = spanTextRanges.find {
+                it.index == index && it.childIndex == childIndex
+            }
 
             if (phSpanTextRange != null) {
 
