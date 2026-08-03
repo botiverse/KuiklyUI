@@ -395,7 +395,6 @@ data class InputParams(
     val text: String,
     val imeAction: String? = null,
     val length: Int? = null,
-    val syncRevision: Int? = null,
     val focusRequestId: Long? = null,
     val focusIntentOnly: Boolean = false,
 )
@@ -422,8 +421,7 @@ class InputEvent : Event() {
             it as JSONObject
             val text = it.optString("text")
             val length = if (it.has("length")) it.optInt("length") else null
-            val syncRevision = if (it.has("syncRevision")) it.optInt("syncRevision") else null
-            handler(InputParams(text, length = length, syncRevision = syncRevision))
+            handler(InputParams(text, length = length))
         }, isSync = isSyncEdit)
     }
 

@@ -212,11 +212,6 @@ internal fun CoreTextField(
     var pendingLimitChangeNotification by remember { mutableStateOf(false) }
     // 记录上一次原生层真实生效的编辑态，避免仅因 text 相同而误判 selection/composition 同步
     var lastSyncedTextInputState by remember { mutableStateOf<TextInputState?>(null) }
-    // Updater.set uses structural equality. Advance this generation for every emitted native
-    // callback and authoritative sync so equal historical values still reach reconciliation,
-    // while apply blocks composed against an older editor state can be rejected.
-    var inputStateGeneration by remember { mutableStateOf(TextInputStateGeneration()) }
-    val textInputSyncRevisionTracker = remember { TextInputSyncRevisionTracker() }
     val textInputCallbackArbiter = remember { TextInputCallbackArbiter() }
     val controlledStateArbiter = remember { TextInputControlledStateArbiter() }
 
@@ -492,9 +487,6 @@ internal fun CoreTextField(
                     set(Triple(onValueChange, onLimitChange, maxLength)) {
                         withTextAreaView {
                             getViewEvent().textInputStateChange {
-                                if (textInputSyncRevisionTracker.isStale(it.syncRevision)) {
-                                    return@textInputStateChange
-                                }
                                 val textFieldValue = textInputCallbackArbiter.onCompleteState(it)
                                 lastSyncedTextInputState = TextInputState(
                                     text = it.text,
@@ -503,22 +495,16 @@ internal fun CoreTextField(
                                     compositionStart = it.compositionStart,
                                     compositionEnd = it.compositionEnd,
                                     length = it.length,
-                                    syncRevision = it.syncRevision
                                 )
-                                inputStateGeneration = TextInputStateGeneration()
                                 autoHeightTextAreaView.getViewAttr()
                                     .updatePropCache(TextConst.VALUE, it.text)
                                 controlledStateArbiter.recordNativeValue(
                                     textFieldValue,
-                                    inputStateGeneration,
                                 )
                                 onValueChange(textFieldValue)
                                 dispatchLimitChange(it.length, pendingLimitChangeNotification)
                             }
                             getViewEvent().selectionChange {
-                                if (textInputSyncRevisionTracker.isStale(it.syncRevision)) {
-                                    return@selectionChange
-                                }
                                 lastSyncedTextInputState = TextInputState(
                                     text = it.text,
                                     selectionStart = it.selectionStart,
@@ -526,9 +512,7 @@ internal fun CoreTextField(
                                     compositionStart = it.compositionStart,
                                     compositionEnd = it.compositionEnd,
                                     length = it.length,
-                                    syncRevision = it.syncRevision
                                 )
-                                inputStateGeneration = TextInputStateGeneration()
                                 val composition = if (
                                     it.compositionStart != TextInputState.NO_COMPOSITION &&
                                     it.compositionEnd != TextInputState.NO_COMPOSITION
@@ -544,14 +528,10 @@ internal fun CoreTextField(
                                 )
                                 controlledStateArbiter.recordNativeValue(
                                     textFieldValue,
-                                    inputStateGeneration,
                                 )
                                 onValueChange(textFieldValue)
                             }
                             getViewEvent().textDidChange {
-                                if (textInputSyncRevisionTracker.isStale(it.syncRevision)) {
-                                    return@textDidChange
-                                }
                                 val fallbackValue = textInputCallbackArbiter.onLegacyTextChange(
                                     text = it.text,
                                     lastSyncedState = lastSyncedTextInputState,
@@ -571,12 +551,9 @@ internal fun CoreTextField(
                                     compositionEnd = fallbackComposition?.end
                                         ?: TextInputState.NO_COMPOSITION,
                                     length = it.length,
-                                    syncRevision = it.syncRevision,
                                 )
-                                inputStateGeneration = TextInputStateGeneration()
                                 controlledStateArbiter.recordNativeValue(
                                     fallbackValue,
-                                    inputStateGeneration,
                                 )
                                 onValueChange(fallbackValue)
                                 dispatchLimitChange(it.length, pendingLimitChangeNotification)
@@ -625,9 +602,8 @@ internal fun CoreTextField(
                         }
                     }
 
-                    set(TextInputControlledUpdate(value, inputStateGeneration)) { update ->
+                    set(value) { controlledValue ->
                         withTextAreaView {
-                            val controlledValue = update.value
                             val composition = controlledValue.composition
                             val incomingTextInputState = TextInputState(
                                 text = controlledValue.text,
@@ -636,27 +612,24 @@ internal fun CoreTextField(
                                 compositionStart = composition?.start ?: TextInputState.NO_COMPOSITION,
                                 compositionEnd = composition?.end ?: TextInputState.NO_COMPOSITION
                             )
-                            getViewAttr().updatePropCache(TextConst.VALUE, incomingTextInputState.text)
 
-                            // Native input can advance before older Compose changes are applied. The
-                            // generation carried by this update distinguishes those stale changes from a
-                            // current business decision that retains or recreates a historical value.
+                            // Native input can advance before an older caller-held callback object is
+                            // applied. Exact callback-object identity is the only provenance available
+                            // here: direct native echoes fail closed, while a formatter or external owner
+                            // asserts authority with a distinct, observable controlled editing state.
                             val shouldSuppressControlledUpdate =
                                 controlledStateArbiter.shouldSuppressControlledUpdate(
                                     value = controlledValue,
-                                    updateGeneration = update.inputStateGeneration,
-                                    latestGeneration = inputStateGeneration,
                                 )
                             val shouldSyncToNative = !shouldSuppressControlledUpdate &&
                                 !(lastSyncedTextInputState?.hasSameEditingState(incomingTextInputState) ?: false)
 
                             if (shouldSyncToNative) {
-                                val revisionedState = incomingTextInputState.copy(
-                                    syncRevision = textInputSyncRevisionTracker.issue()
-                                )
-                                inputStateGeneration = TextInputStateGeneration()
-                                setTextInputState(revisionedState)
-                                lastSyncedTextInputState = revisionedState
+                                // The prop cache mirrors native state. Never poison it with a suppressed
+                                // stale down-value before the native editor has actually accepted it.
+                                getViewAttr().updatePropCache(TextConst.VALUE, incomingTextInputState.text)
+                                setTextInputState(incomingTextInputState)
+                                lastSyncedTextInputState = incomingTextInputState
                             }
 
                             // 长度计算统一依赖原生层回调，避免 Kotlin 层和原生层计算不一致
@@ -672,14 +645,6 @@ internal fun CoreTextField(
 
 internal fun FocusRequester.focusIfAttached(): Boolean =
     hasAttachedNodes() && focus()
-
-internal data class TextInputControlledUpdate(
-    val value: TextFieldValue,
-    val inputStateGeneration: TextInputStateGeneration,
-)
-
-// Identity is the generation token; numeric ordering would add an unnecessary wraparound case.
-internal class TextInputStateGeneration
 
 internal class TextInputCallbackArbiter {
     private val completeTextsAwaitingLegacy = mutableListOf<String>()
@@ -758,76 +723,36 @@ internal class TextInputCallbackArbiter {
 }
 
 internal class TextInputControlledStateArbiter {
-    private val pendingNativeValues = mutableListOf<PendingNativeValue>()
+    private val nativeValueTokens = mutableListOf<TextFieldValue>()
 
-    fun recordNativeValue(
-        value: TextFieldValue,
-        inputStateGeneration: TextInputStateGeneration,
-    ) {
-        if (pendingNativeValues.lastOrNull()?.value === value) {
+    fun recordNativeValue(value: TextFieldValue) {
+        if (nativeValueTokens.lastOrNull() === value) {
             return
         }
-        pendingNativeValues += PendingNativeValue(value, inputStateGeneration)
-        if (pendingNativeValues.size > MAX_PENDING_NATIVE_VALUES) {
-            pendingNativeValues.removeAt(0)
+        nativeValueTokens += value
+        if (nativeValueTokens.size > MAX_NATIVE_VALUE_TOKENS) {
+            nativeValueTokens.removeAt(0)
         }
     }
 
     fun shouldSuppressControlledUpdate(
         value: TextFieldValue,
-        updateGeneration: TextInputStateGeneration,
-        latestGeneration: TextInputStateGeneration,
     ): Boolean {
         // Equality is insufficient here: a formatter or external owner may intentionally
         // produce a new value that matches an older native state. Only the exact object passed
         // to onValueChange can carry a direct state-hoisting token.
-        val matchingIndex = pendingNativeValues.indexOfFirst {
-            it.value === value
-        }
-
-        // An apply block composed before a newer native callback is stale regardless of whether
-        // it contains a direct token or a transformed value. A current-generation composition
-        // will follow and decide the authoritative state.
-        if (updateGeneration !== latestGeneration) {
-            if (matchingIndex >= 0) {
-                pendingNativeValues.removeAt(matchingIndex)
-            }
-            return true
-        }
-
-        if (matchingIndex < 0) {
-            return false
-        }
-
-        val token = pendingNativeValues.removeAt(matchingIndex)
-        // Default structural snapshot state can retain an older callback object when a formatter
-        // returns an equal historical value. It is a direct echo only in the generation that
-        // created it; in a newer current generation the retained object is authoritative.
-        return token.inputStateGeneration === updateGeneration
+        // Exact native callback objects remain native-origin tokens for the mounted editor. Treat
+        // them as direct echoes inside the bounded provenance window. A formatter or external
+        // reset asserts authority with a distinct object that reaches controlled reconciliation.
+        // Retaining an exact older callback object to reject a later edit is indistinguishable
+        // from a stale echo and is outside this fence's contract; that requires an explicit,
+        // atomically observed controlled acknowledgement rather than inferred ordering.
+        return nativeValueTokens.any { it === value }
     }
-
-    private data class PendingNativeValue(
-        val value: TextFieldValue,
-        val inputStateGeneration: TextInputStateGeneration,
-    )
 
     private companion object {
-        const val MAX_PENDING_NATIVE_VALUES = 64
+        const val MAX_NATIVE_VALUE_TOKENS = 64
     }
-}
-
-internal class TextInputSyncRevisionTracker {
-    private var latestIssuedRevision: Int = 0
-
-    fun issue(): Int {
-        latestIssuedRevision += 1
-        return latestIssuedRevision
-    }
-
-    fun isStale(callbackRevision: Int?): Boolean =
-        callbackRevision != null &&
-            latestIssuedRevision != 0 &&
-            callbackRevision < latestIssuedRevision
 }
 
 /**

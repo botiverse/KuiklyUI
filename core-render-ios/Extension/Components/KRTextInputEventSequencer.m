@@ -26,8 +26,7 @@
     if (legacyCallback) {
         legacyCallback(@{
             @"text": state[@"text"] ?: @"",
-            @"length": state[@"length"] ?: @0,
-            @"syncRevision": state[@"syncRevision"] ?: @0
+            @"length": state[@"length"] ?: @0
         });
     }
 }

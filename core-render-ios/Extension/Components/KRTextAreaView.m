@@ -123,7 +123,6 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     NSNumber *_pendingFocusRequestId;
     NSNumber *_pendingBlurRequestId;
     NSUInteger _focusRequestEpoch;
-    NSInteger _textInputSyncRevision;
     NSMutableDictionary *_props;
     BOOL _ignoreTextDidChanged;
     KRTextInputEventSequencer *_textInputEventSequencer;
@@ -437,9 +436,6 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
     if (!json) return;
     [_textInputEventSequencer invalidatePendingMarkedText];
-    if (json[@"syncRevision"] != nil) {
-        _textInputSyncRevision = [json[@"syncRevision"] integerValue];
-    }
 
     NSString *requestedRawText = json[@"text"] ?: @"";
     NSInteger requestedSelectionStart = json[@"selectionStart"] ? [json[@"selectionStart"] integerValue] : requestedRawText.length;
@@ -910,7 +906,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
         self.css_textLengthBeyondLimit(@{});
     }
     if (self.css_textDidChange) {
-        self.css_textDidChange(@{@"text": newRawText, @"length": @([self p_calculateLengthForText:newRawText]), @"syncRevision": @(_textInputSyncRevision)});
+        self.css_textDidChange(@{@"text": newRawText, @"length": @([self p_calculateLengthForText:newRawText])});
     }
     if (self.css_textInputStateChange) {
         self.css_textInputStateChange([self p_currentTextInputStatePayload]);
@@ -1550,7 +1546,6 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
         @"selectionEnd": @(NSMaxRange(outputSelectionRange)),
         @"compositionStart": @(compositionStart),
         @"compositionEnd": @(compositionEnd),
-        @"syncRevision": @(_textInputSyncRevision),
         @"length": @([self p_calculateLengthForText:rawText])
     };
 }
