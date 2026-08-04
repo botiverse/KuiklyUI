@@ -61,6 +61,7 @@ import com.tencent.kuikly.core.render.android.expand.component.text.FontWeightSp
 import com.tencent.kuikly.core.render.android.expand.component.text.HRLineHeightSpan
 import com.tencent.kuikly.core.render.android.expand.component.text.KRRichTextBuilder
 import com.tencent.kuikly.core.render.android.expand.module.KRKeyboardModule
+import com.tencent.kuikly.core.render.android.expand.module.KeyboardHeightDispatchGate
 import com.tencent.kuikly.core.render.android.expand.module.KeyboardStatusListener
 import com.tencent.kuikly.core.render.android.export.IKuiklyRenderViewExport
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderCallback
@@ -149,7 +150,6 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
     private var pendingFocusRequestId: Long? = null
     private var pendingBlurRequestId: Long? = null
 
-    private var currentKeyboardHeight = 0
     private var lengthLimitType: Int = -1
     private var maxTextLength: Int? = null
 
@@ -861,13 +861,13 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) : 
 
         @Suppress("UNCHECKED_CAST")
         keyboardHeightChangeCallback = propValue as KuiklyRenderCallback
+        val keyboardHeightDispatchGate = KeyboardHeightDispatchGate()
         // 键盘状态监听
         keyboardStatusListener = object : KeyboardStatusListener {
             override fun onHeightChanged(keyboardHeight: Int) {
-                if (keyboardHeight == currentKeyboardHeight) {
+                if (!keyboardHeightDispatchGate.accept(keyboardHeight)) {
                     return
                 }
-                currentKeyboardHeight = keyboardHeight
                 keyboardHeightChangeCallback?.invoke(
                     mapOf(
                         KRViewConst.HEIGHT to kuiklyRenderContext.toDpF(keyboardHeight.toFloat()),
