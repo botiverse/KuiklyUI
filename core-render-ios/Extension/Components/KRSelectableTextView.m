@@ -73,6 +73,17 @@
     KUIKLY_CALL_CSS_METHOD;
 }
 
+- (void)hrv_removeFromSuperview {
+#if !TARGET_OS_OSX
+    // A non-editable UITextView can remain first responder while its system
+    // edit menu is visible. End that native selection session before Kuikly
+    // detaches the view; otherwise the menu can outlive a dismissed modal.
+    self.selectedTextRange = nil;
+    [self resignFirstResponder];
+#endif
+    [super hrv_removeFromSuperview];
+}
+
 #pragma mark - setter (css property)
 
 // View capability: this surface's accessibility truth comes from the system
