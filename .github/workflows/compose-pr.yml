@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - staging2
+      - staging3
 
 permissions:
   contents: read
@@ -247,6 +248,8 @@ jobs:
         run: python3 tools/check-profiler-file-output-lifecycle.py --self-test
       - name: Keep OHOS contentInset leading offsets aligned with the margin model
         run: core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
+      - name: Keep OHOS typed-avatar descriptors fail-closed
+        run: core-render-ohos/src/test/cpp/run_avatar_image_model_test.sh
 
   exact-matrix:
     if: always()
