@@ -451,8 +451,24 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
 
         // setFrameToRenderView can synchronously deliver the old native echo. Never resurrect a
         // consumed target, or overwrite a newer programmatic owner captured during the resize.
+        // task #990 diagnostic: #117's replay only fires when the captured owner
+        // is still current. Record both outcomes so a silent skip is visible.
         if (kuiklyInfo.ignoreScrollOffset != offset) {
+            if (LazyLayoutTraceConfig.ENABLED) {
+                KLog.i(
+                    "KuiklyViewportShrink",
+                    "producer=KNode.replayPendingScrollOffsetAfterViewportShrink " +
+                        "skipped=owner_no_longer_current captured=$offset " +
+                        "current=${kuiklyInfo.ignoreScrollOffset}"
+                )
+            }
             return
+        }
+        if (LazyLayoutTraceConfig.ENABLED) {
+            KLog.i(
+                "KuiklyViewportShrink",
+                "producer=KNode.replayPendingScrollOffsetAfterViewportShrink replaying=$offset"
+            )
         }
 
         val density = kuiklyInfo.getDensity()

@@ -26,6 +26,8 @@ import com.tencent.kuikly.core.views.ScrollerAttr.Companion.NESTED_SCROLL
 import com.tencent.kuikly.core.views.ScrollerEvent
 import com.tencent.kuikly.core.views.ScrollerView
 import kotlin.math.max
+import com.tencent.kuikly.compose.diagnostics.LazyLayoutTraceConfig
+import com.tencent.kuikly.core.log.KLog
 
 internal val KuiklyInfoKey = "KuiklyInfoKey"
 
@@ -53,6 +55,15 @@ internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.applyOffsetDelta(delta: I
         return newOffset
     }
 
+    // task #990 diagnostic: one of only two install points for the pending
+    // programmatic offset, and the early return above means an unchanged offset
+    // installs nothing at all.
+    if (LazyLayoutTraceConfig.ENABLED) {
+        KLog.i(
+            "KuiklyViewportShrink",
+            "producer=ScrollViewEx.applyOffsetDelta.install installed=$newOffset"
+        )
+    }
     kuiklyInfo.ignoreScrollOffset = newOffset
 
     // 扩容

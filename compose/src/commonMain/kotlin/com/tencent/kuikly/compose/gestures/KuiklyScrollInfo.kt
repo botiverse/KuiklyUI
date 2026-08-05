@@ -34,6 +34,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import com.tencent.kuikly.compose.diagnostics.LazyLayoutTraceConfig
+import com.tencent.kuikly.core.log.KLog
 
 internal class ScrollViewBindingGate<T : Any> {
     private val binding = MutableStateFlow<T?>(null)
@@ -127,6 +129,18 @@ class KuiklyScrollInfo {
         val ignoredOffset = ignoreScrollOffset ?: return false
         val matched = kotlin.math.abs(ignoredOffset.x - offsetX) <= epsilon &&
             kotlin.math.abs(ignoredOffset.y - offsetY) <= epsilon
+        // task #990 diagnostic: this clears the pending programmatic offset
+        // whether or not it matched. Seeing null later at a viewport shrink is
+        // therefore ambiguous between "never installed" and "already consumed
+        // by an earlier native echo" — record the consumption so the two are
+        // distinguishable.
+        if (LazyLayoutTraceConfig.ENABLED) {
+            KLog.i(
+                "KuiklyViewportShrink",
+                "producer=KuiklyScrollInfo.consumeIgnoredScrollOffset " +
+                    "consumed=$ignoredOffset nativeEcho=($offsetX,$offsetY) matched=$matched"
+            )
+        }
         ignoreScrollOffset = null
         return matched
     }
