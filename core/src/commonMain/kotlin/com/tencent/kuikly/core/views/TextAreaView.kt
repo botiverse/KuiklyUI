@@ -429,6 +429,11 @@ open class TextAreaAttr : Attr() {
         return this
     }
 
+    fun keyboardTypeDefault(): TextAreaAttr {
+        KEYBOARD_TYPE with "default"
+        return this
+    }
+
     fun keyboardTypeNumber() {
         KEYBOARD_TYPE with "number"
     }

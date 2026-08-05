@@ -244,6 +244,10 @@ class InputAttr : Attr() {
         KEYBOARD_TYPE with "password"
     }
 
+    fun keyboardTypeDefault() {
+        KEYBOARD_TYPE with "default"
+    }
+
     fun keyboardTypeNumber() {
         KEYBOARD_TYPE with "number"
     }
