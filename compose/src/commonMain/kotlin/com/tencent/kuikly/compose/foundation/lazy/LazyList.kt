@@ -22,6 +22,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshots.Snapshot
 import com.tencent.kuikly.compose.foundation.ExperimentalFoundationApi
 import com.tencent.kuikly.compose.foundation.checkScrollableContainerConstraints
+import com.tencent.kuikly.compose.diagnostics.LocalLazyLayoutTrace
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.foundation.layout.Arrangement
 import com.tencent.kuikly.compose.foundation.layout.PaddingValues
@@ -175,7 +176,12 @@ private fun rememberLazyListMeasurePolicy(
 //    graphicsContext: GraphicsContext,
     /** Scroll behavior for sticky items */
     stickyItemsPlacement: StickyItemsPlacement?
-) = remember<LazyLayoutMeasureScope.(Constraints) -> MeasureResult>(
+): LazyLayoutMeasureScope.(Constraints) -> MeasureResult {
+    // Diagnostics handle, if the host provided one for its own composition.
+    // Read here rather than in the measure lambda so the measure path performs
+    // no composition-local lookup, and null in ordinary builds.
+    val lazyLayoutTrace = LocalLazyLayoutTrace.current
+    return remember<LazyLayoutMeasureScope.(Constraints) -> MeasureResult>(
     state,
     contentPadding,
     reverseLayout,
@@ -344,6 +350,7 @@ private fun rememberLazyListMeasurePolicy(
         // todo: wrap with snapshot when b/341782245 is resolved
         val measureResult =
             measureLazyList(
+                trace = lazyLayoutTrace,
                 itemsCount = itemsCount,
                 measuredItemProvider = measuredItemProvider,
                 mainAxisAvailableSize = mainAxisAvailableSize,
@@ -392,6 +399,7 @@ private fun rememberLazyListMeasurePolicy(
         state.applyMeasureResult(measureResult, isLookingAhead)
         measureResult
     }
+}
 }
 
 internal fun <T> placeLazyListChildrenWithInitialNativeViewport(

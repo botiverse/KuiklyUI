@@ -1,5 +1,7 @@
 package com.tencent.kuikly.compose.diagnostics
 
+import androidx.compose.runtime.staticCompositionLocalOf
+
 /**
  * Generic, switchable trace for lazy-layout measure and placement.
  *
@@ -171,3 +173,14 @@ public fun lazyTraceViewportCoverage(
     val extent = viewportEndPx - viewportStartPx
     return covered to (if (extent > covered) extent - covered else 0)
 }
+
+/**
+ * How a host hands a trace to the lazy layouts inside its own composition.
+ *
+ * Static because it is read in the measure path and must not cause
+ * recomposition, and null by default so a host that provides nothing pays
+ * nothing. Scoped to the provider's composition, so the handle dies with the
+ * screen that created it rather than outliving it as global state.
+ */
+public val LocalLazyLayoutTrace: androidx.compose.runtime.ProvidableCompositionLocal<LazyLayoutTrace?> =
+    staticCompositionLocalOf { null }
