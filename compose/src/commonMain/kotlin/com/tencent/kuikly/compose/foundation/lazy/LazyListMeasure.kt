@@ -16,6 +16,12 @@
 
 package com.tencent.kuikly.compose.foundation.lazy
 
+import com.tencent.kuikly.compose.diagnostics.LazyLayoutTrace
+import com.tencent.kuikly.compose.diagnostics.LazyTraceFrame
+import com.tencent.kuikly.compose.diagnostics.LazyTraceMeasureRecord
+import com.tencent.kuikly.compose.diagnostics.LazyTraceStage
+import com.tencent.kuikly.compose.diagnostics.lazyTraceViewportCoverage
+
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.foundation.layout.Arrangement
 import com.tencent.kuikly.compose.foundation.lazy.layout.ObservableScopeInvalidator
@@ -69,7 +75,12 @@ internal fun measureLazyList(
     placementScopeInvalidator: ObservableScopeInvalidator,
 //    graphicsContext: GraphicsContext,
     stickyItemsPlacement: StickyItemsPlacement?,
-    layout: (Int, Int, Placeable.PlacementScope.() -> Unit) -> MeasureResult
+    layout: (Int, Int, Placeable.PlacementScope.() -> Unit) -> MeasureResult,
+    // Diagnostics only. Owned and released by the caller's composition; null in
+    // ordinary builds, and every use is behind a compile-time switch so nothing
+    // here runs — or is even computed — when tracing is disabled.
+    trace: LazyLayoutTrace? = null,
+    traceFrame: LazyTraceFrame? = null
 ): LazyListMeasureResult {
     require(beforeContentPadding >= 0) { "invalid beforeContentPadding" }
     require(afterContentPadding >= 0) { "invalid afterContentPadding" }
@@ -397,6 +408,44 @@ internal fun measureLazyList(
             measuredItemProvider.getAndMeasure(it)
         }
         val headerItem = stickingItems.lastOrNull()
+
+        trace?.measure {
+            val targetToken = trace.targetTokenOrNull()
+            var targetIndex = -1
+            var targetOffset = -1
+            var targetSize = -1
+            val spans = ArrayList<Pair<Int, Int>>(positionedItems.size)
+            positionedItems.fastForEach { item ->
+                val start = item.offset
+                spans.add(start to (start + item.size))
+                if (targetToken != null && item.key.toString() == targetToken) {
+                    targetIndex = item.index
+                    targetOffset = start
+                    targetSize = item.size
+                }
+            }
+            val viewportStart = -beforeContentPadding
+            val viewportEnd = mainAxisAvailableSize + afterContentPadding
+            val coverage = lazyTraceViewportCoverage(viewportStart, viewportEnd, spans)
+            LazyTraceMeasureRecord(
+                stage = LazyTraceStage.MeasureResult,
+                function = "measureLazyList",
+                frame = traceFrame ?: LazyTraceFrame(frameSequence = -1L, frameTimeNanos = -1L),
+                constraintsMaxMainAxis = if (isVertical) constraints.maxHeight else constraints.maxWidth,
+                viewportStartPx = viewportStart,
+                viewportEndPx = viewportEnd,
+                scrollToBeConsumed = scrollToBeConsumed,
+                firstVisibleIndex = firstItem?.index ?: -1,
+                firstVisibleScrollOffset = currentFirstItemScrollOffset,
+                visibleItemCount = positionedItems.size,
+                totalItemCount = itemsCount,
+                targetIndex = targetIndex,
+                targetOffsetPx = targetOffset,
+                targetSizePx = targetSize,
+                coveredPx = coverage.first,
+                gapPx = coverage.second
+            )
+        }
 
         return LazyListMeasureResult(
             firstVisibleItem = firstItem,
