@@ -197,7 +197,12 @@ private fun rememberLazyListMeasurePolicy(
     verticalArrangement,
 //    graphicsContext,
 //    stickyHeadersEnabled,
-    stickyItemsPlacement
+    stickyItemsPlacement,
+    // The handle carries the host's correlation identity, which changes per IME
+    // cycle and layout generation. Without it here the measure lambda closes
+    // over the first handle forever and every later record is attributed to a
+    // stale cycle — records that look valid and join to the wrong pass.
+    lazyLayoutTrace
 ) {
     { containerConstraints ->
         state.measurementScopeInvalidator.attachToScope()
