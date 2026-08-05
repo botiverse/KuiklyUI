@@ -20,6 +20,7 @@ import com.tencent.kuikly.compose.diagnostics.LazyLayoutTrace
 import com.tencent.kuikly.compose.diagnostics.LazyTraceFrame
 import com.tencent.kuikly.compose.diagnostics.LazyTraceMeasureRecord
 import com.tencent.kuikly.compose.diagnostics.LazyTraceStage
+import com.tencent.kuikly.compose.diagnostics.LazyTraceWiringError
 import com.tencent.kuikly.compose.diagnostics.lazyTraceViewportCoverage
 
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
@@ -430,7 +431,12 @@ internal fun measureLazyList(
             LazyTraceMeasureRecord(
                 stage = LazyTraceStage.MeasureResult,
                 function = "measureLazyList",
-                frame = traceFrame ?: LazyTraceFrame(frameSequence = -1L, frameTimeNanos = -1L),
+                // Fail closed rather than substituting -1: a record with a
+                // placeholder frame cannot be joined, and would look like data.
+                frame = traceFrame
+                    ?: throw LazyTraceWiringError(
+                        "lazy layout trace is enabled but no frame identity was supplied"
+                    ),
                 constraintsMaxMainAxis = if (isVertical) constraints.maxHeight else constraints.maxWidth,
                 viewportStartPx = viewportStart,
                 viewportEndPx = viewportEnd,

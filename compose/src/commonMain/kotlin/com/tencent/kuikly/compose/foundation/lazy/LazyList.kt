@@ -22,6 +22,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshots.Snapshot
 import com.tencent.kuikly.compose.foundation.ExperimentalFoundationApi
 import com.tencent.kuikly.compose.foundation.checkScrollableContainerConstraints
+import com.tencent.kuikly.compose.diagnostics.LazyTraceFrameCounter
 import com.tencent.kuikly.compose.diagnostics.LocalLazyLayoutTrace
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.foundation.layout.Arrangement
@@ -181,6 +182,10 @@ private fun rememberLazyListMeasurePolicy(
     // Read here rather than in the measure lambda so the measure path performs
     // no composition-local lookup, and null in ordinary builds.
     val lazyLayoutTrace = LocalLazyLayoutTrace.current
+    // Frame identity for trace records. A monotonic counter plus a monotonic
+    // clock reading, so records can be ordered and spaced without relying on
+    // log arrival order. Only allocated when a host actually provided a trace.
+    val lazyTraceFrameCounter = remember(lazyLayoutTrace) { LazyTraceFrameCounter() }
     return remember<LazyLayoutMeasureScope.(Constraints) -> MeasureResult>(
     state,
     contentPadding,
@@ -351,6 +356,7 @@ private fun rememberLazyListMeasurePolicy(
         val measureResult =
             measureLazyList(
                 trace = lazyLayoutTrace,
+                traceFrame = if (lazyLayoutTrace != null) lazyTraceFrameCounter.next() else null,
                 itemsCount = itemsCount,
                 measuredItemProvider = measuredItemProvider,
                 mainAxisAvailableSize = mainAxisAvailableSize,

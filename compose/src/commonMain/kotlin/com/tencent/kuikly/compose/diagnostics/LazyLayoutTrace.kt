@@ -26,7 +26,11 @@ public object LazyLayoutTraceConfig {
      * rejected by [requireConsistentWith] rather than producing records that
      * cover only one side of the boundary.
      */
-    public const val ENABLED: Boolean = false
+    // Forensics branch: enabled. Main keeps this false — that is the single
+    // line a build flips. Left false here, the inline guard returns before the
+    // lambda and the build produces no records at all, which is exactly the
+    // "compiles green, traces nothing" package this branch exists to avoid.
+    public const val ENABLED: Boolean = true
 
     /**
      * Fails fast when the host's switch and this library's switch disagree.
@@ -75,6 +79,8 @@ public enum class LazyTraceStage {
  * to tell "laid out" from "visible" — a distinction that index ranges alone
  * cannot express.
  */
+public class LazyTraceWiringError(message: String) : IllegalStateException(message)
+
 public data class LazyTraceMeasureRecord(
     public val stage: LazyTraceStage,
     public val function: String,
@@ -184,3 +190,21 @@ public fun lazyTraceViewportCoverage(
  */
 public val LocalLazyLayoutTrace: androidx.compose.runtime.ProvidableCompositionLocal<LazyLayoutTrace?> =
     staticCompositionLocalOf { null }
+
+/**
+ * Issues frame identities for trace records: a monotonic sequence plus a
+ * monotonic clock reading. Held per lazy layout so sequences do not interleave
+ * between unrelated lists, and only created when a host supplied a trace.
+ */
+public class LazyTraceFrameCounter {
+    private var sequence: Long = 0L
+    private val start = kotlin.time.TimeSource.Monotonic.markNow()
+
+    public fun next(): LazyTraceFrame {
+        sequence += 1L
+        return LazyTraceFrame(
+            frameSequence = sequence,
+            frameTimeNanos = start.elapsedNow().inWholeNanoseconds
+        )
+    }
+}
