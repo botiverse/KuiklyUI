@@ -460,7 +460,16 @@ internal fun measureLazyList(
             consumedScroll = consumedScroll,
             stickyItem = headerItem,
             measureResult = layout(layoutWidth, layoutHeight) {
-                // Placement stage: measure said where things go; this records
+                positionedItems.fastForEach {
+                    if (it.key != headerItem?.key) {
+                        it.place(this, isLookingAhead)
+                    }
+                }
+                // the header item should be placed (drawn) after all other items
+                headerItem?.place(this, isLookingAhead)
+                // we attach it during the placement so LazyListState can trigger re-placement
+                placementScopeInvalidator.attachToScope()
+                // Placement stage, emitted AFTER every place() has returned; this records
                 // that placement actually ran for this frame, so the interval
                 // between "measured correctly" and "pixels are white" is not a
                 // blind spot inferred from timestamps.
@@ -504,15 +513,6 @@ internal fun measureLazyList(
                         gapPx = cov.second
                     )
                 }
-                positionedItems.fastForEach {
-                    if (it.key != headerItem?.key) {
-                        it.place(this, isLookingAhead)
-                    }
-                }
-                // the header item should be placed (drawn) after all other items
-                headerItem?.place(this, isLookingAhead)
-                // we attach it during the placement so LazyListState can trigger re-placement
-                placementScopeInvalidator.attachToScope()
             },
             scrollBackAmount = scrollBackAmount,
             visibleItemsInfo = if (noExtraItems) positionedItems else positionedItems.fastFilter {
