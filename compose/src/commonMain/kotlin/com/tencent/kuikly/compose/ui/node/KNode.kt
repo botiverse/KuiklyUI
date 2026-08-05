@@ -57,6 +57,8 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import com.tencent.kuikly.compose.diagnostics.LazyLayoutTraceConfig
+import com.tencent.kuikly.core.log.KLog
 
 internal fun correctedComposeOffsetForViewportChange(
     composeOffset: Int,
@@ -402,6 +404,24 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         }
 
         val pendingProgrammaticOffset = kuiklyInfo.ignoreScrollOffset
+        // task #990 diagnostic: a shrink corrects the Compose offset here, while
+        // the native scroller is only re-driven when a pending programmatic
+        // offset exists. Whether one exists at this moment is not decidable by
+        // reading — it is written on two paths that each return early, and it
+        // can also be consumed by a native echo beforehand. Record it.
+        if (LazyLayoutTraceConfig.ENABLED) {
+            KLog.i(
+                "KuiklyViewportShrink",
+                "producer=KNode.updateScrollViewOffset " +
+                    "shrink=${viewportSize < previousViewportSize} " +
+                    "viewportSize=$previousViewportSize->$viewportSize " +
+                    "composeOffset=${kuiklyInfo.composeOffset.toInt()} " +
+                    "nativeOffset=$currentOffset contentSize=$currentContentSize " +
+                    "pendingProgrammaticOffset=$pendingProgrammaticOffset " +
+                    "offsetDirty=${kuiklyInfo.offsetDirty}"
+            )
+        }
+
         correctedComposeOffsetForViewportChange(
             composeOffset = kuiklyInfo.composeOffset.toInt(),
             nativeOffset = currentOffset,
@@ -411,6 +431,13 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             programmaticOffsetPending = pendingProgrammaticOffset != null,
         )?.let { correctedOffset ->
             kuiklyInfo.composeOffset = correctedOffset.toFloat()
+            if (LazyLayoutTraceConfig.ENABLED) {
+                KLog.i(
+                    "KuiklyViewportShrink",
+                    "producer=KNode.updateScrollViewOffset.corrected " +
+                        "composeOffsetCorrectedTo=$correctedOffset nativeOffsetLeftAt=$currentOffset"
+                )
+            }
         }
 
         return pendingProgrammaticOffset?.takeIf { viewportSize < previousViewportSize }
