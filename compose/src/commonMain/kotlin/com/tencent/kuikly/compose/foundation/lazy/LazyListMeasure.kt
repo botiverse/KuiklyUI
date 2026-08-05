@@ -460,6 +460,50 @@ internal fun measureLazyList(
             consumedScroll = consumedScroll,
             stickyItem = headerItem,
             measureResult = layout(layoutWidth, layoutHeight) {
+                // Placement stage: measure said where things go; this records
+                // that placement actually ran for this frame, so the interval
+                // between "measured correctly" and "pixels are white" is not a
+                // blind spot inferred from timestamps.
+                trace?.measure {
+                    var placedTargetOffset = -1
+                    var placedTargetSize = -1
+                    val token = trace.targetTokenOrNull()
+                    val spans = ArrayList<Pair<Int, Int>>(positionedItems.size)
+                    positionedItems.fastForEach { placed ->
+                        val top = placed.offset
+                        spans.add(top to (top + placed.size))
+                        if (token != null && placed.key.toString() == token) {
+                            placedTargetOffset = top
+                            placedTargetSize = placed.size
+                        }
+                    }
+                    val vStart = -beforeContentPadding
+                    val vEnd = mainAxisAvailableSize + afterContentPadding
+                    val cov = lazyTraceViewportCoverage(vStart, vEnd, spans)
+                    LazyTraceMeasureRecord(
+                        stage = LazyTraceStage.Placement,
+                        function = "measureLazyList.layout",
+                        frame = traceFrame
+                            ?: throw LazyTraceWiringError(
+                                "lazy layout trace is enabled but no frame identity was supplied"
+                            ),
+                        constraintsMaxMainAxis = if (isVertical) constraints.maxHeight else constraints.maxWidth,
+                        viewportStartPx = vStart,
+                        viewportEndPx = vEnd,
+                        scrollToBeConsumed = scrollToBeConsumed,
+                        firstVisibleIndex = firstItem?.index ?: -1,
+                        firstVisibleScrollOffset = currentFirstItemScrollOffset,
+                        visibleItemCount = positionedItems.size,
+                        totalItemCount = itemsCount,
+                        targetIndex = positionedItems.firstOrNull {
+                            token != null && it.key.toString() == token
+                        }?.index ?: -1,
+                        targetOffsetPx = placedTargetOffset,
+                        targetSizePx = placedTargetSize,
+                        coveredPx = cov.first,
+                        gapPx = cov.second
+                    )
+                }
                 positionedItems.fastForEach {
                     if (it.key != headerItem?.key) {
                         it.place(this, isLookingAhead)
