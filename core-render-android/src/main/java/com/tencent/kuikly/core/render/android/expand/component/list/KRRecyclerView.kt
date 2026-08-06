@@ -1029,6 +1029,10 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         val rvLayoutManager = layoutManager
         if (rvLayoutManager == null || !isContentViewAttached) { // 还没设置contentView，所以layoutManager为null，等Layout完再apply
             pendingSetContentOffsetStr = value ?: KRCssConst.EMPTY_STRING
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "pending_content_offset result=installed_no_layout offset=${value.orEmpty()}"
+            )
             return
         }
 
@@ -1218,9 +1222,27 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             return
         }
 
+        val pending = pendingSetContentOffsetStr
+        if (pending.isEmpty()) {
+            return
+        }
+        // Consume before retrying. setContentOffset re-suspends this same value
+        // when the range is still too short, and clearing afterwards deleted
+        // that re-suspension — so when a later row finally grew the range there
+        // was no owner left and the offset was never applied. The programmatic
+        // scroll then silently never happened.
+        pendingSetContentOffsetStr = KRCssConst.EMPTY_STRING
+        setContentOffset(pending)
         if (pendingSetContentOffsetStr.isNotEmpty()) {
-            setContentOffset(pendingSetContentOffsetStr)
-            pendingSetContentOffsetStr = KRCssConst.EMPTY_STRING
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "pending_content_offset result=retry_range_short offset=$pending"
+            )
+        } else {
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "pending_content_offset result=applied_range_ready offset=$pending"
+            )
         }
     }
 
