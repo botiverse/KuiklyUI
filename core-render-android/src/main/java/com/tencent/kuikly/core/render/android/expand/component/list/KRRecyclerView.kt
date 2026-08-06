@@ -1305,7 +1305,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
         val cv = contentView
         val beforeTop = -cv.top
-        val childCount = cv.childCount
+        val childCount = (cv as? android.view.ViewGroup)?.childCount ?: 0
         val listener = object : android.view.ViewTreeObserver.OnPreDrawListener {
             override fun onPreDraw(): Boolean {
                 val observer = viewTreeObserver
@@ -1319,7 +1319,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                     KuiklyRenderLog.i(
                         VIEW_NAME,
                         "content_window_flush result=predraw_complete token=$epoch:$snap " +
-                            "after=${-contentView.top} children=${contentView.childCount} " +
+                            "after=${-contentView.top} " +
+                            "children=${(contentView as? android.view.ViewGroup)?.childCount ?: 0} " +
                             "layoutRequested=$isLayoutRequested",
                     )
                     cb?.invoke(mapOf("result" to "predraw_complete", "epoch" to epoch, "snap" to snap))
@@ -1333,8 +1334,10 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         pendingFlushSnap = snap
         // Listener first, then the work that schedules the frame it observes.
         viewTreeObserver.addOnPreDrawListener(listener)
-        for (i in 0 until childCount) {
-            cv.getChildAt(i).invalidate()
+        (cv as? android.view.ViewGroup)?.let { group ->
+            for (i in 0 until childCount) {
+                group.getChildAt(i).invalidate()
+            }
         }
         cv.invalidate()
         cv.requestLayout()
