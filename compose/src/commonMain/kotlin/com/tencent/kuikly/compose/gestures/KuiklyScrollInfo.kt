@@ -407,6 +407,59 @@ class KuiklyScrollInfo {
     fun isVertical(): Boolean = orientation == Orientation.Vertical
 
     /**
+     * task #990: pushes the native scroller to Compose's logical offset when the
+     * two have physically diverged.
+     *
+     * A programmatic snap after a viewport shrink updates only Compose's side —
+     * `snapToItemIndexInternal` mutates `offsetDirty` and the logical window,
+     * creates no `ignoreScrollOffset` owner, and no general convergence branch
+     * existed — so the command never crossed the bridge. The device capture
+     * shows it directly: focus applied at the old viewport's offset, keyboard
+     * rises, zero native requests, PixelCopy all white. Both sides individually
+     * "correct"; silence on the bridge.
+     *
+     * Deliberately narrow: never during a user drag (the user always wins), a
+     * no-op when already converged, and the target is not clamped here — when
+     * the native range is still short, the receiver's own pending-owner path
+     * holds the offset and applies it once a row grows the range, which is the
+     * behaviour fixed and tested earlier in this task.
+     *
+     * Reuses the exact apply mechanics of the #117 replay (owner fence first,
+     * then the Android exact-bottom workaround), and the receiver logs the
+     * pending_content_offset receipt, so this path is observable end to end.
+     */
+    fun convergeNativeToComposeOffset(): Boolean {
+        val sv = scrollView ?: return false
+        if (sv.isDragging) {
+            return false
+        }
+        val target = composeOffset.toInt()
+        if (target < 0) {
+            return false
+        }
+        val deltaPx = target - contentOffset
+        if (deltaPx in -1..1) {
+            return false
+        }
+        ignoreScrollOffset = IntOffset(
+            x = if (isVertical()) 0 else target,
+            y = if (isVertical()) target else 0,
+        )
+        val density = getDensity()
+        val offsetInDp = target / density
+        val offsetX = if (isVertical()) 0f else offsetInDp
+        val offsetY = if (isVertical()) offsetInDp else 0f
+        if (scrollView?.contentView?.getPager()?.pageData?.isAndroid == true) {
+            // Keep the existing Android exact-bottom workaround used by
+            // applyOffsetDelta and the #117 replay.
+            sv.setContentOffset(kotlin.math.max(0f, offsetX - 0.01f), kotlin.math.max(0f, offsetY - 0.01f))
+        } else {
+            sv.setContentOffset(offsetX, offsetY)
+        }
+        return true
+    }
+
+    /**
      * Check if it's near the bottom of scrolling
      */
     fun nearScrollBottom(): Boolean {

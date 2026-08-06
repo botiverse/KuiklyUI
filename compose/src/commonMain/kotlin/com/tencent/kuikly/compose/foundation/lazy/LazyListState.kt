@@ -343,6 +343,16 @@ class LazyListState
 
             if (forceRemeasure) {
                 remeasurement?.forceRemeasure()
+                // task #990: the synchronous remeasure has just settled Compose's
+                // logical position, but nothing on this path tells the native
+                // scroller — after a viewport shrink the two sides diverge with
+                // zero traffic on the bridge, and the viewport physically stays
+                // on the old offset's blank segment while every Compose-side
+                // signal reports success. Converge before returning, so a
+                // programmatic scrollToItem means what it says physically.
+                // Restricted to the synchronous branch: the scheduled-remeasure
+                // path has not measured yet and has no settled offset to send.
+                kuiklyInfo.convergeNativeToComposeOffset()
             } else {
                 measurementScopeInvalidator.invalidateScope()
             }
