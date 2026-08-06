@@ -153,6 +153,8 @@ jobs:
             --no-build-cache --no-daemon
       - name: Run native text-input sequencing fixture
         run: tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+      - name: Run gradient rich-text optional dispatch fixture
+        run: tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
       - name: Build production renderer with warnings as errors
         run: |
           mkdir -p build
