@@ -265,8 +265,24 @@ class LazyListState
             scrollOffset: Int = 0,
         ) {
             scroll {
-                snapToItemIndexInternal(index, scrollOffset, forceRemeasure = true)
+                snapToItemIndexAndCommit(index, scrollOffset)
             }
+        }
+
+        /**
+         * task #990: the production seam the behaviour tests drive. A committed
+         * viewport shrink can leave this snap numerically identical to the
+         * native offset while remapping which content it means; the await
+         * drives a diverged offset, asks native to re-commit the window when a
+         * shrink still owes one, and suspends until the pre-draw callback — so
+         * callers (and the viewport executor's CommandConsumed) observe native
+         * completion rather than request issuance. Kept as one function so
+         * deleting the commit from the snap path turns the tests red instead of
+         * leaving them green against a copy.
+         */
+        internal suspend fun snapToItemIndexAndCommit(index: Int, scrollOffset: Int) {
+            snapToItemIndexInternal(index, scrollOffset, forceRemeasure = true)
+            kuiklyInfo.awaitContentWindowCommitAfterSnap()
         }
 
         internal val measurementScopeInvalidator = ObservableScopeInvalidator()
@@ -343,20 +359,6 @@ class LazyListState
 
             if (forceRemeasure) {
                 remeasurement?.forceRemeasure()
-                // task #990: the synchronous remeasure has settled Compose's
-                // logical position, but nothing on this path told the native
-                // scroller. The trap has two shapes: the offsets can physically
-                // diverge, or — the captured incident — they stay numerically
-                // equal while the snap remapped which content those coordinates
-                // mean, in which case every offset-based primitive no-ops and
-                // native keeps presenting the old window as white. The commit
-                // handles both; positionChanged says whether the logical window
-                // actually moved, so an idle snap commits nothing. Restricted to
-                // the synchronous branch: the scheduled path has not measured
-                // yet and has nothing settled to commit.
-                kuiklyInfo.commitNativeAfterProgrammaticSnap(
-                    logicalWindowChanged = positionChanged
-                )
             } else {
                 measurementScopeInvalidator.invalidateScope()
             }

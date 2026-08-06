@@ -21,6 +21,7 @@ import com.tencent.kuikly.core.base.event.Touch
 import com.tencent.kuikly.core.collection.fastHashSetOf
 import com.tencent.kuikly.core.collection.toFastMutableList
 import com.tencent.kuikly.core.layout.FlexDirection
+import com.tencent.kuikly.core.module.CallbackFn
 import com.tencent.kuikly.core.layout.Frame
 import com.tencent.kuikly.core.layout.StyleSpace
 import com.tencent.kuikly.core.nvi.serialization.json.JSONObject
@@ -155,16 +156,28 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
 
     /**
      * task #990: asks the native scroller to re-commit its current content
-     * window. Used after a programmatic snap whose numeric offset equals the
-     * native offset while the logical window has changed — the same number now
-     * means different content, and no offset-based primitive produces any
-     * native work in that state (a same-value contentOffset reduces to
-     * scrollBy(0,0)).
+     * window, and reports back when the re-commit has actually reached a
+     * pre-draw — not when it was merely requested.
      *
-     * Open so renderer-level tests can record the commit.
+     * Used after a programmatic snap whose numeric offset equals the native
+     * offset while the logical window has changed: the same number now means
+     * different content, and no offset-based primitive produces any native
+     * work in that state (a same-value contentOffset reduces to scrollBy(0,0)).
+     *
+     * [generation] identifies one shrink's window; the callback carries it back
+     * so a stale completion can never sign for a newer window. Open so
+     * renderer-level tests can record the commit.
      */
-    open fun callFlushContentWindow() {
-        renderView?.callMethod("flushContentWindow", "")
+    /**
+     * Returns whether the request was dispatched. A caller that suspends until
+     * the callback must not suspend when there was no render view to answer —
+     * the native side always replies (predraw_complete, superseded, or
+     * skipped_no_content), but only if it was actually asked.
+     */
+    open fun callFlushContentWindow(generation: Long, callback: CallbackFn? = null): Boolean {
+        val target = renderView ?: return false
+        target.callMethod("flushContentWindow", "$generation", callback)
+        return true
     }
 
     internal fun contentViewDidSetFrameToRenderView() {

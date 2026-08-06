@@ -413,6 +413,14 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             kuiklyInfo.composeOffset = correctedOffset.toFloat()
         }
 
+        if (viewportSize < previousViewportSize) {
+            // task #990: one shrink = one content-window generation. A later
+            // programmatic snap can leave the numeric offset unchanged while
+            // remapping which content it means; this registration is what tells
+            // that snap a native re-commit is still owed for this window.
+            // Expansion deliberately does not register.
+            kuiklyInfo.registerContentWindowShrink()
+        }
         return pendingProgrammaticOffset?.takeIf { viewportSize < previousViewportSize }
     }
 

@@ -22,6 +22,7 @@ import com.tencent.kuikly.compose.coroutines.internal.KuiklyContextScheduler
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
 import com.tencent.kuikly.compose.ui.unit.IntOffset
+import kotlin.coroutines.resume
 import com.tencent.kuikly.core.layout.Frame
 import com.tencent.kuikly.core.manager.BridgeManager
 import com.tencent.kuikly.core.pager.PageData
@@ -407,26 +408,93 @@ class KuiklyScrollInfo {
     fun isVertical(): Boolean = orientation == Orientation.Vertical
 
     /**
-     * task #990: makes a synchronous programmatic snap physically real on the
-     * native scroller.
+     * task #990 — one content-window generation per committed viewport shrink.
      *
-     * Two distinct failure states, decided by the numeric relation between
-     * Compose's settled offset and the native offset:
+     * The shrink itself is registered by KNode at frame commit. A later
+     * programmatic snap consults [contentWindowFlushOwed] to learn whether a
+     * native re-commit is still owed for the current window: the snap can leave
+     * the numeric offset unchanged while remapping which content it means, and
+     * in that state every offset-based primitive is a physical no-op.
      *
-     *  - **Diverged**: drive native to the compose offset. Owner fence first,
-     *    then the same apply mechanics as the #117 replay. Not clamped here —
-     *    a still-short native range is held by the receiver's pending-owner
-     *    path and applied when a row grows the range.
-     *  - **Numerically equal but the logical window changed**: the incident
-     *    state. The snap remapped which content these coordinates mean, and no
-     *    offset-based primitive produces any native work when the value is
-     *    unchanged (a same-value contentOffset reduces to scrollBy(0,0)). The
-     *    native side is asked to re-commit its current content window instead.
-     *
-     * Never during a user drag; the caller states whether the logical window
-     * actually moved, so an idle snap commits nothing.
+     * Completion is recorded only from the native pre-draw callback, and only
+     * when the completing generation matches — a stale callback can never sign
+     * for a newer window. A superseded or cancelled flush leaves the debt in
+     * place for the next snap rather than pretending it was paid.
      */
-    fun commitNativeAfterProgrammaticSnap(logicalWindowChanged: Boolean): Boolean {
+    var contentWindowShrinkGeneration: Long = 0L
+        private set
+
+    var contentWindowFlushedGeneration: Long = 0L
+        private set
+
+    fun registerContentWindowShrink() {
+        contentWindowShrinkGeneration += 1L
+    }
+
+    val contentWindowFlushOwed: Boolean
+        get() = contentWindowShrinkGeneration > contentWindowFlushedGeneration
+
+    fun onContentWindowFlushCompleted(generation: Long) {
+        if (generation > contentWindowFlushedGeneration) {
+            contentWindowFlushedGeneration = generation
+        }
+    }
+
+    /**
+     * task #990: awaits the native re-commit a programmatic snap owes.
+     *
+     * Runs inside the scroll mutex after the synchronous remeasure has settled
+     * the logical window. Diverged offsets are driven first (fire-and-track via
+     * the owner-fence/echo machinery). Then, if a committed shrink still owes a
+     * content-window flush, the native scroller is asked to re-commit and this
+     * suspends until its pre-draw callback — so the caller's settled contract
+     * binds to native work having happened, not to a request having been sent.
+     *
+     * Fencing: completion is recorded only when the answering generation
+     * matches; a superseded or skipped answer resumes without paying the debt,
+     * leaving it for the next snap. Never suspends when the request could not
+     * be dispatched, and never runs during a user drag.
+     */
+    suspend fun awaitContentWindowCommitAfterSnap() {
+        val sv = scrollView ?: return
+        if (sv.isDragging) {
+            return
+        }
+        driveNativeToComposeOffset()
+        if (!contentWindowFlushOwed) {
+            return
+        }
+        if (sv.contentView?.getPager()?.pageData?.isAndroid != true) {
+            // The flush protocol is Android-first; other renderers keep their
+            // existing behaviour rather than suspending on an unimplemented
+            // method.
+            return
+        }
+        val generation = contentWindowShrinkGeneration
+        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            val dispatched = sv.callFlushContentWindow(generation) { data ->
+                val answered = data?.optLong("generation") ?: -1L
+                val result = data?.optString("result").orEmpty()
+                if (answered == generation && result == "predraw_complete") {
+                    onContentWindowFlushCompleted(answered)
+                }
+                if (continuation.isActive) {
+                    continuation.resume(Unit)
+                }
+            }
+            if (!dispatched && continuation.isActive) {
+                continuation.resume(Unit)
+            }
+        }
+    }
+
+    /**
+     * Drives the native scroller to Compose's settled offset when the two have
+     * physically diverged. Owner fence first, then the #117 apply mechanics; a
+     * still-short native range is held by the receiver's pending-owner path.
+     * Returns false when nothing needed sending.
+     */
+    fun driveNativeToComposeOffset(): Boolean {
         val sv = scrollView ?: return false
         if (sv.isDragging) {
             return false
@@ -437,11 +505,7 @@ class KuiklyScrollInfo {
         }
         val deltaPx = target - contentOffset
         if (deltaPx in -1..1) {
-            if (!logicalWindowChanged) {
-                return false
-            }
-            sv.callFlushContentWindow()
-            return true
+            return false
         }
         ignoreScrollOffset = IntOffset(
             x = if (isVertical()) 0 else target,

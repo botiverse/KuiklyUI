@@ -504,7 +504,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         return when (method) {
             METHOD_SET_HAS_PULL_TO_REFRESH -> null
             METHOD_CONTENT_OFFSET -> setContentOffset(params)
-            METHOD_FLUSH_CONTENT_WINDOW -> flushContentWindow()
+            METHOD_FLUSH_CONTENT_WINDOW -> flushContentWindow(params, callback)
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> contentInsetWhenEndDrag(params)
             METHOD_CONTENT_INSET -> contentInset(params)
             METHOD_ABORT_CONTENT_OFFSET_ANIMATE -> {
@@ -1322,24 +1322,80 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     /**
-     * task #990: re-commits the current content window without moving it.
+     * task #990: re-commits the current content window without moving it, and
+     * completes only at the next pre-draw.
      *
      * A programmatic snap after a viewport shrink can leave the numeric offset
-     * unchanged while remapping which content it means. A same-value
+     * unchanged while remapping which content it means; a same-value
      * contentOffset reduces to scrollBy(0,0), so nothing on the offset path can
-     * make this list re-present its children. This invalidates the content
-     * view's subtree and requests layout, then reports completion after the
-     * next frame so the caller's settled contract binds to real native work
-     * rather than to having issued a request.
+     * make this list re-present its children. The subtree is invalidated and
+     * relaid out, and completion is reported from an OnPreDrawListener rather
+     * than from having issued the request — "requestLayout was called" is not
+     * evidence that native did the work.
+     *
+     * One flush owner at a time: a newer generation supersedes the previous
+     * listener, whose callback is answered with superseded so no caller is left
+     * suspended. The callback always carries its own generation, so a stale
+     * completion can never sign for a newer window.
      */
-    private fun flushContentWindow() {
+    private var pendingFlushPreDrawListener: android.view.ViewTreeObserver.OnPreDrawListener? = null
+    private var pendingFlushCallback: KuiklyRenderCallback? = null
+    private var pendingFlushGeneration: Long = -1L
+
+    private fun flushContentWindow(params: String?, callback: KuiklyRenderCallback?) {
+        val generation = params?.trim()?.toLongOrNull() ?: -1L
         if (!isContentViewAttached) {
-            KuiklyRenderLog.i(VIEW_NAME, "content_window_flush result=skipped_no_content")
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "content_window_flush result=skipped_no_content generation=$generation",
+            )
+            callback?.invoke(mapOf("result" to "skipped_no_content", "generation" to generation))
             return
+        }
+        // Supersede any in-flight flush: answer its caller so nothing hangs,
+        // and record that the old generation did not complete.
+        pendingFlushPreDrawListener?.let { stale ->
+            viewTreeObserver.takeIf { it.isAlive }?.removeOnPreDrawListener(stale)
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "content_window_flush result=superseded generation=$pendingFlushGeneration " +
+                    "by=$generation",
+            )
+            pendingFlushCallback?.invoke(
+                mapOf("result" to "superseded", "generation" to pendingFlushGeneration),
+            )
+            pendingFlushPreDrawListener = null
+            pendingFlushCallback = null
         }
         val cv = contentView
         val beforeTop = -cv.top
         val childCount = cv.childCount
+        val listener = object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                val observer = viewTreeObserver
+                if (observer.isAlive) {
+                    observer.removeOnPreDrawListener(this)
+                }
+                if (pendingFlushPreDrawListener === this) {
+                    pendingFlushPreDrawListener = null
+                    val cb = pendingFlushCallback
+                    pendingFlushCallback = null
+                    KuiklyRenderLog.i(
+                        VIEW_NAME,
+                        "content_window_flush result=predraw_complete generation=$generation " +
+                            "after=${-contentView.top} children=${contentView.childCount} " +
+                            "layoutRequested=$isLayoutRequested",
+                    )
+                    cb?.invoke(mapOf("result" to "predraw_complete", "generation" to generation))
+                }
+                return true
+            }
+        }
+        pendingFlushPreDrawListener = listener
+        pendingFlushCallback = callback
+        pendingFlushGeneration = generation
+        // Listener first, then the work that schedules the frame it observes.
+        viewTreeObserver.addOnPreDrawListener(listener)
         for (i in 0 until childCount) {
             cv.getChildAt(i).invalidate()
         }
@@ -1348,15 +1404,9 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         invalidate()
         KuiklyRenderLog.i(
             VIEW_NAME,
-            "content_window_flush result=requested before=$beforeTop children=$childCount " +
-                "content=${cv.width}x${cv.height} viewport=${width}x$height",
+            "content_window_flush result=requested generation=$generation before=$beforeTop " +
+                "children=$childCount content=${cv.width}x${cv.height} viewport=${width}x$height",
         )
-        cv.post {
-            KuiklyRenderLog.i(
-                VIEW_NAME,
-                "content_window_flush result=completed after=${-cv.top} children=${cv.childCount}",
-            )
-        }
     }
 
     private fun tryApplyPendingFireOnScroll() {
