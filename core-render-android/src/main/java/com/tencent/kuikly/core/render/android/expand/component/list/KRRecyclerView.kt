@@ -504,6 +504,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         return when (method) {
             METHOD_SET_HAS_PULL_TO_REFRESH -> null
             METHOD_CONTENT_OFFSET -> setContentOffset(params)
+            METHOD_FLUSH_CONTENT_WINDOW -> flushContentWindow()
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> contentInsetWhenEndDrag(params)
             METHOD_CONTENT_INSET -> contentInset(params)
             METHOD_ABORT_CONTENT_OFFSET_ANIMATE -> {
@@ -1320,6 +1321,44 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
     }
 
+    /**
+     * task #990: re-commits the current content window without moving it.
+     *
+     * A programmatic snap after a viewport shrink can leave the numeric offset
+     * unchanged while remapping which content it means. A same-value
+     * contentOffset reduces to scrollBy(0,0), so nothing on the offset path can
+     * make this list re-present its children. This invalidates the content
+     * view's subtree and requests layout, then reports completion after the
+     * next frame so the caller's settled contract binds to real native work
+     * rather than to having issued a request.
+     */
+    private fun flushContentWindow() {
+        if (!isContentViewAttached) {
+            KuiklyRenderLog.i(VIEW_NAME, "content_window_flush result=skipped_no_content")
+            return
+        }
+        val cv = contentView
+        val beforeTop = -cv.top
+        val childCount = cv.childCount
+        for (i in 0 until childCount) {
+            cv.getChildAt(i).invalidate()
+        }
+        cv.invalidate()
+        cv.requestLayout()
+        invalidate()
+        KuiklyRenderLog.i(
+            VIEW_NAME,
+            "content_window_flush result=requested before=$beforeTop children=$childCount " +
+                "content=${cv.width}x${cv.height} viewport=${width}x$height",
+        )
+        cv.post {
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "content_window_flush result=completed after=${-cv.top} children=${cv.childCount}",
+            )
+        }
+    }
+
     private fun tryApplyPendingFireOnScroll() {
         if (!isContentViewAttached) {
             return
@@ -1589,6 +1628,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         private const val VELOCITY_DECAY_THRESHOLD_MS = 150L
         private const val SCROLL_WITH_PARENT = "scrollWithParent"
 
+        private const val METHOD_FLUSH_CONTENT_WINDOW = "flushContentWindow" // task #990: 重新提交当前内容窗口
         private const val METHOD_CONTENT_OFFSET = "contentOffset" // 设置内容的偏移量，会把List滚到对应的位置
         private const val METHOD_CONTENT_INSET_WHEN_END_DRAG =
             "contentInsetWhenEndDrag" // 结束拖拽时，设置的ContentInset

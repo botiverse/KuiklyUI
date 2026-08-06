@@ -407,28 +407,26 @@ class KuiklyScrollInfo {
     fun isVertical(): Boolean = orientation == Orientation.Vertical
 
     /**
-     * task #990: pushes the native scroller to Compose's logical offset when the
-     * two have physically diverged.
+     * task #990: makes a synchronous programmatic snap physically real on the
+     * native scroller.
      *
-     * A programmatic snap after a viewport shrink updates only Compose's side —
-     * `snapToItemIndexInternal` mutates `offsetDirty` and the logical window,
-     * creates no `ignoreScrollOffset` owner, and no general convergence branch
-     * existed — so the command never crossed the bridge. The device capture
-     * shows it directly: focus applied at the old viewport's offset, keyboard
-     * rises, zero native requests, PixelCopy all white. Both sides individually
-     * "correct"; silence on the bridge.
+     * Two distinct failure states, decided by the numeric relation between
+     * Compose's settled offset and the native offset:
      *
-     * Deliberately narrow: never during a user drag (the user always wins), a
-     * no-op when already converged, and the target is not clamped here — when
-     * the native range is still short, the receiver's own pending-owner path
-     * holds the offset and applies it once a row grows the range, which is the
-     * behaviour fixed and tested earlier in this task.
+     *  - **Diverged**: drive native to the compose offset. Owner fence first,
+     *    then the same apply mechanics as the #117 replay. Not clamped here —
+     *    a still-short native range is held by the receiver's pending-owner
+     *    path and applied when a row grows the range.
+     *  - **Numerically equal but the logical window changed**: the incident
+     *    state. The snap remapped which content these coordinates mean, and no
+     *    offset-based primitive produces any native work when the value is
+     *    unchanged (a same-value contentOffset reduces to scrollBy(0,0)). The
+     *    native side is asked to re-commit its current content window instead.
      *
-     * Reuses the exact apply mechanics of the #117 replay (owner fence first,
-     * then the Android exact-bottom workaround), and the receiver logs the
-     * pending_content_offset receipt, so this path is observable end to end.
+     * Never during a user drag; the caller states whether the logical window
+     * actually moved, so an idle snap commits nothing.
      */
-    fun convergeNativeToComposeOffset(): Boolean {
+    fun commitNativeAfterProgrammaticSnap(logicalWindowChanged: Boolean): Boolean {
         val sv = scrollView ?: return false
         if (sv.isDragging) {
             return false
@@ -439,7 +437,11 @@ class KuiklyScrollInfo {
         }
         val deltaPx = target - contentOffset
         if (deltaPx in -1..1) {
-            return false
+            if (!logicalWindowChanged) {
+                return false
+            }
+            sv.callFlushContentWindow()
+            return true
         }
         ignoreScrollOffset = IntOffset(
             x = if (isVertical()) 0 else target,

@@ -343,16 +343,20 @@ class LazyListState
 
             if (forceRemeasure) {
                 remeasurement?.forceRemeasure()
-                // task #990: the synchronous remeasure has just settled Compose's
-                // logical position, but nothing on this path tells the native
-                // scroller — after a viewport shrink the two sides diverge with
-                // zero traffic on the bridge, and the viewport physically stays
-                // on the old offset's blank segment while every Compose-side
-                // signal reports success. Converge before returning, so a
-                // programmatic scrollToItem means what it says physically.
-                // Restricted to the synchronous branch: the scheduled-remeasure
-                // path has not measured yet and has no settled offset to send.
-                kuiklyInfo.convergeNativeToComposeOffset()
+                // task #990: the synchronous remeasure has settled Compose's
+                // logical position, but nothing on this path told the native
+                // scroller. The trap has two shapes: the offsets can physically
+                // diverge, or — the captured incident — they stay numerically
+                // equal while the snap remapped which content those coordinates
+                // mean, in which case every offset-based primitive no-ops and
+                // native keeps presenting the old window as white. The commit
+                // handles both; positionChanged says whether the logical window
+                // actually moved, so an idle snap commits nothing. Restricted to
+                // the synchronous branch: the scheduled path has not measured
+                // yet and has nothing settled to commit.
+                kuiklyInfo.commitNativeAfterProgrammaticSnap(
+                    logicalWindowChanged = positionChanged
+                )
             } else {
                 measurementScopeInvalidator.invalidateScope()
             }

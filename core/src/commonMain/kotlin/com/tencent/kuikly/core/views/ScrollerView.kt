@@ -153,6 +153,20 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
 
     }
 
+    /**
+     * task #990: asks the native scroller to re-commit its current content
+     * window. Used after a programmatic snap whose numeric offset equals the
+     * native offset while the logical window has changed — the same number now
+     * means different content, and no offset-based primitive produces any
+     * native work in that state (a same-value contentOffset reduces to
+     * scrollBy(0,0)).
+     *
+     * Open so renderer-level tests can record the commit.
+     */
+    open fun callFlushContentWindow() {
+        renderView?.callMethod("flushContentWindow", "")
+    }
+
     internal fun contentViewDidSetFrameToRenderView() {
         scrollerViewEventObserverSet.toFastMutableList().forEach {
             it.contentViewDidSetFrameToRenderView()
