@@ -21,6 +21,7 @@ import com.tencent.kuikly.core.base.event.Touch
 import com.tencent.kuikly.core.collection.fastHashSetOf
 import com.tencent.kuikly.core.collection.toFastMutableList
 import com.tencent.kuikly.core.layout.FlexDirection
+import com.tencent.kuikly.core.module.CallbackFn
 import com.tencent.kuikly.core.layout.Frame
 import com.tencent.kuikly.core.layout.StyleSpace
 import com.tencent.kuikly.core.nvi.serialization.json.JSONObject
@@ -151,6 +152,43 @@ open class ScrollerView<A : ScrollerAttr, E : ScrollerEvent> :
         }
         renderView?.callMethod("contentOffset", "${offsetX} ${offsetY} ${animated.toInt()}${springAnimationString}")
 
+    }
+
+    /**
+     * task #990: asks the native scroller to re-commit its current content
+     * window, reporting back when the re-commit has actually reached a
+     * pre-draw — not when it was merely requested.
+     *
+     * Used after a programmatic snap whose numeric offset equals the native
+     * offset while the logical window has changed: the same number now means
+     * different content, and no offset-based primitive produces any native
+     * work in that state (a same-value contentOffset reduces to scrollBy(0,0)).
+     *
+     * The (epoch, snapSequence) token identifies one snap within one shrink
+     * epoch; the reply carries it back so a stale completion can never sign
+     * for a later snap.
+     * [composeOffsetPx] and [contentOffsetPx] ride along so the native receipt
+     * records both sides' positions — a nonzero difference at flush time is
+     * deliberately exposed by the receipt rather than handled here.
+     *
+     * Returns whether the request was dispatched: a caller that suspends until
+     * the reply must not suspend when there was no render view to answer. Open
+     * so renderer-level tests can record the commit.
+     */
+    open fun callFlushContentWindow(
+        epoch: Long,
+        snapSequence: Long,
+        composeOffsetPx: Int,
+        contentOffsetPx: Int,
+        callback: CallbackFn? = null,
+    ): Boolean {
+        val target = renderView ?: return false
+        target.callMethod(
+            "flushContentWindow",
+            "$epoch $snapSequence $composeOffsetPx $contentOffsetPx",
+            callback,
+        )
+        return true
     }
 
     internal fun contentViewDidSetFrameToRenderView() {

@@ -504,6 +504,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         return when (method) {
             METHOD_SET_HAS_PULL_TO_REFRESH -> null
             METHOD_CONTENT_OFFSET -> setContentOffset(params)
+            METHOD_FLUSH_CONTENT_WINDOW -> flushContentWindow(params, callback)
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> contentInsetWhenEndDrag(params)
             METHOD_CONTENT_INSET -> contentInset(params)
             METHOD_ABORT_CONTENT_OFFSET_ANIMATE -> {
@@ -1224,6 +1225,107 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
     }
 
+    /**
+     * task #990: re-commits the current content window without moving it, and
+     * completes only at the next pre-draw.
+     *
+     * A programmatic snap after a viewport shrink can leave the numeric offset
+     * unchanged while remapping which content it means; a same-value
+     * contentOffset reduces to scrollBy(0,0), so nothing on the offset path can
+     * make this list re-present its children. The subtree is invalidated and
+     * relaid out, and completion is reported from an OnPreDrawListener rather
+     * than from having issued the request — "requestLayout was called" is not
+     * evidence that native did the work.
+     *
+     * The reply always carries its own (epoch, snap) token, and every path answers
+     * (predraw_complete, superseded, or skipped_no_content) so a caller
+     * suspending on the reply can never be left hanging. The receipt records
+     * the caller's composeOffset/contentOffset alongside the physical child
+     * offset: a nonzero difference at flush time is deliberately exposed, not
+     * handled here.
+     */
+    private var pendingFlushPreDrawListener: android.view.ViewTreeObserver.OnPreDrawListener? = null
+    private var pendingFlushCallback: KuiklyRenderCallback? = null
+    private var pendingFlushEpoch: Long = -1L
+    private var pendingFlushSnap: Long = -1L
+
+    private fun flushContentWindow(params: String?, callback: KuiklyRenderCallback?) {
+        val parts = params?.trim()?.split(" ").orEmpty()
+        val epoch = parts.getOrNull(0)?.toLongOrNull() ?: -1L
+        val snap = parts.getOrNull(1)?.toLongOrNull() ?: -1L
+        val composeOffsetPx = parts.getOrNull(2)?.toIntOrNull() ?: -1
+        val callerContentOffsetPx = parts.getOrNull(3)?.toIntOrNull() ?: -1
+        if (!isContentViewAttached) {
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "content_window_flush result=skipped_no_content token=$epoch:$snap",
+            )
+            callback?.invoke(mapOf("result" to "skipped_no_content", "epoch" to epoch, "snap" to snap))
+            return
+        }
+        // Supersede any in-flight flush: answer its caller so nothing hangs,
+        // and record that the superseded snap did not complete.
+        pendingFlushPreDrawListener?.let { stale ->
+            viewTreeObserver.takeIf { it.isAlive }?.removeOnPreDrawListener(stale)
+            KuiklyRenderLog.i(
+                VIEW_NAME,
+                "content_window_flush result=superseded token=$pendingFlushEpoch:$pendingFlushSnap " +
+                    "by=$epoch:$snap",
+            )
+            pendingFlushCallback?.invoke(
+                mapOf(
+                    "result" to "superseded",
+                    "epoch" to pendingFlushEpoch,
+                    "snap" to pendingFlushSnap,
+                ),
+            )
+            pendingFlushPreDrawListener = null
+            pendingFlushCallback = null
+        }
+        val cv = contentView
+        val beforeTop = -cv.top
+        val childCount = cv.childCount
+        val listener = object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                val observer = viewTreeObserver
+                if (observer.isAlive) {
+                    observer.removeOnPreDrawListener(this)
+                }
+                if (pendingFlushPreDrawListener === this) {
+                    pendingFlushPreDrawListener = null
+                    val cb = pendingFlushCallback
+                    pendingFlushCallback = null
+                    KuiklyRenderLog.i(
+                        VIEW_NAME,
+                        "content_window_flush result=predraw_complete token=$epoch:$snap " +
+                            "after=${-contentView.top} children=${contentView.childCount} " +
+                            "layoutRequested=$isLayoutRequested",
+                    )
+                    cb?.invoke(mapOf("result" to "predraw_complete", "epoch" to epoch, "snap" to snap))
+                }
+                return true
+            }
+        }
+        pendingFlushPreDrawListener = listener
+        pendingFlushCallback = callback
+        pendingFlushEpoch = epoch
+        pendingFlushSnap = snap
+        // Listener first, then the work that schedules the frame it observes.
+        viewTreeObserver.addOnPreDrawListener(listener)
+        for (i in 0 until childCount) {
+            cv.getChildAt(i).invalidate()
+        }
+        cv.invalidate()
+        cv.requestLayout()
+        invalidate()
+        KuiklyRenderLog.i(
+            VIEW_NAME,
+            "content_window_flush result=requested token=$epoch:$snap before=$beforeTop " +
+                "composeOffset=$composeOffsetPx callerContentOffset=$callerContentOffsetPx " +
+                "children=$childCount content=${cv.width}x${cv.height} viewport=${width}x$height",
+        )
+    }
+
     private fun tryApplyPendingFireOnScroll() {
         if (!isContentViewAttached) {
             return
@@ -1493,6 +1595,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         private const val VELOCITY_DECAY_THRESHOLD_MS = 150L
         private const val SCROLL_WITH_PARENT = "scrollWithParent"
 
+        private const val METHOD_FLUSH_CONTENT_WINDOW = "flushContentWindow" // task #990: 重新提交当前内容窗口
         private const val METHOD_CONTENT_OFFSET = "contentOffset" // 设置内容的偏移量，会把List滚到对应的位置
         private const val METHOD_CONTENT_INSET_WHEN_END_DRAG =
             "contentInsetWhenEndDrag" // 结束拖拽时，设置的ContentInset

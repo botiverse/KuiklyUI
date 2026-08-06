@@ -265,8 +265,26 @@ class LazyListState
             scrollOffset: Int = 0,
         ) {
             scroll {
-                snapToItemIndexInternal(index, scrollOffset, forceRemeasure = true)
+                snapToItemIndexAndCommit(index, scrollOffset)
             }
+        }
+
+        /**
+         * task #990: the production seam the behaviour tests drive. During an
+         * active viewport-shrink epoch every one of these snaps owes its own
+         * native content-window re-commit — the executor issues up to six for
+         * one command, and each can leave the numeric offset unchanged while
+         * remapping which content it means. The await suspends until native's
+         * pre-draw answers with this snap's own (epoch, snap) token; any other
+         * reply fails the snap rather than returning, so the viewport
+         * executor's CommandConsumed observes native completion, never request
+         * issuance. Kept as one function so deleting the commit from the snap
+         * path turns the tests red instead of leaving them green against a
+         * copy.
+         */
+        internal suspend fun snapToItemIndexAndCommit(index: Int, scrollOffset: Int) {
+            snapToItemIndexInternal(index, scrollOffset, forceRemeasure = true)
+            kuiklyInfo.awaitContentWindowCommitAfterSnap()
         }
 
         internal val measurementScopeInvalidator = ObservableScopeInvalidator()

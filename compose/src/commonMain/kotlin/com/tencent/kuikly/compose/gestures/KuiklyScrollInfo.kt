@@ -22,6 +22,8 @@ import com.tencent.kuikly.compose.coroutines.internal.KuiklyContextScheduler
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
 import com.tencent.kuikly.compose.ui.unit.IntOffset
+import com.tencent.kuikly.core.nvi.serialization.json.JSONObject
+import kotlin.coroutines.resume
 import com.tencent.kuikly.core.layout.Frame
 import com.tencent.kuikly.core.manager.BridgeManager
 import com.tencent.kuikly.core.pager.PageData
@@ -337,6 +339,7 @@ class KuiklyScrollInfo {
     fun resetForNewScrollView() {
         // Cancel and clear any pending tasks
         deferredScrollOffsetAlignmentCoordinator.cancelAndInvalidate { it.cancel() }
+        endContentWindowShrinkEpoch()
 
         // Reset basic offset and scroll state
         ignoreScrollOffset = null
@@ -405,6 +408,95 @@ class KuiklyScrollInfo {
      * Check if it's vertical scrolling
      */
     fun isVertical(): Boolean = orientation == Orientation.Vertical
+
+    /**
+     * task #990 — content-window commits during a viewport-shrink epoch.
+     *
+     * A shrink opens (or extends) an epoch; an expansion closes it. While the
+     * epoch is active, EVERY force-remeasure programmatic snap owes its own
+     * native re-commit: the production executor snaps the same command up to
+     * six times within one shrink, and a one-shot debt paid by the first snap
+     * would leave snaps 2..6 remapping the window with no flush — restoring
+     * the incident shape. One completion settles only its own snap, identified
+     * by (epoch, snapSequence), so a stale callback can never sign for a later
+     * snap.
+     */
+    var contentWindowShrinkEpoch: Long = 0L
+        private set
+
+    var contentWindowShrinkEpochActive: Boolean = false
+        private set
+
+    var contentWindowSnapSequence: Long = 0L
+        private set
+
+    fun registerContentWindowShrink() {
+        contentWindowShrinkEpoch += 1L
+        contentWindowShrinkEpochActive = true
+    }
+
+    fun endContentWindowShrinkEpoch() {
+        contentWindowShrinkEpochActive = false
+    }
+
+    /**
+     * task #990: awaits the native content-window re-commit this snap owes,
+     * with completion bound to the native pre-draw.
+     *
+     * Return semantics are strict, because a normal return is what lets the
+     * viewport executor publish CommandConsumed:
+     *
+     *  - only a pre-draw completion whose (epoch, snap) token matches returns
+     *    normally, and it settles this snap only — never the epoch;
+     *  - any other reply (superseded, skipped, undispatched, unrecognised)
+     *    throws [kotlinx.coroutines.CancellationException]: the snap did not
+     *    become physically real, and returning normally would wrap that
+     *    failure as settled — the defect this task keeps removing.
+     *
+     * A user drag skips without consuming a token. Non-Android renderers keep
+     * their existing behaviour. The suspension cannot leak: the native side
+     * always replies, and an undispatched request fails immediately.
+     */
+    suspend fun awaitContentWindowCommitAfterSnap() {
+        val sv = scrollView ?: return
+        if (sv.isDragging) {
+            return
+        }
+        if (!contentWindowShrinkEpochActive) {
+            return
+        }
+        if (sv.contentView?.getPager()?.pageData?.isAndroid != true) {
+            return
+        }
+        val epoch = contentWindowShrinkEpoch
+        contentWindowSnapSequence += 1L
+        val snap = contentWindowSnapSequence
+        val reply = kotlinx.coroutines.suspendCancellableCoroutine<JSONObject?> { continuation ->
+            val dispatched = sv.callFlushContentWindow(
+                epoch = epoch,
+                snapSequence = snap,
+                composeOffsetPx = composeOffset.toInt(),
+                contentOffsetPx = contentOffset,
+            ) { data ->
+                if (continuation.isActive) {
+                    continuation.resume(data)
+                }
+            }
+            if (!dispatched && continuation.isActive) {
+                continuation.resume(null)
+            }
+        }
+        val answeredEpoch = reply?.optLong("epoch") ?: -1L
+        val answeredSnap = reply?.optLong("snap") ?: -1L
+        val result = reply?.optString("result").orEmpty()
+        if (result == "predraw_complete" && answeredEpoch == epoch && answeredSnap == snap) {
+            return
+        }
+        throw kotlinx.coroutines.CancellationException(
+            "content window flush did not complete: result=$result " +
+                "token=$epoch:$snap answered=$answeredEpoch:$answeredSnap",
+        )
+    }
 
     /**
      * Check if it's near the bottom of scrolling

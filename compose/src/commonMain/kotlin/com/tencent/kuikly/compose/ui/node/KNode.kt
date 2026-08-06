@@ -76,6 +76,8 @@ internal fun correctedComposeOffsetForViewportChange(
     return correctedOffset.takeIf { it != composeOffset }
 }
 
+internal enum class KNodeViewportChange { None, Shrank, Expanded }
+
 internal class KNode<T : DeclarativeBaseView<*, *>>(
     val view: T,
     override var isVirtual: Boolean = false,
@@ -413,7 +415,41 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             kuiklyInfo.composeOffset = correctedOffset.toFloat()
         }
 
+        lastViewportChange = when {
+            viewportSize < previousViewportSize -> KNodeViewportChange.Shrank
+            viewportSize > previousViewportSize -> KNodeViewportChange.Expanded
+            else -> KNodeViewportChange.None
+        }
         return pendingProgrammaticOffset?.takeIf { viewportSize < previousViewportSize }
+    }
+
+    /**
+     * task #990: the viewport change computed by [updateScrollViewOffset],
+     * consumed by [updateFrame] AFTER [DeclarativeBaseView.setFrameToRenderView]
+     * — the epoch must open only once the shrink frame is actually committed,
+     * or a snap could take a token for a window native has not accepted yet.
+     */
+    private var lastViewportChange: KNodeViewportChange = KNodeViewportChange.None
+
+    private fun applyContentWindowEpochChange() {
+        val change = lastViewportChange
+        lastViewportChange = KNodeViewportChange.None
+        if (change == KNodeViewportChange.None) return
+        val scrollerView = view as? ScrollerView<*, *> ?: return
+        val kuiklyInfo =
+            (scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo ?: return
+        when (change) {
+            // A shrink opens (or extends) a content-window epoch. While it is
+            // active every programmatic snap owes its own native re-commit —
+            // the executor snaps one command up to six times, and a snap can
+            // leave the numeric offset unchanged while remapping which content
+            // it means.
+            KNodeViewportChange.Shrank -> kuiklyInfo.registerContentWindowShrink()
+            // Expansion closes the epoch: the keyboard is going away and the
+            // ordinary paths own the viewport again.
+            KNodeViewportChange.Expanded -> kuiklyInfo.endContentWindowShrinkEpoch()
+            KNodeViewportChange.None -> Unit
+        }
     }
 
     private fun replayPendingScrollOffsetAfterViewportShrink(pendingOffset: IntOffset?) {
@@ -451,6 +487,10 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
 
             val pendingOffset = updateScrollViewOffset(curFrame, densityFrame)
             setFrameToRenderView(densityFrame)
+            // task #990: the epoch opens only after the shrink frame is
+            // committed above — registering earlier would let a snap take a
+            // token for a window native has not accepted yet.
+            applyContentWindowEpochChange()
             replayPendingScrollOffsetAfterViewportShrink(pendingOffset)
             getViewEvent().notifyLayoutFrameDidChange(newFrame)
         }
