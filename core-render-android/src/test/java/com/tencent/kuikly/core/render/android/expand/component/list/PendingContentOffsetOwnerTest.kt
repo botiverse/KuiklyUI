@@ -17,6 +17,7 @@ package com.tencent.kuikly.core.render.android.expand.component.list
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -43,12 +44,12 @@ class PendingContentOffsetOwnerTest {
     private class Applier(var rangeReady: Boolean) {
         var applied: String? = null
 
-        fun apply(owner: KRPendingContentOffsetOwner, value: String) {
+        fun apply(owner: KRPendingContentOffsetOwner, request: KRPendingContentOffset) {
             if (rangeReady) {
-                applied = value
+                applied = request.value
             } else {
                 // What setContentOffset does when canScrollImmediately is false.
-                owner.install(value)
+                owner.install(request.value, retained = request)
             }
         }
     }
@@ -60,7 +61,7 @@ class PendingContentOffsetOwnerTest {
 
         // 1. Requested before the list can scroll there.
         owner.install("0 231 0")
-        assertEquals("0 231 0", owner.pending)
+        assertEquals("0 231 0", owner.pending?.value)
 
         // 2. Retried while the range is still short: the applier re-suspends,
         //    and that re-suspension must survive the retry.
@@ -69,7 +70,7 @@ class PendingContentOffsetOwnerTest {
         assertEquals(
             "the offset must still be owned after a short-range retry",
             "0 231 0",
-            owner.pending
+            owner.pending?.value
         )
         assertNull(applier.applied)
 
@@ -78,7 +79,7 @@ class PendingContentOffsetOwnerTest {
         val ready = owner.retry { applier.apply(owner, it) }
         assertEquals(KRPendingContentOffsetOutcome.AppliedRangeReady, ready)
         assertEquals("0 231 0", applier.applied)
-        assertEquals("applying it releases ownership", "", owner.pending)
+        assertNull("applying it releases ownership", owner.pending)
     }
 
     @Test
@@ -92,7 +93,7 @@ class PendingContentOffsetOwnerTest {
             owner.retry { applier.apply(owner, it) }
         )
         assertEquals("0 54 0", applier.applied)
-        assertEquals("", owner.pending)
+        assertNull(owner.pending)
     }
 
     @Test
@@ -118,11 +119,47 @@ class PendingContentOffsetOwnerTest {
 
         repeat(5) {
             owner.retry { applier.apply(owner, it) }
-            assertEquals("0 231 0", owner.pending)
+            assertEquals("0 231 0", owner.pending?.value)
         }
 
         applier.rangeReady = true
         owner.retry { applier.apply(owner, it) }
         assertEquals("0 231 0", applier.applied)
+    }
+
+    @Test
+    fun aNewSamePayloadRequestIsNotMisreportedAsTheRetriedOwner() {
+        val owner = KRPendingContentOffsetOwner()
+        val original = owner.install("0 231 0")
+
+        val outcome = owner.retry {
+            val replacement = owner.install("0 231 0")
+            assertTrue(
+                "same payload must still receive a distinct opaque generation",
+                replacement.generation != original.generation,
+            )
+        }
+
+        assertEquals(KRPendingContentOffsetOutcome.ReplacedByNewOwner, outcome)
+        assertEquals("0 231 0", owner.pending?.value)
+        assertTrue(owner.pending !== original)
+    }
+
+    @Test
+    fun anImmediatelyAppliedReplacementStillInvalidatesTheOlderGeneration() {
+        val owner = KRPendingContentOffsetOwner()
+        val original = owner.install("0 231 0")
+
+        val outcome = owner.retry {
+            val replacement = owner.install("0 231 0")
+            assertTrue(owner.consume(replacement))
+        }
+
+        assertEquals(KRPendingContentOffsetOutcome.ReplacedByNewOwner, outcome)
+        assertNull(owner.pending)
+        assertTrue(
+            "slot returning to empty must not make the older generation current again",
+            !owner.isLatest(original),
+        )
     }
 }

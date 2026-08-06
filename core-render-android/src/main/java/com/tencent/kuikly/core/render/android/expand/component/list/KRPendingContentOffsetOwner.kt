@@ -35,47 +35,83 @@ package com.tencent.kuikly.core.render.android.expand.component.list
  */
 internal class KRPendingContentOffsetOwner {
 
-    var pending: String = ""
+    private var nextGeneration = 0L
+
+    var pending: KRPendingContentOffset? = null
         private set
 
     val hasPending: Boolean
-        get() = pending.isNotEmpty()
+        get() = pending != null
 
-    /** Holds [value] until something can apply it. */
-    fun install(value: String) {
-        pending = value
+    /**
+     * Installs a new request, or reinstalls [retained] during a retry.
+     *
+     * A new request always receives a new opaque generation, even when its payload is byte-for-byte
+     * equal to the previous one. That distinction is what prevents a callback replacement from
+     * being misreported as the older request merely waiting for more range.
+     */
+    fun install(
+        value: String,
+        retained: KRPendingContentOffset? = null,
+    ): KRPendingContentOffset {
+        require(value.isNotEmpty()) { "a pending content offset must not be empty" }
+        val owner =
+            retained?.also {
+                require(it.value == value) { "a retained owner cannot change its payload" }
+            } ?: KRPendingContentOffset(
+                generation = ++nextGeneration,
+                value = value,
+            )
+        pending = owner
+        return owner
     }
 
-    /** Drops ownership, e.g. once the offset has been applied. */
+    /** Drops the current slot without making an older owner current again. */
     fun clear() {
-        pending = ""
+        pending = null
     }
+
+    /** Consumes [owner] before its physical apply, leaving any reentrant replacement untouched. */
+    fun consume(owner: KRPendingContentOffset): Boolean {
+        if (pending !== owner) return false
+        pending = null
+        return true
+    }
+
+    fun isLatest(owner: KRPendingContentOffset): Boolean =
+        owner.generation == nextGeneration
 
     /**
      * Retries the held offset.
      *
-     * [apply] performs the real work and is expected to call [install] again if
-     * it still cannot scroll. Returns the outcome so the caller can record which
-     * of the three states this pass reached, since none of them are observable
-     * from the Compose side.
+     * [apply] performs the real work and is expected to call [install] again with the captured
+     * owner if it still cannot scroll. The opaque generation distinguishes that same-owner retry
+     * from a newer request installed reentrantly while the physical write runs.
      */
-    fun retry(apply: (String) -> Unit): KRPendingContentOffsetOutcome {
+    fun retry(apply: (KRPendingContentOffset) -> Unit): KRPendingContentOffsetOutcome {
         val captured = pending
-        if (captured.isEmpty()) {
+        if (captured == null) {
             return KRPendingContentOffsetOutcome.NothingPending
         }
-        pending = ""
+        pending = null
         apply(captured)
-        return if (hasPending) {
-            KRPendingContentOffsetOutcome.RetriedRangeShort
-        } else {
-            KRPendingContentOffsetOutcome.AppliedRangeReady
+        return when {
+            !isLatest(captured) -> KRPendingContentOffsetOutcome.ReplacedByNewOwner
+            pending === captured -> KRPendingContentOffsetOutcome.RetriedRangeShort
+            pending == null -> KRPendingContentOffsetOutcome.AppliedRangeReady
+            else -> KRPendingContentOffsetOutcome.ReplacedByNewOwner
         }
     }
 }
 
+internal class KRPendingContentOffset internal constructor(
+    val generation: Long,
+    val value: String,
+)
+
 internal enum class KRPendingContentOffsetOutcome {
     NothingPending,
     RetriedRangeShort,
-    AppliedRangeReady
+    AppliedRangeReady,
+    ReplacedByNewOwner,
 }

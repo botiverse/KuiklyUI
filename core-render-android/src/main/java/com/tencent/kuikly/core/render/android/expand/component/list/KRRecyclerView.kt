@@ -215,15 +215,6 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
      * 将要滚动到的offset字符串描述
      */
     private val pendingContentOffsetOwner = KRPendingContentOffsetOwner()
-    private var pendingSetContentOffsetStr
-        get() = pendingContentOffsetOwner.pending
-        set(value) {
-            if (value.isEmpty()) {
-                pendingContentOffsetOwner.clear()
-            } else {
-                pendingContentOffsetOwner.install(value)
-            }
-        }
 
     /**
      * List 高度动态改变时, iOS系统会自动调整 contentOffset
@@ -1034,11 +1025,23 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         callback(paramsMap)
     }
 
-    private fun setContentOffset(value: String?) {
+    private fun setContentOffset(
+        value: String?,
+        retainedOwner: KRPendingContentOffset? = null,
+    ) {
         val rvLayoutManager = layoutManager
         if (rvLayoutManager == null || !isContentViewAttached) { // 还没设置contentView，所以layoutManager为null，等Layout完再apply
-            pendingSetContentOffsetStr = value ?: KRCssConst.EMPTY_STRING
-            KuiklyRenderLog.i(VIEW_NAME, "pending_content_offset result=installed_no_layout")
+            if (value == null || value.isEmpty()) {
+                pendingContentOffsetOwner.clear()
+            } else {
+                val owner = pendingContentOffsetOwner.install(value, retainedOwner)
+                KuiklyRenderLog.i(
+                    VIEW_NAME,
+                    "pending_content_offset result=${if (retainedOwner == null) "installed_no_layout" else "retry_no_layout"} " +
+                        "owner=${owner.generation} contentAttached=$isContentViewAttached " +
+                        "viewport=${width}x$height",
+                )
+            }
             return
         }
 
@@ -1064,7 +1067,22 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         val originOffsetY = offsetY
         val originOffsetX = offsetX
 
-        pendingSetContentOffsetStr = if (canScrollImmediately(originOffsetX, originOffsetY)) {
+        // Install before deciding whether this request can apply. An immediate request supersedes
+        // an older deferred one, and a retry reinstalls the exact same opaque owner generation.
+        val owner = pendingContentOffsetOwner.install(params, retainedOwner)
+        val contentWidth = contentView.width
+        val contentHeight = contentView.height
+        val viewportWidth = width
+        val viewportHeight = height
+        val maxOffsetX = contentWidth - viewportWidth
+        val maxOffsetY = contentHeight - viewportHeight
+        val beforeOffsetX = -contentView.left
+        val beforeOffsetY = -contentView.top
+
+        if (canScrollImmediately(originOffsetX, originOffsetY)) {
+            check(pendingContentOffsetOwner.consume(owner)) {
+                "the current content offset owner changed before its immediate apply"
+            }
             internalSetContentOffset(originOffsetX,
                 originOffsetY,
                 offsetX,
@@ -1075,11 +1093,76 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                 animationDamping,
                 animationVelocity,
                 animationCurve)
-            KRCssConst.EMPTY_STRING
+            val result =
+                if (pendingContentOffsetOwner.isLatest(owner)) {
+                    "applied_range_ready"
+                } else {
+                    "superseded_during_apply"
+                }
+            logPendingContentOffsetReceipt(
+                result = result,
+                owner = owner,
+                requestedOffsetX = originOffsetX,
+                requestedOffsetY = originOffsetY,
+                contentWidth = contentWidth,
+                contentHeight = contentHeight,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                maxOffsetX = maxOffsetX,
+                maxOffsetY = maxOffsetY,
+                beforeOffsetX = beforeOffsetX,
+                beforeOffsetY = beforeOffsetY,
+                afterOffsetX = -contentView.left,
+                afterOffsetY = -contentView.top,
+                animate = animate,
+            )
         } else {
             // KTV侧有可能先更改了contentView的高度或者宽度后, setContentOffset. 此时应该等Layout完后才设置offset
-            value
+            logPendingContentOffsetReceipt(
+                result = if (retainedOwner == null) "installed_range_short" else "retry_range_short",
+                owner = owner,
+                requestedOffsetX = originOffsetX,
+                requestedOffsetY = originOffsetY,
+                contentWidth = contentWidth,
+                contentHeight = contentHeight,
+                viewportWidth = viewportWidth,
+                viewportHeight = viewportHeight,
+                maxOffsetX = maxOffsetX,
+                maxOffsetY = maxOffsetY,
+                beforeOffsetX = beforeOffsetX,
+                beforeOffsetY = beforeOffsetY,
+                afterOffsetX = -contentView.left,
+                afterOffsetY = -contentView.top,
+                animate = animate,
+            )
         }
+    }
+
+    private fun logPendingContentOffsetReceipt(
+        result: String,
+        owner: KRPendingContentOffset,
+        requestedOffsetX: Int,
+        requestedOffsetY: Int,
+        contentWidth: Int,
+        contentHeight: Int,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        maxOffsetX: Int,
+        maxOffsetY: Int,
+        beforeOffsetX: Int,
+        beforeOffsetY: Int,
+        afterOffsetX: Int,
+        afterOffsetY: Int,
+        animate: Boolean,
+    ) {
+        KuiklyRenderLog.i(
+            VIEW_NAME,
+            "pending_content_offset result=$result owner=${owner.generation} " +
+                "requested=$requestedOffsetX,$requestedOffsetY " +
+                "content=${contentWidth}x$contentHeight viewport=${viewportWidth}x$viewportHeight " +
+                "maxRange=$maxOffsetX,$maxOffsetY before=$beforeOffsetX,$beforeOffsetY " +
+                "after=$afterOffsetX,$afterOffsetY animate=$animate",
+        )
     }
 
     private fun setNestedScroll(propValue: Any): Boolean {
@@ -1232,14 +1315,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         // re-suspends the same value keeps ownership. Clearing afterwards
         // deleted that re-suspension, leaving nothing to apply the offset when a
         // later row finally grew the range.
-        when (pendingContentOffsetOwner.retry { setContentOffset(it) }) {
-            KRPendingContentOffsetOutcome.RetriedRangeShort ->
-                KuiklyRenderLog.i(VIEW_NAME, "pending_content_offset result=retry_range_short")
-
-            KRPendingContentOffsetOutcome.AppliedRangeReady ->
-                KuiklyRenderLog.i(VIEW_NAME, "pending_content_offset result=applied_range_ready")
-
-            KRPendingContentOffsetOutcome.NothingPending -> Unit
+        pendingContentOffsetOwner.retry { owner ->
+            setContentOffset(owner.value, retainedOwner = owner)
         }
     }
 
