@@ -575,6 +575,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     override fun onDestroy() {
+        cancelPendingFlush("cancelled_destroyed")
         super.onDestroy()
         nestedHorizontalChildInterceptor?.also { interceptor ->
             closestHorizontalRecyclerViewParent?.removeNestedChildInterceptEventListener(interceptor)
@@ -1249,6 +1250,26 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     private var pendingFlushEpoch: Long = -1L
     private var pendingFlushSnap: Long = -1L
 
+    /**
+     * Fails any in-flight flush with [reason]. Called on destroy and compose
+     * reuse: a listener left behind would either hang its caller or complete
+     * against a window that no longer exists.
+     */
+    private fun cancelPendingFlush(reason: String) {
+        val stale = pendingFlushPreDrawListener ?: return
+        viewTreeObserver.takeIf { it.isAlive }?.removeOnPreDrawListener(stale)
+        KuiklyRenderLog.i(
+            VIEW_NAME,
+            "content_window_flush result=$reason token=$pendingFlushEpoch:$pendingFlushSnap",
+        )
+        val cb = pendingFlushCallback
+        pendingFlushPreDrawListener = null
+        pendingFlushCallback = null
+        cb?.invoke(
+            mapOf("result" to reason, "epoch" to pendingFlushEpoch, "snap" to pendingFlushSnap),
+        )
+    }
+
     private fun flushContentWindow(params: String?, callback: KuiklyRenderCallback?) {
         val parts = params?.trim()?.split(" ").orEmpty()
         val epoch = parts.getOrNull(0)?.toLongOrNull() ?: -1L
@@ -1422,6 +1443,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
      * Clear transient native state for Compose DSL reuse (not the native reuse pool).
      */
     private fun prepareForComposeReuse() {
+        cancelPendingFlush("cancelled_reused")
         // Reset scroll event dedup cache so restored offset fires a scroll event
         contentOffsetX = -Float.MAX_VALUE
         contentOffsetY = -Float.MAX_VALUE

@@ -458,15 +458,30 @@ class KuiklyScrollInfo {
      * always replies, and an undispatched request fails immediately.
      */
     suspend fun awaitContentWindowCommitAfterSnap() {
-        val sv = scrollView ?: return
-        if (sv.isDragging) {
-            return
-        }
         if (!contentWindowShrinkEpochActive) {
             return
         }
-        if (sv.contentView?.getPager()?.pageData?.isAndroid != true) {
+        // During an active shrink epoch a snap that cannot reach a verified
+        // native pre-draw must fail, not return: a normal return is what lets
+        // the viewport executor publish CommandConsumed.
+        val sv = scrollView
+            ?: throw kotlinx.coroutines.CancellationException(
+                "no scroller bound during an active shrink epoch",
+            )
+        // Platform is decided from the pager, never from contentView presence:
+        // an Android list whose content view is momentarily absent must reach
+        // the native skipped path and fail strictly, not read as non-Android
+        // and return as success.
+        if (!sv.getPager().pageData.isAndroid) {
             return
+        }
+        if (sv.isDragging) {
+            // The user owns the viewport; this snap loses. Failing keeps the
+            // command unconsumed instead of wrapping "never pre-drawn" as
+            // settled.
+            throw kotlinx.coroutines.CancellationException(
+                "user drag during an active shrink epoch",
+            )
         }
         val epoch = contentWindowShrinkEpoch
         contentWindowSnapSequence += 1L
@@ -489,12 +504,24 @@ class KuiklyScrollInfo {
         val answeredEpoch = reply?.optLong("epoch") ?: -1L
         val answeredSnap = reply?.optLong("snap") ?: -1L
         val result = reply?.optString("result").orEmpty()
-        if (result == "predraw_complete" && answeredEpoch == epoch && answeredSnap == snap) {
+        // The reply alone is not enough: between dispatch and callback the
+        // epoch can end (expansion), a new shrink can supersede it, or the
+        // scroller binding can change under a rebind. A completion for a world
+        // that no longer exists must not sign for this one.
+        val worldUnchanged =
+            contentWindowShrinkEpochActive &&
+                contentWindowShrinkEpoch == epoch &&
+                scrollView === sv
+        if (result == "predraw_complete" && answeredEpoch == epoch && answeredSnap == snap &&
+            worldUnchanged
+        ) {
             return
         }
         throw kotlinx.coroutines.CancellationException(
             "content window flush did not complete: result=$result " +
-                "token=$epoch:$snap answered=$answeredEpoch:$answeredSnap",
+                "token=$epoch:$snap answered=$answeredEpoch:$answeredSnap " +
+                "epochActive=$contentWindowShrinkEpochActive " +
+                "currentEpoch=$contentWindowShrinkEpoch sameScroller=${scrollView === sv}",
         )
     }
 
