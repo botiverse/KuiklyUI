@@ -214,7 +214,16 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     /**
      * 将要滚动到的offset字符串描述
      */
-    private var pendingSetContentOffsetStr = ""
+    private val pendingContentOffsetOwner = KRPendingContentOffsetOwner()
+    private var pendingSetContentOffsetStr
+        get() = pendingContentOffsetOwner.pending
+        set(value) {
+            if (value.isEmpty()) {
+                pendingContentOffsetOwner.clear()
+            } else {
+                pendingContentOffsetOwner.install(value)
+            }
+        }
 
     /**
      * List 高度动态改变时, iOS系统会自动调整 contentOffset
@@ -1029,10 +1038,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         val rvLayoutManager = layoutManager
         if (rvLayoutManager == null || !isContentViewAttached) { // 还没设置contentView，所以layoutManager为null，等Layout完再apply
             pendingSetContentOffsetStr = value ?: KRCssConst.EMPTY_STRING
-            KuiklyRenderLog.i(
-                VIEW_NAME,
-                "pending_content_offset result=installed_no_layout offset=${value.orEmpty()}"
-            )
+            KuiklyRenderLog.i(VIEW_NAME, "pending_content_offset result=installed_no_layout")
             return
         }
 
@@ -1222,27 +1228,18 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             return
         }
 
-        val pending = pendingSetContentOffsetStr
-        if (pending.isEmpty()) {
-            return
-        }
-        // Consume before retrying. setContentOffset re-suspends this same value
-        // when the range is still too short, and clearing afterwards deleted
-        // that re-suspension — so when a later row finally grew the range there
-        // was no owner left and the offset was never applied. The programmatic
-        // scroll then silently never happened.
-        pendingSetContentOffsetStr = KRCssConst.EMPTY_STRING
-        setContentOffset(pending)
-        if (pendingSetContentOffsetStr.isNotEmpty()) {
-            KuiklyRenderLog.i(
-                VIEW_NAME,
-                "pending_content_offset result=retry_range_short offset=$pending"
-            )
-        } else {
-            KuiklyRenderLog.i(
-                VIEW_NAME,
-                "pending_content_offset result=applied_range_ready offset=$pending"
-            )
+        // The owner consumes before retrying, so that a setContentOffset which
+        // re-suspends the same value keeps ownership. Clearing afterwards
+        // deleted that re-suspension, leaving nothing to apply the offset when a
+        // later row finally grew the range.
+        when (pendingContentOffsetOwner.retry { setContentOffset(it) }) {
+            KRPendingContentOffsetOutcome.RetriedRangeShort ->
+                KuiklyRenderLog.i(VIEW_NAME, "pending_content_offset result=retry_range_short")
+
+            KRPendingContentOffsetOutcome.AppliedRangeReady ->
+                KuiklyRenderLog.i(VIEW_NAME, "pending_content_offset result=applied_range_ready")
+
+            KRPendingContentOffsetOutcome.NothingPending -> Unit
         }
     }
 
