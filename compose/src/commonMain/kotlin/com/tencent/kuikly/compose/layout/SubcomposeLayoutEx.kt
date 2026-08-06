@@ -89,6 +89,10 @@ internal fun KNode<*>.resetViewVisible() {
             viewVisible?.let {
                 view.getViewAttr().visibility(it)
                 viewVisible = null
+                // An offscreen lazy slot can be drawn clean while hidden. Restoring the native
+                // visibility prop must dirty this exact descendant as well as its ancestry;
+                // waking only the slot container leaves a clean child unable to flush the prop.
+                invalidateDrawAndForceAncestors()
             }
         }
     }

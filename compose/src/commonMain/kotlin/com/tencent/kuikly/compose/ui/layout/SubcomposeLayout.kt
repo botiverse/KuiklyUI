@@ -1405,7 +1405,7 @@ internal class LayoutNodeSubcompositionsState(
  * coalescing cannot repair either boundary.
  */
 internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotActivation() {
-    (this as? KNode<*>)?.invalidateDrawForReuse()
+    (this as? KNode<*>)?.invalidateDrawAndForceAncestors()
 }
 
 private val ReusedSlotId =

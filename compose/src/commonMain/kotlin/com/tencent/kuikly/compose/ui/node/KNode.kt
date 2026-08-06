@@ -155,7 +155,7 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         // no-op in that state, but the new parent may still be clean and therefore skip traversing
         // this dirty child. Force propagation across the reuse boundary so the pending redraw is
         // reachable from the new tree.
-        invalidateDrawForReuse()
+        invalidateDrawAndForceAncestors()
     }
 
     override fun onRelease() {
@@ -247,11 +247,11 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         }
     }
 
-    internal fun invalidateDrawForReuse() {
+    internal fun invalidateDrawAndForceAncestors() {
         drawInvalidated = true
         val currentParent = parent
         if (currentParent is KNode<*>) {
-            currentParent.invalidateDrawForReuse()
+            currentParent.invalidateDrawAndForceAncestors()
         } else {
             currentParent?.invalidateDraw()
         }
