@@ -30,7 +30,6 @@ data class TextInputState(
     val compositionStart: Int = NO_COMPOSITION,
     val compositionEnd: Int = NO_COMPOSITION,
     val length: Int? = null,
-    val syncRevision: Int? = null
 ) {
     fun toJSONObject(): JSONObject {
         return JSONObject().apply {
@@ -40,7 +39,6 @@ data class TextInputState(
             put(KEY_COMPOSITION_START, compositionStart)
             put(KEY_COMPOSITION_END, compositionEnd)
             length?.let { put(KEY_LENGTH, it) }
-            syncRevision?.let { put(KEY_SYNC_REVISION, it) }
         }
     }
 
@@ -63,7 +61,6 @@ data class TextInputState(
         const val KEY_COMPOSITION_START = "compositionStart"
         const val KEY_COMPOSITION_END = "compositionEnd"
         const val KEY_LENGTH = "length"
-        const val KEY_SYNC_REVISION = "syncRevision"
 
         fun decode(params: JSONObject?): TextInputState {
             val json = params ?: JSONObject()
@@ -89,7 +86,6 @@ data class TextInputState(
                 NO_COMPOSITION
             }
             val length = if (json.has(KEY_LENGTH)) json.optInt(KEY_LENGTH) else null
-            val syncRevision = if (json.has(KEY_SYNC_REVISION)) json.optInt(KEY_SYNC_REVISION) else null
             return TextInputState(
                 text = text,
                 selectionStart = selectionStart,
@@ -97,7 +93,6 @@ data class TextInputState(
                 compositionStart = compositionStart,
                 compositionEnd = compositionEnd,
                 length = length,
-                syncRevision = syncRevision
             )
         }
     }

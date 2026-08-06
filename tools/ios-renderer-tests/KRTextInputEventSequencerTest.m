@@ -16,8 +16,7 @@ static NSDictionary *KRState(NSString *text, NSUInteger selection, NSInteger com
         @"selectionStart": @(selection),
         @"selectionEnd": @(selection),
         @"compositionStart": @(compositionStart),
-        @"compositionEnd": @(compositionEnd),
-        @"syncRevision": @7
+        @"compositionEnd": @(compositionEnd)
     };
 }
 
@@ -57,7 +56,6 @@ static void testCompleteStateLeadsLegacyFromOneSnapshot(void) {
     KRAssert(receivedCompleteState == committedState, @"complete must receive the production snapshot instance");
     KRAssert([receivedLegacyState[@"text"] isEqual:committedState[@"text"]], @"legacy text must derive from snapshot");
     KRAssert([receivedLegacyState[@"length"] isEqual:committedState[@"length"]], @"legacy length must derive from snapshot");
-    KRAssert([receivedLegacyState[@"syncRevision"] isEqual:committedState[@"syncRevision"]], @"legacy revision must derive from snapshot");
     KRAssert([committedState[@"selectionStart"] unsignedIntegerValue] == 3, @"final selection must remain 3");
     KRAssert([committedState[@"compositionStart"] integerValue] == -1, @"committed state must clear composition");
 }
