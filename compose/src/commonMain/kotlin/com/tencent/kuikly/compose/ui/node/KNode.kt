@@ -57,6 +57,24 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
+internal fun correctedComposeOffsetForViewportChange(
+    composeOffset: Int,
+    nativeOffset: Int,
+    contentSize: Int,
+    previousViewportSize: Int,
+    newViewportSize: Int,
+    programmaticOffsetPending: Boolean,
+): Int? {
+    if (programmaticOffsetPending || previousViewportSize == newViewportSize) {
+        return null
+    }
+
+    val clampedNativeOffset = nativeOffset.coerceAtLeast(0)
+    val newMaxOffset = maxOf(0, contentSize - newViewportSize.coerceAtLeast(0))
+    val correctedOffset = minOf(clampedNativeOffset, newMaxOffset)
+    return correctedOffset.takeIf { it != composeOffset }
+}
+
 internal class KNode<T : DeclarativeBaseView<*, *>>(
     val view: T,
     override var isVirtual: Boolean = false,
@@ -368,49 +386,25 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
 
         // Calculate maximum scrollable distance - use pixel units, consistent with composeOffset
         val currentContentSize = kuiklyInfo.currentContentSize // already in pixel units
+        val previousViewportSize = if (kuiklyInfo.isVertical()) {
+            (curHeight * kuiklyInfo.getDensity()).toInt()
+        } else {
+            (curFrame.width * kuiklyInfo.getDensity()).toInt()
+        }
         val viewportSize = if (kuiklyInfo.isVertical()) {
             (newHeight * kuiklyInfo.getDensity()).toInt()
         } else {
             (newFrame.width * kuiklyInfo.getDensity()).toInt()
         }
 
-        // Handle edge cases: if contentSize is 0 or viewportSize is 0, no scrolling needed
-        if (currentContentSize <= 0) {
-            kuiklyInfo.composeOffset = 0f
-            return
-        }
-
-        val maxScrollOffset = maxOf(0, currentContentSize - viewportSize)
-
-        // Correct composeOffset - use pixel units
-        val correctedOffset = when {
-            // If currently scrolled to bottom and height becomes shorter, adjust offset
-            currentOffset >= maxScrollOffset && newHeight < curHeight -> {
-                val newMaxScrollOffset = maxOf(0, currentContentSize - viewportSize)
-                minOf(currentOffset, newMaxScrollOffset)
-            }
-            // If there is current offset but height increases, check if adjustment is needed
-            currentOffset > 0 && newHeight > curHeight -> {
-                val newMaxScrollOffset = maxOf(0, currentContentSize - viewportSize)
-                if (newMaxScrollOffset <= 0) {
-                    0 // no scrolling needed
-                } else {
-                    // When height increases, keep composeOffset unchanged, but check if it exceeds boundaries
-                    if (currentOffset > newMaxScrollOffset) {
-                        newMaxScrollOffset // adjust to maximum when exceeding boundaries
-                    } else {
-                        currentOffset // keep unchanged when within boundaries
-                    }
-                }
-            }
-            // Other cases keep current offset
-            else -> {
-                currentOffset
-            }
-        }
-
-        // Update composeOffset
-        if (correctedOffset != currentOffset) {
+        correctedComposeOffsetForViewportChange(
+            composeOffset = kuiklyInfo.composeOffset.toInt(),
+            nativeOffset = currentOffset,
+            contentSize = currentContentSize,
+            previousViewportSize = previousViewportSize,
+            newViewportSize = viewportSize,
+            programmaticOffsetPending = kuiklyInfo.ignoreScrollOffset != null,
+        )?.let { correctedOffset ->
             kuiklyInfo.composeOffset = correctedOffset.toFloat()
         }
     }
