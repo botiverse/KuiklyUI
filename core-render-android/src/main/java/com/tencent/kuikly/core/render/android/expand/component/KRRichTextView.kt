@@ -89,6 +89,14 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
     override fun setLayoutParams(params: ViewGroup.LayoutParams?) {
         super.setLayoutParams(params)
         initTextLayout(richTextShadow)
+        // task #990: a size change can swap the text drawer just like a content
+        // change does, but only the content path requested a repaint. A view
+        // whose drawer was replaced here — the keyboard shrink path — kept its
+        // stale canvas until something else happened to invalidate it, and the
+        // OHOS renderer had the same family of bug ("typography not ready, skip
+        // draw") with the same white-block symptom. Kept symmetric with
+        // setShadow, which already invalidates.
+        invalidate()
     }
 
     override fun resetShadow() {
