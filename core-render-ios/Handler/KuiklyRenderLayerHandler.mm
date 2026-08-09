@@ -20,6 +20,7 @@
 #import <pthread.h>
 #import "KRConvertUtil.h"
 #import "KRLogModule.h"
+#import "KRRenderViewMethodInvoker.h"
 #import "KuiklyBridgeDelegator.h"
 #import "KuiklyRenderLayerHandler.h"
 #import "KuiklyRenderModuleExportProtocol.h"
@@ -122,9 +123,25 @@ Class _Nullable KRClassFromString(NSString *aClassName) {
                      callback:(KuiklyRenderCallback _Nullable)callback {
     NSAssert([NSThread isMainThread], @"should call on main thread");
     id<KuiklyRenderViewExportProtocol> view = [self p_renderViewHandlerWithTag:tag];
-    if ([view respondsToSelector:@selector(hrv_callWithMethod:params:callback:)]) {
-        [view hrv_callWithMethod:method params:params callback:callback];
-    }
+    SEL selector = @selector(hrv_callWithMethod:params:callback:);
+    KRRenderViewMethodDispatchReceipt receipt = {0};
+    KRInvokeRenderViewMethodIfImplemented(view, selector, method, params, callback, &receipt);
+    [KRLogModule logInfo:[NSString stringWithFormat:
+        @"[Kuikly][ViewMethodDispatch] class=%@ postPredicateClass=%@ metaclass=%@ selector=%@ predicate=%d method=%d owner=%@ imp=%d forwarding=%d abi=%d classStable=%d methodStable=%d impStable=%d decision=%@",
+        receipt.dynamicClass ? NSStringFromClass(receipt.dynamicClass) : @"nil",
+        receipt.postPredicateClass ? NSStringFromClass(receipt.postPredicateClass) : @"nil",
+        receipt.metaclass ? NSStringFromClass(receipt.metaclass) : @"nil",
+        NSStringFromSelector(selector),
+        receipt.predicateResult,
+        receipt.methodFound,
+        receipt.declaringClass ? NSStringFromClass(receipt.declaringClass) : @"nil",
+        receipt.implementationFound,
+        receipt.forwardingImplementation,
+        receipt.abiCompatible,
+        receipt.classStable,
+        receipt.methodStable,
+        receipt.implementationStable,
+        receipt.invoked ? @"invoke" : @"skip"]];
 }
 
 - (NSString* _Nullable)callModuleMethodWithModuleName:(NSString *)moduleName
