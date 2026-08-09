@@ -155,6 +155,8 @@ jobs:
         run: tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
       - name: Run gradient rich-text optional dispatch fixture
         run: tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+      - name: Run render-view method admission fixture
+        run: tools/ios-renderer-tests/run-render-view-method-invoker-test.sh
       - name: Build production renderer with warnings as errors
         run: |
           mkdir -p build
