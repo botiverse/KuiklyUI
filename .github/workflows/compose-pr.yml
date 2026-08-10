@@ -170,6 +170,12 @@ jobs:
             -derivedDataPath build/ios-derived \
             -resultBundlePath build/ios-renderer.xcresult \
             build | tee build/ios-renderer.log
+      - name: Run rich-text generic method contract fixture
+        run: |
+          tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh \
+            . \
+            build/ios-derived \
+            build/rich-text-generic-method-fixture
       - name: Upload iOS evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -178,6 +184,7 @@ jobs:
           path: |
             build/ios-renderer.log
             build/ios-renderer.xcresult
+            build/rich-text-generic-method-fixture
 
   ohos-native:
     # KuiklyUI is a personal repository, so organization-scoped Blacksmith runners never pick up

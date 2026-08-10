@@ -29,6 +29,8 @@ static const CGFloat kKRSlockInlineCodeHorizontalPaddingRatio = 4.0 / 15.0;
 static const CGFloat kKRSlockInlineCodeHorizontalMarginRatio = 2.0 / 15.0;
 static const CGFloat kKRSlockInlineCodeLineHeightRatio = 1.5;
 static const NSUInteger kKRSlockInlineCodeAtomizeThreshold = 16;
+static NSString *const KRRichTextAccessibilityFocusMethod = @"accessibilityFocus";
+static NSString *const KRRichTextAccessibilityAnnounceMethod = @"accessibilityAnnounce";
 
 @interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
 
@@ -295,6 +297,16 @@ static const NSUInteger kKRSlockInlineCodeAtomizeThreshold = 16;
 
 - (void)hrv_setPropWithKey:(NSString *)propKey propValue:(id)propValue {
     KUIKLY_SET_CSS_COMMON_PROP;
+}
+
+- (void)hrv_callWithMethod:(NSString *)method
+                    params:(NSString *)params
+                  callback:(KuiklyRenderCallback)callback {
+    if ([method isEqualToString:KRRichTextAccessibilityFocusMethod]) {
+        UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, self);
+    } else if ([method isEqualToString:KRRichTextAccessibilityAnnounceMethod] && params.length > 0) {
+        UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, params);
+    }
 }
 
 - (void)hrv_prepareForeReuse {
