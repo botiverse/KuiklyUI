@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,7 @@ FORK = "6a531a57105ee453edcfdc07a54d1bb1b4348431"
 HOLD = "c8f92f053fb60d6fe515b5e986e1c6fe2db775a0"
 MERGE = "25cbc1fa25be4bba0ca800a67762a1f1317c5f25"
 MANIFEST = Path("docs/migrations/staging3-2.24.0.md")
+SIGN_OFF_VALUE = re.compile(r"^[^<>\n]+ <[^<>\s]+@[^<>\s]+>$")
 
 
 def git(*args: str, check: bool = True) -> str:
@@ -33,6 +35,21 @@ def git(*args: str, check: bool = True) -> str:
 def require_equal(label: str, actual: object, expected: object) -> None:
     if actual != expected:
         raise AssertionError(f"{label}: expected {expected}, got {actual}")
+
+
+def require_dco(commit: str) -> None:
+    """Require a valid DCO trailer without conflating author and committer."""
+
+    trailers = git(
+        "show",
+        "-s",
+        "--format=%(trailers:key=Signed-off-by,valueonly,unfold)",
+        commit,
+    ).splitlines()
+    if not any(SIGN_OFF_VALUE.fullmatch(value.strip()) for value in trailers):
+        raise AssertionError(
+            f"missing valid Signed-off-by trailer on first-parent commit {commit}"
+        )
 
 
 def validate(expected_head: str, require_clean: bool) -> list[str]:
@@ -58,15 +75,7 @@ def validate(expected_head: str, require_clean: bool) -> list[str]:
     if commits[:2] != [HOLD, MERGE]:
         raise AssertionError(f"unexpected migration first-parent prefix: {commits[:2]}")
     for commit in commits:
-        fields = git("show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce%x00%B", commit).split("\x00")
-        if len(fields) != 5:
-            raise AssertionError(f"unable to parse identity for {commit}")
-        author_name, author_email, committer_name, committer_email, body = fields
-        if (author_name, author_email) != (committer_name, committer_email):
-            raise AssertionError(f"author/committer mismatch on first-parent commit {commit}")
-        trailer = f"Signed-off-by: {author_name} <{author_email}>"
-        if trailer not in body.splitlines():
-            raise AssertionError(f"missing matching DCO trailer on first-parent commit {commit}")
+        require_dco(commit)
 
     manifest = MANIFEST.read_text(encoding="utf-8")
     for coordinate in (UPSTREAM, FORK, HOLD, MERGE):
