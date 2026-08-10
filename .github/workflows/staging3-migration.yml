@@ -37,6 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/staging3-evidence
+          python3 tools/test-staging3-migration.py
           python3 tools/check-staging3-migration.py \
             --expected-head "$EXPECTED_HEAD_SHA" | tee build/staging3-evidence/identity.txt
           git diff --check 76a866795903014cfd2d0363ee31ccee7895775e...HEAD
