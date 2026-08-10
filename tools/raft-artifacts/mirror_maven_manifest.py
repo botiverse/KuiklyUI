@@ -32,6 +32,7 @@ EXPECTED_COLUMNS = [
     "authority",
 ]
 EXPECTED_GAVS = {
+    ("org.jetbrains.kotlin", "kotlin-stdlib-common", "2.0.21-KBA-003"),
     ("org.jetbrains.kotlin", "kotlin-stdlib", "2.0.21-KBA-003"),
     ("org.jetbrains.kotlinx", "atomicfu", "0.23.2-KBA-001"),
     ("org.jetbrains.kotlinx", "atomicfu-ohosarm64", "0.23.2-KBA-001"),
@@ -146,8 +147,8 @@ def load_manifest(path: Path) -> tuple[dict[str, str], list[Entry]]:
         )
 
     actual_gavs = {(entry.group_id, entry.artifact_id, entry.version) for entry in entries}
-    if len(entries) != 25 or actual_gavs != EXPECTED_GAVS:
-        raise MirrorError("task #121 narrowed manifest is not the exact 25-file / 5-GAV closure")
+    if len(entries) != 31 or actual_gavs != EXPECTED_GAVS:
+        raise MirrorError("task #121 narrowed manifest is not the exact 31-file / 6-GAV closure")
     if entries != sorted(entries, key=lambda entry: entry.path):
         raise MirrorError("manifest entries must be sorted by path")
     return metadata, entries
