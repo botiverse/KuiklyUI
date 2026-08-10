@@ -1,6 +1,8 @@
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 #import "KuiklyRenderLayerHandler.h"
+#import "KRGradientRichTextView.h"
 #import "KRRichTextView.h"
 
 @interface Task114ReleaseCarrierAppDelegate : UIResponder <UIApplicationDelegate>
@@ -23,6 +25,18 @@
         richTextViewClass != Nil && [NSStringFromClass(richTextViewClass) isEqualToString:@"KRRichTextView"],
         @"KRRichTextView must be present in the carrier fixture binary"
     );
+    SEL genericViewMethodSelector = @selector(hrv_callWithMethod:params:callback:);
+    Method genericViewMethod = class_getInstanceMethod(richTextViewClass, genericViewMethodSelector);
+    NSCAssert(
+        genericViewMethod != NULL && method_getImplementation(genericViewMethod) != NULL,
+        @"KRRichTextView must have a concrete generic RenderView.callMethod dispatcher IMP"
+    );
+    Class gradientRichTextViewClass = [KRGradientRichTextView class];
+    NSCAssert(
+        gradientRichTextViewClass != Nil &&
+            [NSStringFromClass(gradientRichTextViewClass) isEqualToString:@"KRGradientRichTextView"],
+        @"KRGradientRichTextView must be present in the carrier fixture binary"
+    );
 
     KuiklyContextParam *contextParam =
         [KuiklyContextParam newWithPageName:@"task114-release-carrier"
@@ -32,6 +46,23 @@
     [handler createRenderViewWithTag:@114 viewName:@"KRRichTextView"];
     [handler callViewMethodWithTag:@114
                            method:@"accessibilityFocus"
+                           params:nil
+                         callback:nil];
+    [handler callViewMethodWithTag:@114
+                           method:@"accessibilityAnnounce"
+                           params:@"task131-rich-text-generic-method"
+                         callback:nil];
+    [handler createRenderViewWithTag:@115 viewName:@"KRGradientRichTextView"];
+    [handler callViewMethodWithTag:@115
+                           method:@"accessibilityFocus"
+                           params:nil
+                         callback:nil];
+    [handler callViewMethodWithTag:@115
+                           method:@"accessibilityAnnounce"
+                           params:@"task131-gradient-rich-text-generic-method"
+                         callback:nil];
+    [handler callViewMethodWithTag:@115
+                           method:@"unsupported"
                            params:nil
                          callback:nil];
 
