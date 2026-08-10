@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 #import "KuiklyRenderLayerHandler.h"
 #import "KRRichTextView.h"
@@ -23,6 +24,12 @@
         richTextViewClass != Nil && [NSStringFromClass(richTextViewClass) isEqualToString:@"KRRichTextView"],
         @"KRRichTextView must be present in the carrier fixture binary"
     );
+    SEL genericViewMethodSelector = @selector(hrv_callWithMethod:params:callback:);
+    Method genericViewMethod = class_getInstanceMethod(richTextViewClass, genericViewMethodSelector);
+    NSCAssert(
+        genericViewMethod != NULL && method_getImplementation(genericViewMethod) != NULL,
+        @"KRRichTextView must have a concrete generic RenderView.callMethod dispatcher IMP"
+    );
 
     KuiklyContextParam *contextParam =
         [KuiklyContextParam newWithPageName:@"task114-release-carrier"
@@ -33,6 +40,10 @@
     [handler callViewMethodWithTag:@114
                            method:@"accessibilityFocus"
                            params:nil
+                         callback:nil];
+    [handler callViewMethodWithTag:@114
+                           method:@"accessibilityAnnounce"
+                           params:@"task131-rich-text-generic-method"
                          callback:nil];
 
     NSString *receipt =
