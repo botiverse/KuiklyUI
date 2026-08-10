@@ -2,11 +2,20 @@
 # task=121
 # selected_by=KuiklyUI staging3@7724745c2f5b3a8edc34bfd7c644649c61f36256
 # selection=current combined OHOS dependency closure only
+# predecessor_gavs=6
+# files=31
+# stdlib_common_required_by=kotlin-stdlib POM/module plus task120 combined resolver smoke
 # resolver_receipt_sha256=9d92375134765185a05e4f0e19bdef80dbd6e30516383572800b6e1abd0f4f09
 # supersedes_packet_sha256=c3fe49d71ffaed80d145912e01a1617fe494d1ac23b5c4c3e14f087fd1fac91c
 # excluded=coroutines 1.8.0-KBA-001 and dotted atomicfu 0.23.2.KBA-001 historical families
 # provenance=canonical Tencent Maven bytes; exact source-to-publication run is not publicly auditable
 groupId	artifactId	version	path	size	sha256	authority
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003-javadoc.jar	257	4200a274bbbdfe19ef5418d3013075dddaca4d2f14c85bade6652dc6d8ad42ce	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003-javadoc.jar
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003-sources.jar	2745488	1737b7d499d15cf04c23fec378bb4930a03f2239c219793bb06491396434174c	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003-sources.jar
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.jar	452936	56a16a46f9e3c3699f1afa188da779dfd9a5593148e047e36123482ac463ae1a	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.jar
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.module	640	81f9a3a63f533d8411b30332dc2b9bbaa6023deaf7c4e05264eb8ebb0010018c	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.module
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.pom	1825	41b02a542ef1fd012a0c1a49ad6fdd5cc369035aa1e84ad0b80e5235b8642313	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.pom
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.spdx.json	1114	6d875e47a0f26704d05407bf342455f2aefc3c1d1fafd21467d2a577a68e53eb	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-003/kotlin-stdlib-common-2.0.21-KBA-003.spdx.json
 org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-003/kotlin-stdlib-2.0.21-KBA-003-all.jar	390849	53c7d7f6d2e3bee6c15b46e0f9b77de9d037f180a9b9ead591adf0d66488176c	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-003/kotlin-stdlib-2.0.21-KBA-003-all.jar
 org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-003/kotlin-stdlib-2.0.21-KBA-003-common-sources.jar	2749788	9b1929e556e52f064d37b0fa08a4547363016843cdbaee5f751b2ccf1513155e	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-003/kotlin-stdlib-2.0.21-KBA-003-common-sources.jar
 org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-003	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-003/kotlin-stdlib-2.0.21-KBA-003-common.jar	452763	5b2ebead274a77b3e14fb799b9333a98d74a848a5bd719dffa2c7bf27acc05e2	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-003/kotlin-stdlib-2.0.21-KBA-003-common.jar

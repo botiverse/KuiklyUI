@@ -39,7 +39,7 @@ class ManifestTest(unittest.TestCase):
         metadata, entries = mirror.load_manifest(manifest)
 
         self.assertEqual(metadata["task"], "121")
-        self.assertEqual(len(entries), 25)
+        self.assertEqual(len(entries), 31)
         actual_gavs = {(item.group_id, item.artifact_id, item.version) for item in entries}
         self.assertEqual(actual_gavs, mirror.EXPECTED_GAVS)
         paths = "\n".join(item.path for item in entries)
