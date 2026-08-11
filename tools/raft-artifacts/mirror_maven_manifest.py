@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify or publish an immutable Maven manifest using ordinary Maven PUTs."""
+"""Verify or publish a task-bound immutable Maven manifest."""
 
 from __future__ import annotations
 
@@ -31,13 +31,42 @@ EXPECTED_COLUMNS = [
     "sha256",
     "authority",
 ]
-EXPECTED_GAVS = {
+TASK121_EXPECTED_GAVS = {
     ("org.jetbrains.kotlin", "kotlin-stdlib-common", "2.0.21-KBA-003"),
     ("org.jetbrains.kotlin", "kotlin-stdlib", "2.0.21-KBA-003"),
     ("org.jetbrains.kotlinx", "atomicfu", "0.23.2-KBA-001"),
     ("org.jetbrains.kotlinx", "atomicfu-ohosarm64", "0.23.2-KBA-001"),
     ("org.jetbrains.kotlinx", "kotlinx-coroutines-core", "1.8.0-KBA-002"),
     ("org.jetbrains.kotlinx", "kotlinx-coroutines-core-ohosarm64", "1.8.0-KBA-002"),
+}
+TASK127_EXPECTED_GAVS = {
+    ("org.jetbrains.kotlin", "kotlin-stdlib-common", "2.0.21-KBA-010"),
+    ("org.jetbrains.kotlin", "kotlin-stdlib", "2.0.21-KBA-010"),
+}
+MANIFEST_CONTRACTS = {
+    "121": {
+        "files": 31,
+        "gavs": TASK121_EXPECTED_GAVS,
+        "total_bytes": 17010052,
+        "set_sha256": "ed87650d6e52c3d6126565795af13b7f215694bac82e48346c19cfaaaf184cfa",
+    },
+    "127": {
+        "files": 13,
+        "gavs": TASK127_EXPECTED_GAVS,
+        "total_bytes": 15128114,
+        "set_sha256": "3a789c3fc63d7ae70966c793f0cc07f483b0cfaa3dc860428937dc1a96c2c906",
+        "metadata": {
+            "candidate_source_exact": "c6afb625cd5ab547e5fbe2db85d420ede7cee847",
+            "candidate_manifest_sha256": "2bad4e20e97721e05553acffb5a6168ebe39fcf8bbc946c8f6d6505ab8a48fb4",
+            "candidate_product_set_sha256": "ab47b636d19b7261645f8621ed604cefc80382b2b079773bd941d6877d73e61a",
+            "candidate_packet_sha256": "61842fd1a2d5b65403ca0440aff5b8faa8e5a0b85e43cdf8ac43672024993e1a",
+            "inventory_authority_manifest_sha256": "ce0301ae1a49a526435686a633133c47364c4fe206fed71f80963cdc9a0641e0",
+            "files": "13",
+            "predecessor_gavs": "2",
+            "total_bytes": "15128114",
+            "deterministic_set_sha256": "3a789c3fc63d7ae70966c793f0cc07f483b0cfaa3dc860428937dc1a96c2c906",
+        },
+    },
 }
 AUTHORITY_ORIGIN = "mirrors.tencent.com"
 AUTHORITY_PREFIX = "/repository/maven-tencent/"
@@ -85,8 +114,14 @@ def load_manifest(path: Path) -> tuple[dict[str, str], list[Entry]]:
     for key in ("schema", "task", "selected_by", "selection", "provenance"):
         if key not in metadata:
             raise MirrorError(f"manifest metadata missing {key}")
-    if metadata["schema"] != "1" or metadata["task"] != "121":
+    if metadata["schema"] != "1" or metadata["task"] not in MANIFEST_CONTRACTS:
         raise MirrorError("unsupported manifest schema or task binding")
+    contract = MANIFEST_CONTRACTS[metadata["task"]]
+    for key, expected in contract.get("metadata", {}).items():
+        if metadata.get(key) != expected:
+            raise MirrorError(
+                f"task #{metadata['task']} manifest metadata mismatch for {key}"
+            )
 
     reader = csv.DictReader(data_lines, delimiter="\t")
     if reader.fieldnames != EXPECTED_COLUMNS:
@@ -146,11 +181,23 @@ def load_manifest(path: Path) -> tuple[dict[str, str], list[Entry]]:
             )
         )
 
-    actual_gavs = {(entry.group_id, entry.artifact_id, entry.version) for entry in entries}
-    if len(entries) != 31 or actual_gavs != EXPECTED_GAVS:
-        raise MirrorError("task #121 narrowed manifest is not the exact 31-file / 6-GAV closure")
     if entries != sorted(entries, key=lambda entry: entry.path):
         raise MirrorError("manifest entries must be sorted by path")
+    actual_gavs = {(entry.group_id, entry.artifact_id, entry.version) for entry in entries}
+    total_bytes = sum(entry.size for entry in entries)
+    set_payload = "".join(
+        f"{entry.sha256}\t{entry.size}\t{entry.path}\n" for entry in entries
+    ).encode("utf-8")
+    set_sha256 = hashlib.sha256(set_payload).hexdigest()
+    if (
+        len(entries) != contract["files"]
+        or actual_gavs != contract["gavs"]
+        or total_bytes != contract["total_bytes"]
+        or set_sha256 != contract["set_sha256"]
+    ):
+        raise MirrorError(
+            f"task #{metadata['task']} manifest is not its exact frozen closure"
+        )
     return metadata, entries
 
 
@@ -259,6 +306,20 @@ def publish_one(base_url: str, token: str, entry: Entry, data: bytes) -> None:
     raise MirrorError(f"{entry.path}: published object did not become readable")
 
 
+def select_missing(
+    entries: list[Entry], authority_bytes: list[bytes], probes: list[Probe]
+) -> list[tuple[Entry, bytes]]:
+    if not (len(entries) == len(authority_bytes) == len(probes)):
+        raise MirrorError("planner result cardinality does not match the manifest")
+    if any(probe.entry != entry for entry, probe in zip(entries, probes)):
+        raise MirrorError("planner result order does not match the manifest")
+    return [
+        (entry, data)
+        for entry, data, probe in zip(entries, authority_bytes, probes)
+        if probe.state == "ABSENT"
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
@@ -294,11 +355,7 @@ def main() -> int:
     token = os.environ.get("RAFT_ARTIFACTS_PUBLISH_TOKEN", "")
     if not token:
         raise MirrorError("RAFT_ARTIFACTS_PUBLISH_TOKEN is required for publish mode")
-    missing = [
-        (entry, data)
-        for entry, data, probe in zip(entries, authority_bytes, probes, strict=True)
-        if probe.state == "ABSENT"
-    ]
+    missing = select_missing(entries, authority_bytes, probes)
     parallel_map(
         lambda pair: publish_one(args.destination, token, pair[0], pair[1]),
         missing,
