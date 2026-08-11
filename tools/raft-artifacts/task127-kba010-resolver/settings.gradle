@@ -1,0 +1,22 @@
+import org.gradle.api.initialization.resolve.RepositoriesMode
+
+pluginManagement {
+    repositories.clear()
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        maven {
+            name = "TencentAuthority"
+            url = uri("https://mirrors.tencent.com/repository/maven-tencent")
+            metadataSources {
+                gradleMetadata()
+                mavenPom()
+                artifact()
+            }
+        }
+    }
+}
+
+rootProject.name = "task127-kba010-authority-resolver"
