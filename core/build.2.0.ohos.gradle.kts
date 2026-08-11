@@ -9,23 +9,33 @@ plugins {
     signing
 }
 
+apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
+val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
+    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
+
 group = MavenConfig.GROUP
 version = Version.getCoreVersion()
+val kuiklyOhosOnly = providers.gradleProperty("kuiklyOhosOnly")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
+    .get()
 
 publishing {
     repositories {
-        val username = MavenConfig.getUsername(project)
-        val password = MavenConfig.getPassword(project)
-        if (username.isNotEmpty() && password.isNotEmpty()) {
-            maven {
-                credentials {
-                    setUsername(username)
-                    setPassword(password)
+        if (!raftPublicationMode) {
+            val username = MavenConfig.getUsername(project)
+            val password = MavenConfig.getPassword(project)
+            if (username.isNotEmpty() && password.isNotEmpty()) {
+                maven {
+                    credentials {
+                        setUsername(username)
+                        setPassword(password)
+                    }
+                    url = uri(MavenConfig.getRepoUrl(version as String))
                 }
-                url = uri(MavenConfig.getRepoUrl(version as String))
+            } else {
+                mavenLocal()
             }
-        } else {
-            mavenLocal()
         }
 
         publications.withType<MavenPublication>().configureEach {
@@ -37,13 +47,15 @@ publishing {
 
 kotlin {
 
-    androidTarget {
-        publishLibraryVariantsGroupedByFlavor = true
-        publishLibraryVariants("release")
-        compilations.all {
-            kotlinOptions {
-                jvmTarget = "1.8"
-                moduleName = "${project.group}.${project.name}"
+    if (!kuiklyOhosOnly) {
+        androidTarget {
+            publishLibraryVariantsGroupedByFlavor = true
+            publishLibraryVariants("release")
+            compilations.all {
+                kotlinOptions {
+                    jvmTarget = "1.8"
+                    moduleName = "${project.group}.${project.name}"
+                }
             }
         }
     }
@@ -67,46 +79,52 @@ kotlin {
         }
     }
 
-    iosSimulatorArm64()
-    iosX64()
-    iosArm64()
+    if (!kuiklyOhosOnly) {
+        iosSimulatorArm64()
+        iosX64()
+        iosArm64()
 
-    js(IR) {
-        moduleName = "KuiklyCore-core"
-        browser {
-            webpackTask {
-                outputFileName = "${moduleName}.js" // 最后输出的名字
-            }
+        js(IR) {
+            moduleName = "KuiklyCore-core"
+            browser {
+                webpackTask {
+                    outputFileName = "${moduleName}.js" // 最后输出的名字
+                }
 
-            commonWebpackConfig {
-                output?.library = null // 不导出全局对象，只导出必要的入口函数
+                commonWebpackConfig {
+                    output?.library = null // 不导出全局对象，只导出必要的入口函数
+                }
             }
+            binaries.executable() //将kotlin.js与kotlin代码打包成一份可直接运行的js文件
         }
-        binaries.executable() //将kotlin.js与kotlin代码打包成一份可直接运行的js文件
     }
 
     // sourceSets
     sourceSets {
         val commonMain by getting
-        val appleMain by sourceSets.creating {
-            dependsOn(commonMain)
-        }
-        val iosMain by sourceSets.creating {
-            dependsOn(appleMain)
+        if (!kuiklyOhosOnly) {
+            val appleMain by sourceSets.creating {
+                dependsOn(commonMain)
+            }
+            val iosMain by sourceSets.creating {
+                dependsOn(appleMain)
+            }
         }
         val ohosArm64Main by sourceSets.getting {
             dependsOn(commonMain)
         }
     }
 
-    targets.withType<KotlinNativeTarget> {
-        val appleMain by sourceSets.getting
-        when {
-            konanTarget.family.isAppleFamily -> {
-                val main by compilations.getting
-                main.defaultSourceSet.dependsOn(appleMain)
-                val kuikly by main.cinterops.creating {
-                    defFile(project.file("src/appleMain/iosInterop/cinterop/ios.def"))
+    if (!kuiklyOhosOnly) {
+        targets.withType<KotlinNativeTarget> {
+            val appleMain by sourceSets.getting
+            when {
+                konanTarget.family.isAppleFamily -> {
+                    val main by compilations.getting
+                    main.defaultSourceSet.dependsOn(appleMain)
+                    val kuikly by main.cinterops.creating {
+                        defFile(project.file("src/appleMain/iosInterop/cinterop/ios.def"))
+                    }
                 }
             }
         }

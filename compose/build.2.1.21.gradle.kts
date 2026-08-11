@@ -8,6 +8,10 @@ plugins {
     signing
 }
 
+apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
+val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
+    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
+
 group = MavenConfig.GROUP
 version = Version.getCoreVersion()
 
@@ -108,18 +112,20 @@ publishing {
 //    }
 
     repositories {
-        val username = MavenConfig.getUsername(project)
-        val password = MavenConfig.getPassword(project)
-        if (username.isNotEmpty() && password.isNotEmpty()) {
-            maven {
-                credentials {
-                    setUsername(username)
-                    setPassword(password)
+        if (!raftPublicationMode) {
+            val username = MavenConfig.getUsername(project)
+            val password = MavenConfig.getPassword(project)
+            if (username.isNotEmpty() && password.isNotEmpty()) {
+                maven {
+                    credentials {
+                        setUsername(username)
+                        setPassword(password)
+                    }
+                    url = uri(MavenConfig.getRepoUrl(version as String))
                 }
-                url = uri(MavenConfig.getRepoUrl(version as String))
+            } else {
+                mavenLocal()
             }
-        } else {
-            mavenLocal()
         }
 
         publications.withType<MavenPublication>().configureEach {

@@ -7,27 +7,37 @@ plugins {
     signing
 }
 
+apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
+val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
+    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
+
 group = MavenConfig.GROUP
 version = Version.getCoreVersion()
+val kuiklyOhosOnly = providers.gradleProperty("kuiklyOhosOnly")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
+    .get()
 
 kotlin {
-    androidTarget {
-        compilations.all {
-            kotlinOptions {
-                jvmTarget = "1.8"
-                freeCompilerArgs += "-Xjvm-default=all"
-                moduleName = "${project.group}.${project.name}"
+    if (!kuiklyOhosOnly) {
+        androidTarget {
+            compilations.all {
+                kotlinOptions {
+                    jvmTarget = "1.8"
+                    freeCompilerArgs += "-Xjvm-default=all"
+                    moduleName = "${project.group}.${project.name}"
+                }
             }
+            publishLibraryVariants("release")
         }
-        publishLibraryVariants("release")
-    }
 
-    iosX64()
-    iosArm64()
-    iosSimulatorArm64()
+        iosX64()
+        iosArm64()
+        iosSimulatorArm64()
 
-    js(IR) {
-        browser()
+        js(IR) {
+            browser()
+        }
     }
 
     targets.all {
@@ -66,11 +76,13 @@ kotlin {
         }
 
         // Android 特有源集中添加 ProfileInstaller 依赖
-        val androidMain by getting {
-            dependencies {
-                compileOnly(project(":core-render-android"))
-                implementation("androidx.profileinstaller:profileinstaller:1.3.1")
-                // 保留现有依赖...
+        if (!kuiklyOhosOnly) {
+            val androidMain by getting {
+                dependencies {
+                    compileOnly(project(":core-render-android"))
+                    implementation("androidx.profileinstaller:profileinstaller:1.3.1")
+                    // 保留现有依赖...
+                }
             }
         }
     }
@@ -78,18 +90,20 @@ kotlin {
 
 publishing {
     repositories {
-        val username = MavenConfig.getUsername(project)
-        val password = MavenConfig.getPassword(project)
-        if (username.isNotEmpty() && password.isNotEmpty()) {
-            maven {
-                credentials {
-                    setUsername(username)
-                    setPassword(password)
+        if (!raftPublicationMode) {
+            val username = MavenConfig.getUsername(project)
+            val password = MavenConfig.getPassword(project)
+            if (username.isNotEmpty() && password.isNotEmpty()) {
+                maven {
+                    credentials {
+                        setUsername(username)
+                        setPassword(password)
+                    }
+                    url = uri(MavenConfig.getRepoUrl(version as String))
                 }
-                url = uri(MavenConfig.getRepoUrl(version as String))
+            } else {
+                mavenLocal()
             }
-        } else {
-            mavenLocal()
         }
 
         publications.withType<MavenPublication>().configureEach {
