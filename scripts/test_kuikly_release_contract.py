@@ -698,6 +698,14 @@ class ContractTests(unittest.TestCase):
             "Hosted contract container must install git before checkout",
         )
         self.assertIn('test "$(python3 --version)" = "Python 3.8.20"', workflow)
+        assemble_workflow = workflow.split("\n  assemble-candidate:\n", 1)[1].split(
+            "\n  publish:\n", 1
+        )[0]
+        self.assertIn(
+            "    timeout-minutes: 45\n",
+            assemble_workflow,
+            "the 920-path public preflight must retain enough time for slow anonymous readback",
+        )
         self.assertNotIn(
             "actions/setup-python",
             workflow,
