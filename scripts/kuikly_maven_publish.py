@@ -28,6 +28,7 @@ from kuikly_release_contract import (
     PUBLIC_MAVEN_ORIGIN,
     RELEASE,
     canonical_set_digest,
+    checksum_descriptor,
     json_bytes,
     sha256_bytes,
     validate_manifest,
@@ -217,7 +218,10 @@ def classify(http: Http, manifest: dict[str, Any], bundle: Path) -> dict[str, An
         require(status in {200, 404}, f"public GET HTTP {status}: {relative}")
         listed = relative in listing
         found = status == 200
-        if listed != found:
+        checksum_unlisted_but_readable = (
+            checksum_descriptor(relative) is not None and found and not listed
+        )
+        if listed != found and not checksum_unlisted_but_readable:
             listing_disagreement.append(relative)
         if found:
             present.append(relative)
