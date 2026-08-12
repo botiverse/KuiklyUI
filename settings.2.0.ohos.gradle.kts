@@ -42,7 +42,8 @@ dependencyResolutionManagement {
                     }
                 }
                 filter {
-                    includeGroupByRegex("org\\.jetbrains\\.kotlin.*")
+                    includeModule("org.jetbrains.kotlin", "kotlin-stdlib")
+                    includeModule("org.jetbrains.kotlin", "kotlin-stdlib-common")
                     includeGroupByRegex("com\\.tencent\\.kuikly-open\\.compose.*")
                 }
             }
