@@ -1863,6 +1863,53 @@ class ContractTests(unittest.TestCase):
 
 
 class PublisherTests(unittest.TestCase):
+    def test_checksum_listing_is_optional_but_exact_get_is_required(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            manifest, bundle_root, bundle = assemble_fixture(Path(raw))
+            checksum = next(
+                item["path"]
+                for item in manifest["publications"]
+                if contract.checksum_descriptor(item["path"]) is not None
+            )
+            primary = contract.checksum_descriptor(checksum)[0]
+
+            exact_unlisted_checksum = publisher.classify(
+                PublicStateHttp({checksum: bundle[checksum]}, listed=set()),
+                manifest,
+                bundle_root,
+            )
+            self.assertEqual("PARTIAL_EXACT", exact_unlisted_checksum["state"])
+            self.assertEqual([], exact_unlisted_checksum["listingDisagreement"])
+
+            unlisted_primary = publisher.classify(
+                PublicStateHttp({primary: bundle[primary]}, listed=set()),
+                manifest,
+                bundle_root,
+            )
+            self.assertEqual("CONFLICT", unlisted_primary["state"])
+            self.assertEqual([primary], unlisted_primary["listingDisagreement"])
+
+            listed_unreadable_checksum = publisher.classify(
+                PublicStateHttp({}, listed={checksum}), manifest, bundle_root,
+            )
+            self.assertEqual("CONFLICT", listed_unreadable_checksum["state"])
+            self.assertEqual([checksum], listed_unreadable_checksum["listingDisagreement"])
+
+            checksum_mismatch = publisher.classify(
+                PublicStateHttp({checksum: b"wrong"}, listed=set()),
+                manifest,
+                bundle_root,
+            )
+            self.assertEqual("CONFLICT", checksum_mismatch["state"])
+            self.assertEqual([checksum], checksum_mismatch["different"])
+
+            unexpected = primary.rsplit("/", 1)[0] + "/unexpected.bin"
+            unexpected_listed = publisher.classify(
+                PublicStateHttp({}, listed={unexpected}), manifest, bundle_root,
+            )
+            self.assertEqual("CONFLICT", unexpected_listed["state"])
+            self.assertEqual([unexpected], unexpected_listed["unexpected"])
+
     def test_planner_states_and_trailing_slash_prefixes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             manifest, bundle_root, bundle = assemble_fixture(Path(raw))
