@@ -879,6 +879,24 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("raftArtifactsPluginPredecessors", ohos_settings)
         self.assertIn("raftArtifactsRequiredPredecessors", ohos_settings)
         self.assertGreaterEqual(ohos_settings.count("exclusiveContent"), 1)
+        self.assertEqual(
+            1,
+            ohos_settings.count(
+                'includeGroupByRegex("org\\\\.jetbrains\\\\.kotlin.*")'
+            ),
+        )
+        self.assertEqual(
+            1,
+            ohos_settings.count(
+                'includeModule("org.jetbrains.kotlin", "kotlin-stdlib")'
+            ),
+        )
+        self.assertEqual(
+            1,
+            ohos_settings.count(
+                'includeModule("org.jetbrains.kotlin", "kotlin-stdlib-common")'
+            ),
+        )
 
     def test_producer_refreshes_stale_gradle_checksum_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
