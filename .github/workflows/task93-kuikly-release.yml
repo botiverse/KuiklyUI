@@ -152,6 +152,7 @@ jobs:
           test -z "$(git status --porcelain --untracked-files=all)"
 
   normal-linux:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
     needs: contract
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -176,6 +177,7 @@ jobs:
           retention-days: 14
 
   normal-macos:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
     needs: contract
     runs-on: macos-14
     timeout-minutes: 120
@@ -202,6 +204,7 @@ jobs:
           retention-days: 14
 
   ios-renderer:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
     needs: contract
     runs-on: macos-14
     timeout-minutes: 120
@@ -232,6 +235,7 @@ jobs:
           retention-days: 14
 
   ohos-gradle:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
     needs: contract
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -258,6 +262,7 @@ jobs:
           retention-days: 14
 
   ohos-renderer:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
     needs: contract
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -284,6 +289,7 @@ jobs:
           retention-days: 14
 
   assemble-candidate:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
     needs: [normal-linux, normal-macos, ios-renderer, ohos-gradle, ohos-renderer]
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -379,8 +385,20 @@ jobs:
           retention-days: 14
 
   publish:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
-    needs: [assemble-candidate, normal-linux, normal-macos, ios-renderer, ohos-gradle, ohos-renderer]
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'workflow_dispatch' &&
+        inputs.publish == true &&
+        needs.contract.result == 'success' &&
+        needs.assemble-candidate.result == 'skipped' &&
+        needs.normal-linux.result == 'skipped' &&
+        needs.normal-macos.result == 'skipped' &&
+        needs.ios-renderer.result == 'skipped' &&
+        needs.ohos-gradle.result == 'skipped' &&
+        needs.ohos-renderer.result == 'skipped'
+      }}
+    needs: [contract, assemble-candidate, normal-linux, normal-macos, ios-renderer, ohos-gradle, ohos-renderer]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: raft-artifacts-production

@@ -867,6 +867,27 @@ class ContractTests(unittest.TestCase):
             "RAFT_REQUIRE_PUBLIC_PREDECESSORS: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && 'true' || 'false' }}",
             workflow,
         )
+        self.assertEqual(
+            6,
+            workflow.count(
+                "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}"
+            ),
+        )
+        self.assertIn("always() &&", workflow)
+        self.assertIn("needs.contract.result == 'success'", workflow)
+        for job in (
+            "assemble-candidate",
+            "normal-linux",
+            "normal-macos",
+            "ios-renderer",
+            "ohos-gradle",
+            "ohos-renderer",
+        ):
+            self.assertIn("needs.%s.result == 'skipped'" % job, workflow)
+        self.assertIn(
+            "needs: [contract, assemble-candidate, normal-linux, normal-macos, ios-renderer, ohos-gradle, ohos-renderer]",
+            workflow,
+        )
         self.assertEqual(1, workflow.count("secrets.RAFT_ARTIFACTS_PUBLISH_TOKEN"))
         self.assertIn("scripts/kuikly_maven_publish.py", workflow)
         self.assertIn('state == "PARTIAL_EXACT"', workflow)
