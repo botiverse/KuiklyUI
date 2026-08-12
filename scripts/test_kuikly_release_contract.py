@@ -706,6 +706,37 @@ class ContractTests(unittest.TestCase):
             assemble_workflow,
             "the 920-path public preflight must retain enough time for slow anonymous readback",
         )
+        publish_workflow = workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn(
+            "      candidate_run_id:\n"
+            "        description: Terminal publish=false run whose exact producer shards the writer must reuse\n"
+            "        required: false\n"
+            "        type: string\n",
+            workflow,
+            "the writer must take an explicit immutable producer-shard carrier",
+        )
+        self.assertIn(
+            "      PINNED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}\n",
+            publish_workflow,
+        )
+        self.assertIn(
+            '          [[ "$PINNED_CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]\n'
+            '          test "$PINNED_CANDIDATE_RUN_ID" != "$GITHUB_RUN_ID"\n',
+            publish_workflow,
+            "the writer must reject an absent or self-referential candidate run",
+        )
+        self.assertEqual(
+            5,
+            publish_workflow.count("          run-id: ${{ inputs.candidate_run_id }}\n"),
+            "all five writer shards must come from the same pinned candidate run",
+        )
+        self.assertEqual(5, publish_workflow.count("          github-token: ${{ github.token }}\n"))
+        self.assertEqual(5, publish_workflow.count("          repository: ${{ github.repository }}\n"))
+        self.assertNotIn(
+            "run-id: ${{ inputs.candidate_run_id }}",
+            assemble_workflow,
+            "source-review candidate assembly must continue using its own run's shards",
+        )
         self.assertNotIn(
             "actions/setup-python",
             workflow,

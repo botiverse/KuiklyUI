@@ -63,6 +63,10 @@ on:
         description: Expected protected predecessor-receipt SHA-256
         required: false
         type: string
+      candidate_run_id:
+        description: Terminal publish=false run whose exact producer shards the writer must reuse
+        required: false
+        type: string
       publish:
         description: Enter the protected create-only publication job
         required: true
@@ -385,6 +389,7 @@ jobs:
       EXPECTED_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
       EXPECTED_SET_SHA256: ${{ inputs.set_sha256 }}
       EXPECTED_PREDECESSOR_RECEIPT_SHA256: ${{ inputs.predecessor_receipt_sha256 }}
+      PINNED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       RAFT_ARTIFACTS_PUBLISH_TOKEN: ${{ secrets.RAFT_ARTIFACTS_PUBLISH_TOKEN }}
       PREDECESSOR_RECEIPTS_JSON: ${{ secrets.RAFT_KUIKLY_PREDECESSOR_RECEIPTS }}
     steps:
@@ -404,26 +409,46 @@ jobs:
           sudo apt-get install --yes --no-install-recommends maven=3.8.7-2
           /usr/bin/mvn --version | grep -F "Apache Maven 3.8.7"
       - uses: gradle/actions/setup-gradle@v4
+      - name: Verify the pinned candidate carrier
+        run: |
+          set -euo pipefail
+          [[ "$PINNED_CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$PINNED_CANDIDATE_RUN_ID" != "$GITHUB_RUN_ID"
       - uses: actions/download-artifact@v4
         with:
           name: task93-normal-linux-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/kuikly-stages/normal-linux
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
       - uses: actions/download-artifact@v4
         with:
           name: task93-normal-macos-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/kuikly-stages/normal-macos
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
       - uses: actions/download-artifact@v4
         with:
           name: task93-ios-renderer-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/kuikly-stages/ios-renderer
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
       - uses: actions/download-artifact@v4
         with:
           name: task93-ohos-gradle-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/kuikly-stages/ohos-gradle
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
       - uses: actions/download-artifact@v4
         with:
           name: task93-ohos-renderer-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/kuikly-stages/ohos-renderer
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
       - name: Verify protected inputs and assemble publishable exact bytes
         run: |
           set -euo pipefail
