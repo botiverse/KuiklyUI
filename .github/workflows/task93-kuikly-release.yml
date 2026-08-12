@@ -67,6 +67,10 @@ on:
         description: Terminal publish=false run whose exact producer shards the writer must reuse
         required: false
         type: string
+      control_plane_sha:
+        description: Landed staging3 SHA supplying the publisher classifier and its contract
+        required: false
+        type: string
       publish:
         description: Enter the protected create-only publication job
         required: true
@@ -408,6 +412,7 @@ jobs:
       EXPECTED_SET_SHA256: ${{ inputs.set_sha256 }}
       EXPECTED_PREDECESSOR_RECEIPT_SHA256: ${{ inputs.predecessor_receipt_sha256 }}
       PINNED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      CONTROL_PLANE_SHA: ${{ inputs.control_plane_sha }}
       RAFT_ARTIFACTS_PUBLISH_TOKEN: ${{ secrets.RAFT_ARTIFACTS_PUBLISH_TOKEN }}
       PREDECESSOR_RECEIPTS_JSON: ${{ secrets.RAFT_KUIKLY_PREDECESSOR_RECEIPTS }}
     steps:
@@ -432,6 +437,7 @@ jobs:
           set -euo pipefail
           [[ "$PINNED_CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           test "$PINNED_CANDIDATE_RUN_ID" != "$GITHUB_RUN_ID"
+          [[ "$CONTROL_PLANE_SHA" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/download-artifact@v4
         with:
           name: task93-normal-linux-${{ env.SOURCE_SHA }}
@@ -488,6 +494,12 @@ jobs:
           if ! git cat-file -e "${live_staging3}^{commit}" 2>/dev/null; then
             git fetch --no-tags origin "$live_staging3"
           fi
+          test "$live_staging3" = "$CONTROL_PLANE_SHA"
+          control_plane="$RUNNER_TEMP/kuikly-control-plane"
+          git worktree add --detach "$control_plane" "$CONTROL_PLANE_SHA"
+          test "$(git -C "$control_plane" rev-parse HEAD)" = "$CONTROL_PLANE_SHA"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$control_plane/scripts/test_kuikly_release_contract.py" \
+            PublisherTests.test_checksum_listing_is_optional_but_exact_get_is_required
           python3 scripts/kuikly_release_contract.py verify-landed-source \
             --source-root "$GITHUB_WORKSPACE" \
             --source-sha "$SOURCE_SHA" \
@@ -535,16 +547,18 @@ jobs:
             "$final/bundle" \
             "$RUNNER_TEMP/kuikly-final-consumer" \
             "$final/pom-consumer.json"
-          python3 scripts/kuikly_maven_publish.py plan \
+          PYTHONDONTWRITEBYTECODE=1 python3 "$control_plane/scripts/kuikly_maven_publish.py" plan \
             --manifest "$final/manifest.json" --bundle "$final/bundle" \
             --output "$final/public-plan.json"
-          jq -e '.state == "ALL_ABSENT" or .state == "PARTIAL_EXACT" or .state == "ALL_COMPLETE_EXACT"' \
+          jq -e '.state == "PARTIAL_EXACT" and .presentCount == 69 and .productFileCount == 920 and
+            (.unexpected | length) == 0 and (.different | length) == 0 and
+            (.listingDisagreement | length) == 0 and .completionPresent == false' \
             "$final/public-plan.json" >/dev/null
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: Publish or resume immutable release and verify public bytes
         run: |
           set -euo pipefail
-          python3 scripts/kuikly_maven_publish.py release \
+          PYTHONDONTWRITEBYTECODE=1 python3 "$RUNNER_TEMP/kuikly-control-plane/scripts/kuikly_maven_publish.py" release \
             --manifest "$RUNNER_TEMP/kuikly-final/manifest.json" \
             --plan "$RUNNER_TEMP/kuikly-final/public-plan.json" \
             --bundle "$RUNNER_TEMP/kuikly-final/bundle" \

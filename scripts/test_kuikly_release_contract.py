@@ -716,6 +716,13 @@ class ContractTests(unittest.TestCase):
             "the writer must take an explicit immutable producer-shard carrier",
         )
         self.assertIn(
+            "      control_plane_sha:\n"
+            "        description: Landed staging3 SHA supplying the publisher classifier and its contract\n"
+            "        required: false\n"
+            "        type: string\n",
+            workflow,
+        )
+        self.assertIn(
             "      PINNED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}\n",
             publish_workflow,
         )
@@ -724,6 +731,34 @@ class ContractTests(unittest.TestCase):
             '          test "$PINNED_CANDIDATE_RUN_ID" != "$GITHUB_RUN_ID"\n',
             publish_workflow,
             "the writer must reject an absent or self-referential candidate run",
+        )
+        self.assertIn('          [[ "$CONTROL_PLANE_SHA" =~ ^[0-9a-f]{40}$ ]]\n', publish_workflow)
+        self.assertIn('          test "$live_staging3" = "$CONTROL_PLANE_SHA"\n', publish_workflow)
+        self.assertIn(
+            '          git worktree add --detach "$control_plane" "$CONTROL_PLANE_SHA"\n',
+            publish_workflow,
+        )
+        self.assertIn(
+            'python3 "$control_plane/scripts/kuikly_maven_publish.py" plan',
+            publish_workflow,
+        )
+        self.assertIn(
+            'python3 "$RUNNER_TEMP/kuikly-control-plane/scripts/kuikly_maven_publish.py" release',
+            publish_workflow,
+        )
+        self.assertNotIn(
+            "python3 scripts/kuikly_maven_publish.py release",
+            publish_workflow,
+            "writer must never fall back to the frozen product source publisher",
+        )
+        self.assertIn(
+            "PublisherTests.test_checksum_listing_is_optional_but_exact_get_is_required",
+            publish_workflow,
+        )
+        self.assertIn(
+            "'.state == \"PARTIAL_EXACT\" and .presentCount == 69 and .productFileCount == 920",
+            publish_workflow,
+            "this bounded recovery must stop before PUT unless public preflight is exactly 69/920",
         )
         self.assertEqual(
             5,
