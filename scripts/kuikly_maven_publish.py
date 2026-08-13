@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,7 +42,9 @@ CONTROL_LIST_PATH = "/api/scopes/com.tencent.kuikly-open/artifacts"
 PUBLISH_USERNAME = "raft-ci"
 PUBLISH_TOKEN_ENV = "RAFT_ARTIFACTS_PUBLISH_TOKEN"
 USER_AGENT = "kuikly-maven-publish/1.0"
-MAX_PARALLEL_REQUESTS = 16
+MAX_PARALLEL_REQUESTS = 8
+PUT_MAX_ATTEMPTS = 5
+PUT_RETRYABLE_STATUS = {423, 429, 500, 502, 503, 504}
 
 
 class PublishError(RuntimeError):
@@ -301,17 +304,24 @@ def exact_remote(http: Http, entry: dict[str, Any]) -> bool:
 def put_and_readback(http: Http, token: str, entry: dict[str, Any], body: bytes, *, content_type: str) -> str:
     if exact_remote(http, entry):
         return "reused"
-    status, _ = http.request(
-        PUBLIC_MAVEN_ORIGIN,
-        repository_path(entry["path"]),
-        "PUT",
-        body=body,
-        token=token,
-        content_type=content_type,
-    )
-    require(status in {200, 201, 204, 409}, f"PUT failed with HTTP {status}: {entry['path']}")
-    require(exact_remote(http, entry), f"uploaded bytes not publicly readable: {entry['path']}")
-    return "uploaded" if status != 409 else "reused-after-race"
+    for attempt in range(1, PUT_MAX_ATTEMPTS + 1):
+        status, _ = http.request(
+            PUBLIC_MAVEN_ORIGIN,
+            repository_path(entry["path"]),
+            "PUT",
+            body=body,
+            token=token,
+            content_type=content_type,
+        )
+        if status in {200, 201, 204, 409}:
+            require(exact_remote(http, entry), f"uploaded bytes not publicly readable: {entry['path']}")
+            return "uploaded" if status != 409 else "reused-after-race"
+        if status not in PUT_RETRYABLE_STATUS or attempt == PUT_MAX_ATTEMPTS:
+            raise PublishError(f"PUT failed with HTTP {status}: {entry['path']}")
+        time.sleep(0.25 * (2 ** (attempt - 1)))
+        if exact_remote(http, entry):
+            return "reused-after-transient"
+    raise AssertionError("unreachable PUT retry state")
 
 
 def verify_products(http: Http, bundle: Path, objects: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
