@@ -11,6 +11,8 @@ import plistlib
 import subprocess
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -708,6 +710,11 @@ class ContractTests(unittest.TestCase):
         )
         publish_workflow = workflow.split("\n  publish:\n", 1)[1]
         self.assertIn(
+            "    timeout-minutes: 90\n",
+            publish_workflow,
+            "the bounded parallel writer must retain a full retry budget",
+        )
+        self.assertIn(
             "      candidate_run_id:\n"
             "        description: Terminal publish=false run whose exact producer shards the writer must reuse\n"
             "        required: false\n"
@@ -756,9 +763,9 @@ class ContractTests(unittest.TestCase):
             publish_workflow,
         )
         self.assertIn(
-            "'.state == \"PARTIAL_EXACT\" and .presentCount == 69 and .productFileCount == 920",
+            "'.state == \"PARTIAL_EXACT\" and .presentCount >= 69 and .presentCount < 920 and .productFileCount == 920",
             publish_workflow,
-            "this bounded recovery must stop before PUT unless public preflight is exactly 69/920",
+            "a resumed writer must accept only a non-regressing exact partial publication",
         )
         self.assertEqual(
             5,
@@ -1898,6 +1905,40 @@ class ContractTests(unittest.TestCase):
 
 
 class PublisherTests(unittest.TestCase):
+    def test_product_publication_is_bounded_and_parallel(self) -> None:
+        class TracksParallelPuts(MavenStateHttp):
+            def __init__(self) -> None:
+                super().__init__()
+                self.active = 0
+                self.peak = 0
+                self.lock = threading.Lock()
+
+            def request(self, origin, path, method, **kwargs):
+                if origin != contract.PUBLIC_MAVEN_ORIGIN or method != "PUT":
+                    return super().request(origin, path, method, **kwargs)
+                with self.lock:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                try:
+                    time.sleep(0.01)
+                    return super().request(origin, path, method, **kwargs)
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            manifest, bundle_root, _ = assemble_fixture(root)
+            http = TracksParallelPuts()
+            plan = publisher.classify(http, manifest, bundle_root)
+            publisher.release(
+                http, manifest, plan, bundle_root, MavenStateHttp.TOKEN,
+                root / "execution.json",
+            )
+
+        self.assertGreater(http.peak, 1)
+        self.assertLessEqual(http.peak, publisher.MAX_PARALLEL_REQUESTS)
+
     def test_checksum_listing_is_optional_but_exact_get_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             manifest, bundle_root, bundle = assemble_fixture(Path(raw))
