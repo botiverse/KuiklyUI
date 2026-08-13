@@ -1939,6 +1939,46 @@ class PublisherTests(unittest.TestCase):
         self.assertGreater(http.peak, 1)
         self.assertLessEqual(http.peak, publisher.MAX_PARALLEL_REQUESTS)
 
+    def test_transient_put_retries_only_after_exact_readback(self) -> None:
+        entry = {"path": "object.bin", "sha256": contract.sha256_bytes(b"bytes"), "size": 5}
+
+        class TransientThenSuccess(MavenStateHttp):
+            def __init__(self) -> None:
+                super().__init__()
+                self.puts = 0
+
+            def request(self, origin, path, method, **kwargs):
+                if origin == contract.PUBLIC_MAVEN_ORIGIN and method == "PUT":
+                    self.puts += 1
+                    if self.puts == 1:
+                        return 503, b""
+                return super().request(origin, path, method, **kwargs)
+
+        http = TransientThenSuccess()
+        with mock.patch.object(publisher.time, "sleep") as sleep:
+            result = publisher.put_and_readback(
+                http, MavenStateHttp.TOKEN, entry, b"bytes",
+                content_type="application/octet-stream",
+            )
+        self.assertEqual("uploaded", result)
+        self.assertEqual(2, http.puts)
+        sleep.assert_called_once_with(0.25)
+
+        class TransientButCommitted(MavenStateHttp):
+            def request(self, origin, path, method, **kwargs):
+                if origin == contract.PUBLIC_MAVEN_ORIGIN and method == "PUT":
+                    self.public[entry["path"]] = kwargs["body"]
+                    return 503, b""
+                return super().request(origin, path, method, **kwargs)
+
+        committed = TransientButCommitted()
+        with mock.patch.object(publisher.time, "sleep"):
+            result = publisher.put_and_readback(
+                committed, MavenStateHttp.TOKEN, entry, b"bytes",
+                content_type="application/octet-stream",
+            )
+        self.assertEqual("reused-after-transient", result)
+
     def test_checksum_listing_is_optional_but_exact_get_is_required(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             manifest, bundle_root, bundle = assemble_fixture(Path(raw))
@@ -2117,16 +2157,17 @@ class PublisherTests(unittest.TestCase):
                 def request(self, origin, path, method, **kwargs):
                     if origin == contract.PUBLIC_MAVEN_ORIGIN and method == "PUT":
                         self.put_count += 1
-                        if self.put_count == 2:
+                        if 2 <= self.put_count < 2 + publisher.PUT_MAX_ATTEMPTS:
                             return 500, b"injected"
                     return super().request(origin, path, method, **kwargs)
 
             execution_path = root / "interrupted.json"
             http = FailsSecondPut()
-            with self.assertRaisesRegex(publisher.PublishError, "PUT failed with HTTP 500"):
-                publisher.release(
-                    http, manifest, plan, bundle_root, MavenStateHttp.TOKEN, execution_path,
-                )
+            with mock.patch.object(publisher.time, "sleep"):
+                with self.assertRaisesRegex(publisher.PublishError, "PUT failed with HTTP 500"):
+                    publisher.release(
+                        http, manifest, plan, bundle_root, MavenStateHttp.TOKEN, execution_path,
+                    )
             execution = json.loads(execution_path.read_text())
             self.assertEqual("incomplete-retryable", execution["state"])
             self.assertNotIn(contract.MANIFEST_PATH, http.public)
