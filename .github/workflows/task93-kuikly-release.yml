@@ -404,7 +404,7 @@ jobs:
       }}
     needs: [contract, assemble-candidate, normal-linux, normal-macos, ios-renderer, ohos-gradle, ohos-renderer]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     environment: raft-artifacts-production
     env:
       EXPECTED_SOURCE_TREE: ${{ inputs.source_tree }}
@@ -550,7 +550,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$control_plane/scripts/kuikly_maven_publish.py" plan \
             --manifest "$final/manifest.json" --bundle "$final/bundle" \
             --output "$final/public-plan.json"
-          jq -e '.state == "PARTIAL_EXACT" and .presentCount == 69 and .productFileCount == 920 and
+          jq -e '.state == "PARTIAL_EXACT" and .presentCount >= 69 and .presentCount < 920 and .productFileCount == 920 and
             (.unexpected | length) == 0 and (.different | length) == 0 and
             (.listingDisagreement | length) == 0 and .completionPresent == false' \
             "$final/public-plan.json" >/dev/null

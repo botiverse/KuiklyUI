@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ CONTROL_LIST_PATH = "/api/scopes/com.tencent.kuikly-open/artifacts"
 PUBLISH_USERNAME = "raft-ci"
 PUBLISH_TOKEN_ENV = "RAFT_ARTIFACTS_PUBLISH_TOKEN"
 USER_AGENT = "kuikly-maven-publish/1.0"
+MAX_PARALLEL_REQUESTS = 16
 
 
 class PublishError(RuntimeError):
@@ -210,10 +212,8 @@ def classify(http: Http, manifest: dict[str, Any], bundle: Path) -> dict[str, An
     remote_owned = {key for key in listing if any(key.startswith(prefix) for prefix in prefixes)}
     unexpected = sorted(remote_owned - expected_paths - {MANIFEST_PATH})
 
-    present: list[str] = []
-    different: list[str] = []
-    listing_disagreement: list[str] = []
-    for relative, entry in sorted(expected.items()):
+    def inspect(item: tuple[str, dict[str, Any]]) -> tuple[str, bool, bool, bool]:
+        relative, entry = item
         status, body = public_get(http, relative)
         require(status in {200, 404}, f"public GET HTTP {status}: {relative}")
         listed = relative in listing
@@ -221,12 +221,15 @@ def classify(http: Http, manifest: dict[str, Any], bundle: Path) -> dict[str, An
         checksum_unlisted_but_readable = (
             checksum_descriptor(relative) is not None and found and not listed
         )
-        if listed != found and not checksum_unlisted_but_readable:
-            listing_disagreement.append(relative)
-        if found:
-            present.append(relative)
-            if len(body) != entry["size"] or sha256_bytes(body) != entry["sha256"]:
-                different.append(relative)
+        disagreement = listed != found and not checksum_unlisted_but_readable
+        differs = found and (len(body) != entry["size"] or sha256_bytes(body) != entry["sha256"])
+        return relative, found, differs, disagreement
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL_REQUESTS) as executor:
+        inspected = list(executor.map(inspect, sorted(expected.items())))
+    present = [relative for relative, found, _, _ in inspected if found]
+    different = [relative for relative, _, differs, _ in inspected if differs]
+    listing_disagreement = [relative for relative, _, _, disagreement in inspected if disagreement]
 
     manifest_status, manifest_body = public_get(http, MANIFEST_PATH)
     require(manifest_status in {200, 404}, f"public completion GET HTTP {manifest_status}")
@@ -312,14 +315,15 @@ def put_and_readback(http: Http, token: str, entry: dict[str, Any], body: bytes,
 
 
 def verify_products(http: Http, bundle: Path, objects: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    readback: list[dict[str, Any]] = []
-    for entry in objects:
+    def verify(entry: dict[str, Any]) -> dict[str, Any]:
         expected = read_bundle(bundle, entry["path"], entry)
         status, body = public_get(http, entry["path"])
         require(status == 200, f"public readback HTTP {status}: {entry['path']}")
         require(body == expected, f"public readback differs: {entry['path']}")
-        readback.append(entry)
-    return readback
+        return entry
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL_REQUESTS) as executor:
+        return list(executor.map(verify, objects))
 
 
 def release(
@@ -375,11 +379,15 @@ def release(
 
     persist()
     try:
-        for entry in objects:
+        def publish(entry: dict[str, Any]) -> tuple[dict[str, Any], str]:
             body = read_bundle(bundle, entry["path"], entry)
             result = put_and_readback(http, token, entry, body, content_type="application/octet-stream")
-            receipt["reused" if result.startswith("reused") else "uploaded"].append(entry["path"])
-            persist()
+            return entry, result
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL_REQUESTS) as executor:
+            for entry, result in executor.map(publish, objects):
+                receipt["reused" if result.startswith("reused") else "uploaded"].append(entry["path"])
+                persist()
 
         readback = verify_products(http, bundle, objects)
         require(canonical_set_digest(readback) == manifest["setSha256"], "public product set digest mismatch")
