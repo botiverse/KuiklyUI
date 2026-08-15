@@ -18,6 +18,7 @@ package com.tencent.kuikly.core.render.android.expand.component.list
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Rect
+import android.os.Bundle
 import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.MotionEvent
@@ -25,6 +26,8 @@ import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.animation.Interpolator
 import androidx.core.view.NestedScrollingChild2
 import androidx.core.view.NestedScrollingParent2
 import androidx.core.view.ViewCompat
@@ -83,6 +86,17 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
      * 滚动结束拖拽
      */
     private var scrollEndEventCallback: KuiklyRenderCallback? = null
+
+    /** Counts semantic end dispatches so reentrant state callbacks can be completed exactly once. */
+    private var scrollEndDispatchGeneration = 0L
+
+    /**
+     * A RecyclerView ViewFlinger takeover must publish IDLE before the replacement transport is
+     * known. Defer that intermediate semantic end so an animated replacement and its predecessor
+     * still form one scroll chain with one terminal scrollEnd.
+     */
+    private var scrollEndDeferralDepth = 0
+    private var hasDeferredScrollEnd = false
 
     /**
      * 开始fling回调
@@ -212,9 +226,64 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
 
     /**
-     * 将要滚动到的offset字符串描述
+     * A range-deferred programmatic scroll owner. Object identity is its opaque generation:
+     * reinstalling the same String from a callback still creates a distinct, newer owner.
      */
-    private var pendingSetContentOffsetStr = ""
+    private class PendingContentOffsetOwner(val value: String)
+
+    private var pendingContentOffsetOwner: PendingContentOffsetOwner? = null
+
+    /**
+     * Last range-deferred owner generation, retained after slot consumption for ABA-safe callback
+     * revalidation. A synchronous callback can install and then consume a newer pending owner
+     * before an older outer write resumes; the slot alone would have returned to null.
+     */
+    private var latestPendingContentOffsetOwnerGeneration: PendingContentOffsetOwner? = null
+
+    private enum class ContentOffsetTransport {
+        IMMEDIATE,
+        RECYCLER_VIEW_ANIMATION,
+        CUSTOM_ANIMATION,
+    }
+
+    /** Opaque ready-write generation used to preserve a reentrant replacement's actual transport. */
+    private class ReadyContentOffsetOwner(var transport: ContentOffsetTransport)
+
+    private var readyContentOffsetOwner: ReadyContentOffsetOwner? = null
+
+    /**
+     * Identity of the ready contentOffset owner whose real RecyclerView ViewFlinger is active.
+     * This is deliberately separate from scrollState: SETTLING is also used by gestures, public
+     * native commands, and the Kuikly custom animation manager.
+     */
+    private var activeRecyclerViewContentOffsetOwner: ReadyContentOffsetOwner? = null
+
+    private fun replacePendingContentOffsetOwner(
+        value: String?,
+        retainedOwner: PendingContentOffsetOwner? = null,
+    ) {
+        val replacement = if (value.isNullOrEmpty()) {
+            null
+        } else {
+            retainedOwner ?: PendingContentOffsetOwner(value)
+        }
+        pendingContentOffsetOwner = replacement
+        if (replacement != null) {
+            latestPendingContentOffsetOwnerGeneration = replacement
+        }
+    }
+
+    private fun consumePendingContentOffsetOwner(): PendingContentOffsetOwner? {
+        val owner = pendingContentOffsetOwner
+        pendingContentOffsetOwner = null
+        return owner
+    }
+
+    private fun restorePendingContentOffsetOwnerIfVacant(owner: PendingContentOffsetOwner?) {
+        if (pendingContentOffsetOwner == null) {
+            pendingContentOffsetOwner = owner
+        }
+    }
 
     /**
      * List 高度动态改变时, iOS系统会自动调整 contentOffset
@@ -314,15 +383,133 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     private fun checkAndStopScrollIfNeeded() {
         // 当所有动画都结束时，修正滚动状态，对齐 smoothScrollBy 的行为
         if (!scrollAnimationManager.hasRunningAnimation()) {
-            // 只在状态为 SETTLING 时才停止嵌套滚动和修正滚动状态，避免在用户拖拽时（状态为 DRAGGING）错误地重置状态
+            // 只在 SETTLING 时修正 RecyclerView state；其他状态最多关闭残留的
+            // TYPE_NON_TOUCH transport，不能把并发 DRAGGING 错误重置为 IDLE。
             if (scrollState == SCROLL_STATE_SETTLING) {
-                // 停止嵌套滚动（如果存在）
-                if (isNestScrolling()) {
-                    stopNestedScroll(ViewCompat.TYPE_NON_TOUCH)
-                }
-                // 修正滚动状态
-                stopScroll()
+                stopScrollTransport()
+            } else if (hasNestedScrollingParent(ViewCompat.TYPE_NON_TOUCH)) {
+                // suppressLayout() can publish IDLE before a replacement cancels the custom
+                // manager, while leaving that manager's accepted non-touch nesting alive. Close
+                // only the stale non-touch transport here; never reset a concurrent drag state.
+                stopNestedScroll(ViewCompat.TYPE_NON_TOUCH)
             }
+        }
+    }
+
+    /** Stops the RecyclerView state and the custom animation's non-touch nested transport. */
+    private fun stopScrollTransport() {
+        val wasScrolling = scrollState != SCROLL_STATE_IDLE
+        val endGenerationBeforeStop = scrollEndDispatchGeneration
+        val readyOwnerBeforeNestedStop = readyContentOffsetOwner
+        if (hasNestedScrollingParent(ViewCompat.TYPE_NON_TOUCH)) {
+            stopNestedScroll(ViewCompat.TYPE_NON_TOUCH)
+        }
+        val readyOwnerAfterNestedStop = readyContentOffsetOwner
+        val parentCallbackInstalledActiveTransport =
+            readyOwnerAfterNestedStop !== readyOwnerBeforeNestedStop &&
+                readyOwnerAfterNestedStop?.transport != ContentOffsetTransport.IMMEDIATE
+        if (parentCallbackInstalledActiveTransport) {
+            // NestedScrollingChildHelper invokes the parent before clearing its old non-touch
+            // pointer. A natural custom-animation terminal can therefore synchronously install a
+            // newer custom or RecyclerView owner from the parent's stop callback. The predecessor
+            // connection is now closed, but stopScroll() would also stop that successor's live
+            // ViewFlinger and force IDLE. Leave the new opaque owner to publish the chain's single
+            // terminal end when its own transport quiesces.
+            return
+        }
+        stopScroll()
+        if (wasScrolling && scrollEndDispatchGeneration == endGenerationBeforeStop) {
+            // RecyclerView dispatches listeners in reverse registration order. A newer ready
+            // contentOffset can stop a just-published SETTLING state before the internal listener
+            // observes it; complete that semantic end here without duplicating a normal callback.
+            fireEndScrollEvent()
+        }
+    }
+
+    /**
+     * Stops only a RecyclerView ViewFlinger that was started by an older ready contentOffset.
+     *
+     * Clear its opaque identity before publishing IDLE: listeners run synchronously and may install
+     * a newer custom or RecyclerView transport. The caller revalidates its own ready owner after
+     * this method returns and must not clear anything installed by those callbacks.
+     */
+    private fun stopActiveRecyclerViewContentOffsetTransport() {
+        activeRecyclerViewContentOffsetOwner ?: return
+        activeRecyclerViewContentOffsetOwner = null
+
+        val readyOwnerBeforeStop = readyContentOffsetOwner
+        val inheritedNonTouchWasOpen =
+            hasNestedScrollingParent(ViewCompat.TYPE_NON_TOUCH)
+        val wasScrolling = scrollState != SCROLL_STATE_IDLE
+        val endGenerationBeforeStop = scrollEndDispatchGeneration
+        scrollEndDeferralDepth++
+        try {
+            // Stop the old ViewFlinger without publishing IDLE yet. NestedScrollingChildHelper
+            // invokes the parent synchronously before it clears its own TYPE_NON_TOUCH parent
+            // pointer, so that parent callback may install a newer contentOffset transport. The
+            // old flinger must already be inert when that callback runs, while IDLE must wait until
+            // the inherited connection is fully closed.
+            stopRecyclerViewScrollersWithoutPublishingState()
+
+            if (inheritedNonTouchWasOpen &&
+                hasNestedScrollingParent(ViewCompat.TYPE_NON_TOUCH)
+            ) {
+                // A ViewFlinger can inherit the custom animation's accepted child connection.
+                // ViewFlinger.stop() skips its natural terminal stopNestedScroll() branch, so close
+                // the old connection before IDLE callbacks can install a fresh transport.
+                super.stopNestedScroll(ViewCompat.TYPE_NON_TOUCH)
+
+                // stopNestedScroll() clears NestedScrollingChildHelper's old parent pointer only
+                // after the parent callback returns. A custom transport installed by that callback
+                // therefore observes the doomed pointer and skips its own start. Reconnect only the
+                // still-current custom animation after the helper has completed that bookkeeping.
+                scrollAnimationManager.ensureNestedScrollConnectionIfRunning()
+            }
+
+            val newerReadyOwnerInstalled = readyContentOffsetOwner !== readyOwnerBeforeStop
+            val newerTransportIsActive =
+                activeRecyclerViewContentOffsetOwner != null ||
+                    scrollAnimationManager.hasRunningAnimation()
+            if (!newerReadyOwnerInstalled || !newerTransportIsActive) {
+                // RecyclerView.stopScroll() calls stopScrollersInternal() a second time *after*
+                // IDLE listeners return. That second stop would kill a newer ViewFlinger installed
+                // synchronously by an IDLE callback. The old scroller is already inert, so publish
+                // IDLE through the existing reflected state seam only when the parent-stop callback
+                // did not install a newer active transport.
+                forceSetScrollState(SCROLL_STATE_IDLE)
+            }
+        } finally {
+            scrollEndDeferralDepth--
+        }
+        if (wasScrolling && scrollEndDispatchGeneration == endGenerationBeforeStop) {
+            // The internal listener may observe a callback-installed SETTLING state instead of the
+            // intermediate IDLE. Preserve the predecessor's semantic end for the final owner.
+            hasDeferredScrollEnd = true
+        }
+    }
+
+    /** Stops RecyclerView's current scrollers without changing state or dispatching callbacks. */
+    private fun stopRecyclerViewScrollersWithoutPublishingState() {
+        try {
+            val method = RecyclerView::class.java.getDeclaredMethod("stopScrollersInternal")
+            method.isAccessible = true
+            method.invoke(this)
+        } catch (e: Exception) {
+            // Match forceSetScrollState(): the renderer already depends on RecyclerView's private
+            // state seam, and an unexpected platform/fork shape must remain diagnostic rather than
+            // crashing application code.
+            KuiklyRenderLog.e(VIEW_NAME, "stop scrollers without state error, $e")
+        }
+    }
+
+    private fun dispatchDeferredScrollEndIfTransportIsQuiescent() {
+        if (hasDeferredScrollEnd &&
+            scrollEndDeferralDepth == 0 &&
+            activeRecyclerViewContentOffsetOwner == null &&
+            !scrollAnimationManager.hasRunningAnimation() &&
+            scrollState != SCROLL_STATE_SETTLING
+        ) {
+            fireEndScrollEvent()
         }
     }
 
@@ -453,7 +640,12 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     private fun setDirectionRow(propValue: Any): Boolean {
-        directionRow = (propValue as Int) == 1
+        val newDirectionRow = (propValue as Int) == 1
+        if (directionRow != newDirectionRow) {
+            // The pending coordinates belong to the old active scroll axis.
+            consumePendingContentOffsetOwner()
+        }
+        directionRow = newDirectionRow
         return true
     }
 
@@ -507,8 +699,10 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> contentInsetWhenEndDrag(params)
             METHOD_CONTENT_INSET -> contentInset(params)
             METHOD_ABORT_CONTENT_OFFSET_ANIMATE -> {
+                // An explicit stop also owns a write that is waiting for content range.
+                consumePendingContentOffsetOwner()
                 scrollAnimationManager.cancel()
-                stopScroll()
+                stopScrollTransport()
             }
             METHOD_PREPARE_FOR_COMPOSE_REUSE -> prepareForComposeReuse()
             else -> super.call(method, params, callback)
@@ -575,6 +769,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
 
     override fun onDestroy() {
         super.onDestroy()
+        consumePendingContentOffsetOwner()
         nestedHorizontalChildInterceptor?.also { interceptor ->
             closestHorizontalRecyclerViewParent?.removeNestedChildInterceptEventListener(interceptor)
         }
@@ -622,6 +817,22 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         } else {
             super.dispatchTouchEvent(ev)
         }
+    }
+
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (!scrollEnabled) {
+            return false
+        }
+        if (event.action == MotionEvent.ACTION_SCROLL &&
+            (event.getAxisValue(MotionEvent.AXIS_HSCROLL) != 0f ||
+                event.getAxisValue(MotionEvent.AXIS_VSCROLL) != 0f ||
+                event.getAxisValue(MotionEvent.AXIS_SCROLL) != 0f)
+        ) {
+            // Mouse-wheel and rotary scrolling are user ownership even though RecyclerView does
+            // not enter SCROLL_STATE_DRAGGING for this input path.
+            consumePendingContentOffsetOwner()
+        }
+        return super.onGenericMotionEvent(event)
     }
 
     override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
@@ -675,6 +886,65 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         }
     }
 
+    override fun onScrollStateChanged(state: Int) {
+        if (state != SCROLL_STATE_SETTLING) {
+            // RecyclerView stops ViewFlinger before dispatching every non-SETTLING state. Clear
+            // only the identity that was active at that point; a synchronous listener can publish
+            // a newer identity afterward and it will survive this callback.
+            activeRecyclerViewContentOffsetOwner = null
+            if (state == SCROLL_STATE_IDLE && scrollEndEventCallback == null) {
+                // No semantic callback can observe this chain. Do not let a deferred marker leak
+                // into a listener that might be registered for a later, unrelated scroll.
+                hasDeferredScrollEnd = false
+            }
+        }
+        super.onScrollStateChanged(state)
+    }
+
+    override fun stopNestedScroll(type: Int) {
+        super.stopNestedScroll(type)
+        if (type == ViewCompat.TYPE_NON_TOUCH) {
+            // RecyclerView 1.1's natural ViewFlinger terminal branch publishes IDLE callbacks
+            // before it closes TYPE_NON_TOUCH nesting. A callback-installed custom animation sees
+            // the predecessor's doomed parent pointer and skips startNestedScroll(); reconnect only
+            // the still-current custom owner after NestedScrollingChildHelper clears that pointer.
+            // Explicit contentOffset takeover owns the same ordering in
+            // stopActiveRecyclerViewContentOffsetTransport() and calls super directly there.
+            scrollAnimationManager.ensureNestedScrollConnectionIfRunning()
+        }
+    }
+
+    override fun scrollBy(x: Int, y: Int) {
+        if (x != 0 || y != 0) {
+            // A direct native scroll command, including real parent consumption in a nested
+            // chain, supersedes an older write that is still waiting for content range.
+            consumePendingContentOffsetOwner()
+        }
+        super.scrollBy(x, y)
+    }
+
+    /**
+     * Advances one frame of the currently-owned Kuikly custom scroll animation.
+     *
+     * [KRScrollAnimationManager] already fences every frame by opaque animation identity before
+     * entering here. This is transport for that existing intent, not a new public scroll command,
+     * so it must bypass [scrollBy]'s pending-owner cancellation gate. A synchronous scroll/state
+     * callback may have installed a newer range-deferred contentOffset owner; a later frame from
+     * the older animation is not allowed to consume it.
+     */
+    internal fun scrollByFromCustomAnimation(x: Int, y: Int) {
+        super.scrollBy(x, y)
+    }
+
+    override fun smoothScrollBy(x: Int, y: Int, interpolator: Interpolator?, duration: Int) {
+        if (x != 0 || y != 0) {
+            // All public smoothScrollBy overloads funnel through this method. This includes the
+            // no-touch command issued by KRPagerSnapHelper.snapFromFling().
+            consumePendingContentOffsetOwner()
+        }
+        super.smoothScrollBy(x, y, interpolator, duration)
+    }
+
     override fun fling(velocityX: Int, velocityY: Int): Boolean {
         // When used by Compose DSL, limit fling velocity
         // to avoid excessive accumulated speed during rapid gestures.
@@ -687,6 +957,14 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                 velocityY.coerceIn(-maxFlingVelocity, maxFlingVelocity)
         } else {
             velocityX to velocityY
+        }
+
+        if (supportFling && !skipFlingIfNestOverScroll &&
+            (adjustedVelocityX != 0 || adjustedVelocityY != 0)
+        ) {
+            // Take ownership before willEndDrag callbacks run. A callback may deliberately install
+            // a newer range-deferred command, and the accepted fling must not erase that owner.
+            consumePendingContentOffsetOwner()
         }
 
         if (overScrollHandler?.overScrolling != true) { // over scroll 时, willDragEnd 由 over scroll handler 处理
@@ -790,6 +1068,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     private fun fireBeginDragEvent() {
+        // Physical drag ownership supersedes any programmatic write still waiting for more range.
+        consumePendingContentOffsetOwner()
         needFireWillEndDragEvent = true
         dispatchOnBeginDrag(contentOffsetX, contentOffsetY)
         dragBeginEventCallback?.invoke(getCommonScrollParams())
@@ -849,6 +1129,12 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     private fun fireEndScrollEvent() {
+        if (scrollEndDeferralDepth > 0) {
+            hasDeferredScrollEnd = true
+            return
+        }
+        hasDeferredScrollEnd = false
+        scrollEndDispatchGeneration++
         scrollEndEventCallback?.invoke(getCommonScrollParams())
     }
 
@@ -960,6 +1246,8 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
     }
 
     private fun fireOverScrollBeginDragEvent(offsetX: Float, offsetY: Float, overScrollStart: Boolean) {
+        // This path can have no drag callback, but the physical gesture still owns the offset.
+        consumePendingContentOffsetOwner()
         contentOffsetX = toOverScrollOffset(contentView,
             offsetX,
             overScrollStart,
@@ -1025,10 +1313,13 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         callback(paramsMap)
     }
 
-    private fun setContentOffset(value: String?) {
+    private fun setContentOffset(
+        value: String?,
+        retainedOwner: PendingContentOffsetOwner? = null,
+    ) {
         val rvLayoutManager = layoutManager
         if (rvLayoutManager == null || !isContentViewAttached) { // 还没设置contentView，所以layoutManager为null，等Layout完再apply
-            pendingSetContentOffsetStr = value ?: KRCssConst.EMPTY_STRING
+            replacePendingContentOffsetOwner(value, retainedOwner)
             return
         }
 
@@ -1050,12 +1341,38 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         if (contentOffsetSplits.size >= 7) {
             animationCurve = contentOffsetSplits[6].toInt()
         }
+        val usesRecyclerViewAnimation = animate &&
+            (animationDuration <= 0 || (animationCurve == 0 && animationDamping == 1f))
+        val usesCustomAnimation = animate && !usesRecyclerViewAnimation
 
         val originOffsetY = offsetY
         val originOffsetX = offsetX
 
-        pendingSetContentOffsetStr = if (canScrollImmediately(originOffsetX, originOffsetY)) {
-            internalSetContentOffset(originOffsetX,
+        if (canScrollImmediately(originOffsetX, originOffsetY)) {
+            val applyingOwner = ReadyContentOffsetOwner(ContentOffsetTransport.IMMEDIATE)
+            readyContentOffsetOwner = applyingOwner
+            // Consume this owner before the physical write. scrollBy() dispatches callbacks
+            // synchronously, and a callback may install a newer range-deferred owner. Clearing
+            // after the write would erase that reentrant command.
+            consumePendingContentOffsetOwner()
+            // A newer contentOffset becomes authoritative when it can physically apply. Revoke
+            // any older custom animation before this write; cancel() clears animation identity
+            // before ValueAnimator callbacks, so the old completion tail cannot run.
+            val pendingGenerationBeforeTransportStop =
+                latestPendingContentOffsetOwnerGeneration
+            val canceledCustomAnimation = scrollAnimationManager.cancel()
+            stopActiveRecyclerViewContentOffsetTransport()
+            if (readyContentOffsetOwner !== applyingOwner ||
+                latestPendingContentOffsetOwnerGeneration !==
+                pendingGenerationBeforeTransportStop
+            ) {
+                // Stopping the old ViewFlinger calls parent/IDLE listeners synchronously. A
+                // callback can install either a newer ready owner or a range-deferred owner; the
+                // older outer write must not touch the viewport or consume that newer generation.
+                dispatchDeferredScrollEndIfTransportIsQuiescent()
+                return
+            }
+            val actualTransport = internalSetContentOffset(originOffsetX,
                 originOffsetY,
                 offsetX,
                 offsetY,
@@ -1065,10 +1382,31 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
                 animationDamping,
                 animationVelocity,
                 animationCurve)
-            KRCssConst.EMPTY_STRING
+            if (readyContentOffsetOwner === applyingOwner) {
+                // Record only the transport that production actually started. A zero-distance or
+                // layout-suppressed request is an immediate replacement even when its payload
+                // asked for RecyclerView/custom animation.
+                applyingOwner.transport = actualTransport
+            }
+            val currentReadyOwner = readyContentOffsetOwner
+            val mustFinishSupersededCustomTransport =
+                canceledCustomAnimation ||
+                    usesCustomAnimation ||
+                    currentReadyOwner !== applyingOwner
+            if (mustFinishSupersededCustomTransport &&
+                currentReadyOwner?.transport == ContentOffsetTransport.IMMEDIATE &&
+                !scrollAnimationManager.hasRunningAnimation()
+            ) {
+                // An immediate or no-op custom replacement has no new scroller to publish IDLE.
+                // Stop the old SETTLING transport only after the newer write and its callbacks;
+                // a callback-installed RecyclerView/custom animation is recorded by the opaque
+                // ready owner and remains untouched.
+                checkAndStopScrollIfNeeded()
+            }
+            dispatchDeferredScrollEndIfTransportIsQuiescent()
         } else {
             // KTV侧有可能先更改了contentView的高度或者宽度后, setContentOffset. 此时应该等Layout完后才设置offset
-            value
+            replacePendingContentOffsetOwner(value, retainedOwner)
         }
     }
 
@@ -1100,63 +1438,104 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         animationDamping: Float = 0f,
         animationVelocity: Float = 0f,
         animationCurve: Int = 0
-    ) {
-        if (isContentViewAttached) {
-            var dx = 0
-            var dy = 0
-            var ox = offsetX
-            var oy = offsetY
+    ): ContentOffsetTransport {
+        if (!isContentViewAttached) {
+            return ContentOffsetTransport.IMMEDIATE
+        }
+        var actualTransport = ContentOffsetTransport.IMMEDIATE
+        var dx = 0
+        var dy = 0
+        var ox = offsetX
+        var oy = offsetY
 
-            if (oy < 0) { // 强制设置为0，负数部分由OverScrollHandler处理
-                oy = 0
-            }
-            if (ox < 0) { // 强制设置为0，负数部分由OverScrollHandler处理
-                ox = 0
-            }
+        if (oy < 0) { // 强制设置为0，负数部分由OverScrollHandler处理
+            oy = 0
+        }
+        if (ox < 0) { // 强制设置为0，负数部分由OverScrollHandler处理
+            ox = 0
+        }
 
-            if (isVertical) {
-                dy = oy - (-contentView.top)
-            } else {
-                dx = ox - (-contentView.left)
-            }
-            if (animate) {
-                if (animationDuration > 0) {
-                    when (animationCurve) {
-                        0 -> {
-                            // Spring 动画
-                            if (animationDamping == 1f) {
-                                // 无需弹簧效果时使用默认方案，目前startSpringScroll会存在快速滑动无法准确停靠问题
-                                // 待后续优化后移除这段代码
-                                smoothScrollBy(dx, dy)
-                            } else {
-                                startSpringScroll(dx, dy, animationDuration, animationDamping, animationVelocity, isVertical)
+        if (isVertical) {
+            dy = oy - (-contentView.top)
+        } else {
+            dx = ox - (-contentView.left)
+        }
+        if (animate) {
+            if (animationDuration > 0) {
+                when (animationCurve) {
+                    0 -> {
+                        // Spring 动画
+                        if (animationDamping == 1f) {
+                            // 无需弹簧效果时使用默认方案，目前startSpringScroll会存在快速滑动无法准确停靠问题
+                            // 待后续优化后移除这段代码
+                            if (startRecyclerViewContentOffsetAnimation(dx, dy)) {
+                                actualTransport = ContentOffsetTransport.RECYCLER_VIEW_ANIMATION
+                            }
+                        } else {
+                            startSpringScroll(
+                                dx,
+                                dy,
+                                animationDuration,
+                                animationDamping,
+                                animationVelocity,
+                                isVertical,
+                            )
+                            if (scrollAnimationManager.hasRunningAnimation()) {
+                                actualTransport = ContentOffsetTransport.CUSTOM_ANIMATION
                             }
                         }
-                        1 -> {
-                            // Linear 动画
-                            startLinearScroll(dx, dy, animationDuration)
+                    }
+                    1 -> {
+                        // Linear 动画
+                        startLinearScroll(dx, dy, animationDuration)
+                        if (scrollAnimationManager.hasRunningAnimation()) {
+                            actualTransport = ContentOffsetTransport.CUSTOM_ANIMATION
                         }
                     }
-                } else {
-                    smoothScrollBy(dx, dy)
                 }
-            } else {
-                scrollBy(dx, dy)
+            } else if (startRecyclerViewContentOffsetAnimation(dx, dy)) {
+                actualTransport = ContentOffsetTransport.RECYCLER_VIEW_ANIMATION
             }
-
-            // 超出部分, 使用OverScrollHandler来滚动
-            if (isVertical) {
-                setVerticalContentOffsetByOverScrollHandler(originOffsetY,
-                    frameHeight,
-                    contentView.frameHeight,
-                    animate)
-            } else {
-                setHorizontalContentOffsetByOverScrollHandler(originOffsetX,
-                    frameWidth,
-                    contentView.frameWidth,
-                    animate)
-            }
+        } else {
+            scrollBy(dx, dy)
         }
+
+        // 超出部分, 使用OverScrollHandler来滚动
+        if (isVertical) {
+            setVerticalContentOffsetByOverScrollHandler(originOffsetY,
+                frameHeight,
+                contentView.frameHeight,
+                animate)
+        } else {
+            setHorizontalContentOffsetByOverScrollHandler(originOffsetX,
+                frameWidth,
+                contentView.frameWidth,
+                animate)
+        }
+        return actualTransport
+    }
+
+    /**
+     * Starts the default RecyclerView contentOffset transport only when RecyclerView 1.1 will
+     * create a real ViewFlinger scroll. Its implementation rejects layout-suppressed and
+     * zero-distance requests before publishing a flinger, so those requests are immediate writes.
+     */
+    private fun startRecyclerViewContentOffsetAnimation(dx: Int, dy: Int): Boolean {
+        if (isLayoutSuppressed || (dx == 0 && dy == 0)) {
+            return false
+        }
+        val owner = readyContentOffsetOwner ?: return false
+        // Publish identity before RecyclerView publishes SETTLING. A state callback may install a
+        // newer contentOffset and synchronously stop this not-yet-returned ViewFlinger.
+        activeRecyclerViewContentOffsetOwner = owner
+        super.smoothScrollBy(dx, dy, null, RecyclerView.UNDEFINED_DURATION)
+        return activeRecyclerViewContentOffsetOwner === owner
+    }
+
+    override fun scrollToPosition(position: Int) {
+        // This public native command can be issued without a preceding touch gesture.
+        consumePendingContentOffsetOwner()
+        super.scrollToPosition(position)
     }
 
     override fun smoothScrollToPosition(position: Int) {
@@ -1165,7 +1544,27 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             scrollToTopEventCallback?.invoke(getCommonScrollParams())
             return
         }
+        // This public native command can be issued without a preceding touch gesture.
+        consumePendingContentOffsetOwner()
         super.smoothScrollToPosition(position)
+    }
+
+    override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
+        val isScrollAction = action == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD ||
+            action == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        if (!isScrollAction) {
+            return super.performAccessibilityAction(action, arguments)
+        }
+
+        val pendingOwner = consumePendingContentOffsetOwner()
+        // RecyclerView routes accepted accessibility scrolling straight to an internal
+        // TYPE_NON_TOUCH smooth scroll. Consume before that call because entering SETTLING can
+        // synchronously dispatch a callback that installs a newer, even same-payload, owner.
+        val handled = super.performAccessibilityAction(action, arguments)
+        if (!handled) {
+            restorePendingContentOffsetOwnerIfVacant(pendingOwner)
+        }
+        return handled
     }
 
     private fun startSpringScroll(
@@ -1218,9 +1617,12 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             return
         }
 
-        if (pendingSetContentOffsetStr.isNotEmpty()) {
-            setContentOffset(pendingSetContentOffsetStr)
-            pendingSetContentOffsetStr = KRCssConst.EMPTY_STRING
+        consumePendingContentOffsetOwner()?.also { pendingOwner ->
+            // Clear the captured owner before retrying. If the physical content range is still
+            // not ready, setContentOffset() reinstalls the same opaque owner. Clearing after
+            // the retry would erase that reinstalled owner and leave no write for the layout that
+            // finally places the target row (task #990 / Hands 91b9e3f1).
+            setContentOffset(pendingOwner.value, pendingOwner)
         }
     }
 
@@ -1320,6 +1722,9 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
      * Clear transient native state for Compose DSL reuse (not the native reuse pool).
      */
     private fun prepareForComposeReuse() {
+        // A deferred offset belongs to the previous Compose binding. The replacement restores its
+        // own offset after this reset; never let an old range-dependent write cross that boundary.
+        consumePendingContentOffsetOwner()
         // Reset scroll event dedup cache so restored offset fires a scroll event
         contentOffsetX = -Float.MAX_VALUE
         contentOffsetY = -Float.MAX_VALUE
@@ -1463,7 +1868,15 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         if (pageEnable) {
             return false
         }
-        return super.requestChildRectangleOnScreen(child, rect, immediate)
+        val pendingOwner = consumePendingContentOffsetOwner()
+        // Consume before super: immediate scroll and smooth-scroll state callbacks are synchronous
+        // owner entry points. Restore only when the request was rejected and no callback replaced
+        // the slot; opaque owner identity avoids same-payload ABA.
+        val handled = super.requestChildRectangleOnScreen(child, rect, immediate)
+        if (!handled) {
+            restorePendingContentOffsetOwnerIfVacant(pendingOwner)
+        }
+        return handled
     }
 
     companion object {
@@ -1681,6 +2094,12 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         dxUnconsumed: Int,
         dyUnconsumed: Int, type: Int
     ) {
+        cancelPendingContentOffsetForNestedMotion(
+            hasRequestedMotion = dxConsumed != 0 || dyConsumed != 0 ||
+                dxUnconsumed != 0 || dyUnconsumed != 0,
+            hasConsumedMotion = dxConsumed != 0 || dyConsumed != 0,
+            type = type,
+        )
         // Process the current View first
         var dxConsumed = dxConsumed
         var dyConsumed = dyConsumed
@@ -1732,6 +2151,11 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         target: View, dx: Int, dy: Int, consumed: IntArray,
         type: Int
     ) {
+        cancelPendingContentOffsetForNestedMotion(
+            hasRequestedMotion = dx != 0 || dy != 0,
+            hasConsumedMotion = false,
+            type = type,
+        )
         // Dispatch to the parent for processing first
         if (dx != 0 || dy != 0) {
             // Temporarily store `consumed` to reuse the Array
@@ -1754,6 +2178,26 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
             }
             consumed[0] += consumedX
             consumed[1] += consumedY
+        }
+    }
+
+    private fun cancelPendingContentOffsetForNestedMotion(
+        hasRequestedMotion: Boolean,
+        hasConsumedMotion: Boolean,
+        type: Int,
+    ) {
+        val ownsScroll = when (type) {
+            // A physical drag owns the chain once it requests nonzero movement. Nested-scroll
+            // acceptance/touch-down alone never reaches this condition, so taps do not cancel.
+            ViewCompat.TYPE_TOUCH -> hasRequestedMotion
+            // A non-touch request may still be rejected or be an automatic probe. Require proof
+            // that the child physically moved; movement consumed by this parent calls scrollBy(),
+            // whose direct-command boundary cancels the pending owner independently.
+            ViewCompat.TYPE_NON_TOUCH -> hasConsumedMotion
+            else -> false
+        }
+        if (ownsScroll) {
+            consumePendingContentOffsetOwner()
         }
     }
 
