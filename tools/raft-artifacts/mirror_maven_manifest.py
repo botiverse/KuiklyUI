@@ -43,6 +43,10 @@ TASK127_EXPECTED_GAVS = {
     ("org.jetbrains.kotlin", "kotlin-stdlib-common", "2.0.21-KBA-010"),
     ("org.jetbrains.kotlin", "kotlin-stdlib", "2.0.21-KBA-010"),
 }
+TASK141_EXPECTED_GAVS = {
+    ("org.jetbrains.kotlinx", "kotlinx-coroutines-test", "1.8.0-KBA-002"),
+    ("org.jetbrains.kotlinx", "kotlinx-coroutines-test-ohosarm64", "1.8.0-KBA-002"),
+}
 MANIFEST_CONTRACTS = {
     "121": {
         "files": 31,
@@ -65,6 +69,23 @@ MANIFEST_CONTRACTS = {
             "predecessor_gavs": "2",
             "total_bytes": "15128114",
             "deterministic_set_sha256": "3a789c3fc63d7ae70966c793f0cc07f483b0cfaa3dc860428937dc1a96c2c906",
+        },
+    },
+    "141": {
+        "files": 45,
+        "gavs": TASK141_EXPECTED_GAVS,
+        "total_bytes": 201738,
+        "set_sha256": "57c45a26d73f97b28e8a81c7b7c7a95e79e6c8663461409c67143ead73977675",
+        "metadata": {
+            "inventory_packet_sha256": "c22ae909916db9e2d2732124710a08aff0cb36a79c08c24b210f30788af6f565",
+            "files": "45",
+            # The authority supplies 50 files for these two coordinates. Binding
+            # the superset count here keeps the 45-vs-50 gap machine-enforced,
+            # so the exclusion cannot silently drift back into prose.
+            "authority_files": "50",
+            "predecessor_gavs": "2",
+            "total_bytes": "201738",
+            "deterministic_set_sha256": "57c45a26d73f97b28e8a81c7b7c7a95e79e6c8663461409c67143ead73977675",
         },
     },
 }
