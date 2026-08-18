@@ -788,7 +788,9 @@ private fun updateKeyboardOptions(
         KeyboardType.Number -> attr.keyboardTypeNumber()
         KeyboardType.Email -> attr.keyboardTypeEmail()
         KeyboardType.Password -> attr.keyboardTypePassword()
-        else -> {} // 默认键盘类型不需要特殊处理
+        // Native views start with their default keyboard type, but a reused view
+        // must actively reset a previously applied Password/Number/Email type.
+        else -> attr.keyboardTypeDefault()
     }
 
     // 处理输入法动作
