@@ -11,6 +11,9 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+
+import stage_manifest
+
 from unittest import mock
 
 
@@ -137,6 +140,51 @@ class ManifestTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(mirror.MirrorError, "metadata mismatch"):
             mirror.load_manifest(manifest)
+
+    def _stage_manifest_file(self, rows: str) -> Path:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".tsv", delete=False
+        ) as handle:
+            handle.write(
+                "# schema=1\n# task=141\n"
+                "groupId\tartifactId\tversion\tpath\tsize\tsha256\tauthority\n" + rows
+            )
+            path = Path(handle.name)
+        self.addCleanup(path.unlink, missing_ok=True)
+        return path
+
+    def test_stage_rejects_a_manifest_with_no_rows(self) -> None:
+        # Every failure path must name the byte problem. A staging tool that
+        # exists to check bytes before an unyankable write must not report its
+        # own breakage at the moment it catches a real mismatch.
+        manifest = self._stage_manifest_file("")
+        with self.assertRaisesRegex(stage_manifest.StageError, "no data rows"):
+            stage_manifest.stage(manifest, Path(tempfile.mkdtemp()))
+
+    def test_stage_rejects_a_digest_mismatch(self) -> None:
+        body = b"canonical bytes"
+        row = (
+            "org.example\tlibrary\t1.0\torg/example/library/1.0/library-1.0.jar\t"
+            f"{len(body)}\t{'0' * 64}\t"
+            "https://mirrors.tencent.com/repository/maven-tencent/"
+            "org/example/library/1.0/library-1.0.jar\n"
+        )
+        manifest = self._stage_manifest_file(row)
+
+        class FakeResponse(io.BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with mock.patch.object(
+            stage_manifest.urllib.request, "urlopen", return_value=FakeResponse(body)
+        ):
+            with self.assertRaisesRegex(stage_manifest.StageError, "sha256 mismatch"):
+                stage_manifest.stage(manifest, Path(tempfile.mkdtemp()))
 
     def _mutated_task141(self, old: str, new: str) -> Path:
         temporary = tempfile.NamedTemporaryFile(
