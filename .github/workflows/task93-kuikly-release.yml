@@ -381,11 +381,21 @@ jobs:
             "$candidate/pom-consumer-gradle-owner.tsv" \
             "$candidate/public-plan.json" \
             > "$candidate/SHA256SUMS"
+      # Runs on failure too: the publication plan written by kuikly_maven_publish.py
+      # is the only artefact that says WHY a preflight failed. The step above prints
+      # a one-line summary (state + present/total) and writes the discriminating
+      # lists -- unexpected / different / listingDisagreement -- to public-plan.json.
+      # Without `always()` that file is discarded exactly when the job fails, leaving
+      # a CONFLICT with no way to tell a benign source-identity difference from a real
+      # byte divergence. `warn` rather than `error` because an early failure may abort
+      # before the candidate directory exists; a missing upload must not manufacture a
+      # second, misleading failure on top of the real one.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: task93-candidate-${{ env.SOURCE_SHA }}
           path: ${{ runner.temp }}/kuikly-candidate
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   publish:
