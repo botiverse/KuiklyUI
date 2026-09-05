@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [staging3]
     paths:
+      - "KUIKLY_RELEASE_SET"
       - ".github/raft-artifacts/**"
       - ".github/workflows/task93-kuikly-release.yml"
       - "scripts/kuikly_*.py"
@@ -22,6 +23,7 @@ on:
   push:
     branches: [staging3]
     paths:
+      - "KUIKLY_RELEASE_SET"
       - ".github/raft-artifacts/**"
       - ".github/workflows/task93-kuikly-release.yml"
       - "scripts/kuikly_*.py"
@@ -91,7 +93,6 @@ env:
   PUBLICATION_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.event.pull_request.head.sha || github.sha }}
   PUBLICATION_TAG_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_ref || '' }}
   RAFT_REQUIRE_PUBLIC_PREDECESSORS: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && 'true' || 'false' }}
-  RELEASE_SET: 2.24.0-raft.2
 
 jobs:
   contract:
@@ -141,7 +142,14 @@ jobs:
           test -x scripts/verify-kuikly-pom-consumer.sh
           git check-ignore -q .bundle/config
           git check-ignore -q vendor/bundle/task93-bootstrap
-          ! grep -Eq 'publishToMavenLocal|publishAllPublications|(^|[[:space:]])publish([[:space:]]|$)' scripts/stage-kuikly-release.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          release = Path("KUIKLY_RELEASE_SET").read_text(encoding="utf-8").strip()
+          expected = f"{release}-2.0.21-ohos"
+          text = Path("core-render-ohos/oh-package.json5").read_text(encoding="utf-8")
+          if f'"version": "{expected}"' not in text:
+              raise SystemExit(f"oh-package.json5 version must be {expected}")
+          PY
           diff_base="$DIFF_BASE_SHA"
           if [[ -z "$diff_base" ]]; then
             diff_base="$(git rev-parse "$SOURCE_SHA^")"

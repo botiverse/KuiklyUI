@@ -7,10 +7,12 @@ those directories from scratch, verifies the exact 37-publication owner
 closure, POM/module provenance and native-host package shapes, then emits the
 only input accepted by the create-only publisher.
 
-The public completion marker is release-owner authorized as:
-  com.tencent.kuikly-open:kuikly-release-manifest:2.24.0-raft.2
-It is transport metadata, not a 38th product publication, and is therefore
-not included in the manifest's recursive publication byte set.
+The public completion marker is release-owner authorized as
+  com.tencent.kuikly-open:kuikly-release-manifest:<KUIKLY_RELEASE_SET>
+where the version is the single line in the repository-root file
+KUIKLY_RELEASE_SET. It is transport metadata, not a 38th product
+publication, and is therefore not included in the manifest's recursive
+publication byte set.
 """
 from __future__ import annotations
 
@@ -44,7 +46,8 @@ SOURCE_SCM_CONNECTION = f"scm:git:https://github.com/{REPOSITORY}.git"
 SOURCE_SCM_DEVELOPER_CONNECTION = f"scm:git:ssh://git@github.com/{REPOSITORY}.git"
 GROUP = "com.tencent.kuikly-open"
 GROUP_PATH = "com/tencent/kuikly-open"
-RELEASE = "2.24.0-raft.2"
+_RELEASE_SET_FILE = Path(__file__).resolve().parent.parent / "KUIKLY_RELEASE_SET"
+RELEASE = _RELEASE_SET_FILE.read_text(encoding="utf-8").strip()
 NORMAL_VERSION = f"{RELEASE}-2.1.21"
 OHOS_VERSION = f"{RELEASE}-2.0.21-ohos"
 MANIFEST_ARTIFACT = "kuikly-release-manifest"
@@ -1116,7 +1119,7 @@ def canonical_set_digest(publications: Sequence[dict[str, Any]]) -> str:
 def raft_required(group: str, version: str) -> bool:
     return (
         group.startswith("com.tencent.kuikly-open.compose")
-        or version.endswith("-raft.2")
+        or "-raft." in version
         or "-KBA-" in version
     )
 

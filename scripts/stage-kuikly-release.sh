@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly RELEASE_SET="2.24.0-raft.2"
+readonly RELEASE_SET="$(tr -d '[:space:]' < "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../KUIKLY_RELEASE_SET")"
 readonly NORMAL_KOTLIN="2.1.21"
 readonly OHOS_KOTLIN="2.0.21-KBA-010"
 readonly PINNED_OHOS_IMAGE="ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1"

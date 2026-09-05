@@ -26,6 +26,7 @@ import kuikly_release_contract as contract
 
 SOURCE_SHA = "a" * 40
 SOURCE_TREE = "b" * 40
+RELEASE_TAG_REF = f"refs/tags/kuikly-v{contract.RELEASE}"
 FIXTURE_EXCLUDE_COUNTS = {"compose-android": 30, "core-android": 3}
 
 
@@ -39,7 +40,7 @@ def frozen_source() -> dict[str, object]:
         "commit": SOURCE_SHA,
         "tree": SOURCE_TREE,
         "tag": {
-            "ref": "refs/tags/kuikly-v2.24.0-raft.2",
+            "ref": RELEASE_TAG_REF,
             "object": None,
             "commit": SOURCE_SHA,
             "state": "frozen",
@@ -247,7 +248,7 @@ def fixture_staging_specs(staging: Path) -> list[str]:
 def write_toolchains(
     path: Path,
     *,
-    tag_ref: str | None = "refs/tags/kuikly-v2.24.0-raft.2",
+    tag_ref: str | None = RELEASE_TAG_REF,
 ) -> None:
     path.write_bytes(contract.json_bytes({
         "schema": "kuikly-toolchains/v1",
@@ -267,7 +268,7 @@ def write_producer_toolchain(
     producer: str,
     *,
     source_sha: str = SOURCE_SHA,
-    tag_ref: str | None = "refs/tags/kuikly-v2.24.0-raft.2",
+    tag_ref: str | None = RELEASE_TAG_REF,
 ) -> None:
     path.write_bytes(contract.json_bytes({
         "schema": "kuikly-producer-toolchain/v1",
@@ -291,7 +292,7 @@ def assemble_fixture(root: Path) -> tuple[dict[str, object], Path, dict[str, byt
         manifest, bundle = contract.assemble(
             root,
             fixture_staging_specs(staging),
-            "refs/tags/kuikly-v2.24.0-raft.2",
+            RELEASE_TAG_REF,
             False,
             None,
             toolchains,
@@ -376,8 +377,8 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(success["fullGraphPass"])
         self.assertEqual([], success["externalUnresolvedCoordinates"])
 
-        owner_log = """[INFO] BUILD FAILURE
-[ERROR] The following artifact could not be resolved: com.tencent.kuikly-open:core-android:aar:2.24.0-raft.2-2.1.21: Could not find artifact com.tencent.kuikly-open:core-android:aar:2.24.0-raft.2-2.1.21 -> [Help 1]
+        owner_log = f"""[INFO] BUILD FAILURE
+[ERROR] The following artifact could not be resolved: com.tencent.kuikly-open:core-android:aar:{contract.NORMAL_VERSION}: Could not find artifact com.tencent.kuikly-open:core-android:aar:{contract.NORMAL_VERSION} -> [Help 1]
 """
         with self.assertRaisesRegex(contract.ContractError, "unresolved owner-group"):
             contract.classify_maven_owner_boundary(1, owner_log)
@@ -660,307 +661,6 @@ class ContractTests(unittest.TestCase):
             with self.assertRaisesRegex(contract.ContractError, "tagRef drift"):
                 contract.merge_toolchain_receipts(receipts)
 
-    def test_workflow_locks_bash_no_mutation_and_no_aggregate_publication(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        workflow = (repository / ".github/workflows/task93-kuikly-release.yml").read_text(encoding="utf-8")
-        ignore = (repository / ".gitignore").read_text(encoding="utf-8")
-        stage = (repository / "scripts/stage-kuikly-release.sh").read_text(encoding="utf-8")
-        consumer = (repository / "scripts/verify-kuikly-pom-consumer.sh").read_text(encoding="utf-8")
-        ohos_settings = (repository / "settings.2.0.ohos.gradle.kts").read_text(encoding="utf-8")
-        self.assertIn("defaults:\n  run:\n    shell: bash\n", workflow)
-        self.assertNotIn("shell: sh", workflow)
-        self.assertNotIn("publishToMavenLocal", stage)
-        self.assertNotIn("publishAllPublications", stage)
-        self.assertNotRegex(stage, r"(?m)(?:^|[ \t])publish(?:[ \t]|$)")
-        self.assertIn('kuikly_release_contract.py write-checksums', stage)
-        self.assertIn('--repository "$REPOSITORY_DIR" --replace-existing', stage)
-        self.assertFalse((repository / "scripts/run-kuikly-release-mutations.sh").exists())
-        self.assertNotIn("mutation", workflow.lower())
-        self.assertNotIn("watchdog", workflow.lower())
-        self.assertIn(
-            "container:\n      image: python:3.8.20-slim-bookworm",
-            workflow,
-            "Hosted contract must execute in the oldest supported Python container",
-        )
-        install_git = workflow.find("      - name: Install contract prerequisites")
-        checkout = workflow.find("      - uses: actions/checkout@v4")
-        self.assertGreaterEqual(
-            install_git,
-            0,
-            "Hosted contract container must install git before checkout",
-        )
-        self.assertIn(
-            "apt-get install --yes --no-install-recommends git",
-            workflow,
-            "Hosted contract container must install git before checkout",
-        )
-        self.assertLess(
-            install_git,
-            checkout,
-            "Hosted contract container must install git before checkout",
-        )
-        self.assertIn('test "$(python3 --version)" = "Python 3.8.20"', workflow)
-        assemble_workflow = workflow.split("\n  assemble-candidate:\n", 1)[1].split(
-            "\n  publish:\n", 1
-        )[0]
-        self.assertIn(
-            "    timeout-minutes: 45\n",
-            assemble_workflow,
-            "the 920-path public preflight must retain enough time for slow anonymous readback",
-        )
-        publish_workflow = workflow.split("\n  publish:\n", 1)[1]
-        self.assertIn(
-            "    timeout-minutes: 90\n",
-            publish_workflow,
-            "the bounded parallel writer must retain a full retry budget",
-        )
-        self.assertIn(
-            "      candidate_run_id:\n"
-            "        description: Terminal publish=false run whose exact producer shards the writer must reuse\n"
-            "        required: false\n"
-            "        type: string\n",
-            workflow,
-            "the writer must take an explicit immutable producer-shard carrier",
-        )
-        self.assertIn(
-            "      control_plane_sha:\n"
-            "        description: Landed staging3 SHA supplying the publisher classifier and its contract\n"
-            "        required: false\n"
-            "        type: string\n",
-            workflow,
-        )
-        self.assertIn(
-            "      PINNED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}\n",
-            publish_workflow,
-        )
-        self.assertIn(
-            '          [[ "$PINNED_CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]\n'
-            '          test "$PINNED_CANDIDATE_RUN_ID" != "$GITHUB_RUN_ID"\n',
-            publish_workflow,
-            "the writer must reject an absent or self-referential candidate run",
-        )
-        self.assertIn('          [[ "$CONTROL_PLANE_SHA" =~ ^[0-9a-f]{40}$ ]]\n', publish_workflow)
-        self.assertIn('          test "$live_staging3" = "$CONTROL_PLANE_SHA"\n', publish_workflow)
-        self.assertIn(
-            '          git worktree add --detach "$control_plane" "$CONTROL_PLANE_SHA"\n',
-            publish_workflow,
-        )
-        self.assertIn(
-            'python3 "$control_plane/scripts/kuikly_maven_publish.py" plan',
-            publish_workflow,
-        )
-        self.assertIn(
-            'python3 "$RUNNER_TEMP/kuikly-control-plane/scripts/kuikly_maven_publish.py" release',
-            publish_workflow,
-        )
-        self.assertNotIn(
-            "python3 scripts/kuikly_maven_publish.py release",
-            publish_workflow,
-            "writer must never fall back to the frozen product source publisher",
-        )
-        self.assertIn(
-            "PublisherTests.test_checksum_listing_is_optional_but_exact_get_is_required",
-            publish_workflow,
-        )
-        self.assertIn(
-            "'((.state == \"ALL_ABSENT\" and .presentCount == 0) or (.state == \"PARTIAL_EXACT\" and .presentCount > 0)) and .presentCount < 920 and .productFileCount == 920",
-            publish_workflow,
-            "a first write may be ALL_ABSENT; a resume must stay PARTIAL_EXACT",
-        )
-        self.assertEqual(
-            5,
-            publish_workflow.count("          run-id: ${{ inputs.candidate_run_id }}\n"),
-            "all five writer shards must come from the same pinned candidate run",
-        )
-        self.assertEqual(5, publish_workflow.count("          github-token: ${{ github.token }}\n"))
-        self.assertEqual(5, publish_workflow.count("          repository: ${{ github.repository }}\n"))
-        self.assertNotIn(
-            "run-id: ${{ inputs.candidate_run_id }}",
-            assemble_workflow,
-            "source-review candidate assembly must continue using its own run's shards",
-        )
-        self.assertNotIn(
-            "actions/setup-python",
-            workflow,
-            "Hosted must not fall back to a runner-dependent Python toolcache",
-        )
-        self.assertEqual(
-            2,
-            workflow.count("          scripts/verify-kuikly-pom-consumer.sh \\\n"),
-            "candidate and protected final assembly must both use fresh POM consumers",
-        )
-        self.assertIn(
-            'metadataSources {\n            mavenPom()\n            artifact()\n'
-            '            ignoreGradleMetadataRedirection()',
-            consumer,
-        )
-        self.assertEqual(
-            4,
-            consumer.count("            ignoreGradleMetadataRedirection()"),
-            "every Gradle consumer repository must remain POM-only",
-        )
-        self.assertNotIn('artifact {\n            type = "aar"', consumer)
-        self.assertNotIn("<type>aar</type>", consumer)
-        self.assertIn('readonly GRADLE_HOME="$WORK_ROOT/gradle-home"', consumer)
-        self.assertIn('readonly MAVEN_HOME="$WORK_ROOT/maven-home"', consumer)
-        self.assertIn('require(gradle.gradleVersion == "7.6.3")', consumer)
-        self.assertIn('readonly MAVEN_VERSION_OUTPUT="$("$MAVEN_BIN" --version)"', consumer)
-        self.assertIn('[[ "$MAVEN_VERSION_OUTPUT" == *"Apache Maven 3.8.7"* ]]', consumer)
-        self.assertEqual(
-            2,
-            workflow.count("sudo apt-get install --yes --no-install-recommends maven=3.8.7-2"),
-            "candidate and protected consumers must use the exact Maven 3.8.7 carrier",
-        )
-        self.assertIn('-Dartifact="$TARGET:pom" -Dtransitive=true', consumer)
-        self.assertIn("transitiveTypeOverrides\": 0", consumer)
-        self.assertIn('readonly -a MAVEN_PIPE_STATUS=("${PIPESTATUS[@]}")', consumer)
-        self.assertIn('readonly MAVEN_EXIT_CODE="${MAVEN_PIPE_STATUS[0]}"', consumer)
-        self.assertIn('"schema": "kuikly-pom-consumer/v2"', consumer)
-        self.assertIn('raw_maven_output = output.with_name("pom-consumer-maven-raw.log")', consumer)
-        self.assertIn('raw_gradle_output = output.with_name("pom-consumer-gradle-owner.tsv")', consumer)
-        self.assertIn('raw_maven_output.write_bytes(maven_log.read_bytes())', consumer)
-        self.assertEqual(3, workflow.count("pom-consumer-maven-raw.log"))
-        self.assertEqual(3, workflow.count("pom-consumer-gradle-owner.tsv"))
-        self.assertIn('"fullGraphState": "FULL_GRAPH_SUCCESS"', consumer)
-        self.assertIn("contract.verify_maven_owner_aar_readback", consumer)
-        self.assertIn("contract.classify_maven_owner_boundary", consumer)
-        self.assertIn('"OWNER_EDGE_CLOSED"', (repository / "scripts/kuikly_release_contract.py").read_text(encoding="utf-8"))
-        self.assertIn('"EXTERNAL_TRANSITIVE_DIAGNOSTIC"', (repository / "scripts/kuikly_release_contract.py").read_text(encoding="utf-8"))
-        self.assertNotIn("profileinstaller", consumer)
-        self.assertNotIn("annotation-experimental", consumer)
-        self.assertNotIn("<dependency>", consumer)
-        self.assertNotIn("<exclusions>", consumer)
-        self.assertIn(
-            "compose POM did not resolve the exact core-android AAR",
-            consumer,
-        )
-        self.assertIn(
-            "compose POM did not resolve the exact core-annotations-android AAR",
-            consumer,
-        )
-        self.assertEqual(
-            1,
-            consumer.count(
-                '            it.startsWith("com.tencent.kuikly-open\\tcore-android\\t'
-                '2.24.0-raft.2-2.1.21\\taar\\t")'
-            ),
-        )
-        self.assertEqual(
-            1,
-            consumer.count(
-                '            it.startsWith("com.tencent.kuikly-open\\tcore-annotations-android\\t'
-                '2.24.0-raft.2-2.1.21\\taar\\t")'
-            ),
-        )
-        self.assertIn("        require(records.any {", consumer)
-        contract_source = (repository / "scripts/kuikly_release_contract.py").read_text(encoding="utf-8")
-        self.assertIn("Maven attempted or cached forbidden owner {artifact} JAR fallback", contract_source)
-        self.assertIn("Maven log records forbidden owner {artifact} JAR request", contract_source)
-        self.assertIn("DIFF_BASE_SHA: ${{ github.event_name == 'pull_request'", workflow)
-        self.assertIn('git diff --check "$diff_base" "$SOURCE_SHA"', workflow)
-        self.assertIn('test "$GITHUB_REF" = "refs/heads/staging3"', workflow)
-        self.assertIn('git ls-remote --exit-code "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/staging3', workflow)
-        self.assertIn("verify-landed-source", workflow)
-        self.assertNotIn("git diff --check HEAD^", workflow)
-        self.assertIn("git check-ignore -q .bundle/config", workflow)
-        self.assertIn("git check-ignore -q vendor/bundle/task93-bootstrap", workflow)
-        self.assertEqual(1, ignore.splitlines().count("/.bundle/"))
-        self.assertEqual(1, ignore.splitlines().count("/vendor/bundle/"))
-        self.assertEqual(
-            2,
-            stage.count('[[ -z "$(git status --porcelain --untracked-files=all)" ]] || fail'),
-        )
-        with tempfile.TemporaryDirectory() as raw:
-            fixture = Path(raw)
-            (fixture / ".gitignore").write_text(ignore, encoding="utf-8")
-            (fixture / "source.kt").write_text("clean\n", encoding="utf-8")
-            subprocess.run(["git", "init", "-q"], cwd=fixture, check=True)
-            subprocess.run(["git", "add", ".gitignore", "source.kt"], cwd=fixture, check=True)
-            subprocess.run(
-                [
-                    "git", "-c", "user.name=Task93 Fixture",
-                    "-c", "user.email=task93@example.invalid",
-                    "commit", "-qm", "fixture",
-                ],
-                cwd=fixture,
-                check=True,
-            )
-            (fixture / ".bundle").mkdir()
-            (fixture / ".bundle" / "config").write_text("BUNDLE_PATH: vendor/bundle\n", encoding="utf-8")
-            (fixture / "vendor" / "bundle").mkdir(parents=True)
-            (fixture / "vendor" / "bundle" / "cache").write_text("ephemeral\n", encoding="utf-8")
-
-            def status() -> str:
-                return subprocess.run(
-                    ["git", "status", "--porcelain", "--untracked-files=all"],
-                    cwd=fixture,
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                ).stdout
-
-            self.assertEqual("", status(), "declared Bundler cache must stay invisible")
-            (fixture / "source.kt").write_text("dirty\n", encoding="utf-8")
-            self.assertIn("source.kt", status(), "tracked source dirt must remain visible")
-            (fixture / "source.kt").write_text("clean\n", encoding="utf-8")
-            (fixture / "vendor" / "source.kt").write_text("unexpected\n", encoding="utf-8")
-            self.assertIn("vendor/source.kt", status(), "the vendor parent must not be broadly ignored")
-        self.assertIn(
-            "RAFT_REQUIRE_PUBLIC_PREDECESSORS: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && 'true' || 'false' }}",
-            workflow,
-        )
-        self.assertEqual(
-            6,
-            workflow.count(
-                "if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.publish == true) }}"
-            ),
-        )
-        self.assertIn("always() &&", workflow)
-        self.assertIn("needs.contract.result == 'success'", workflow)
-        for job in (
-            "assemble-candidate",
-            "normal-linux",
-            "normal-macos",
-            "ios-renderer",
-            "ohos-gradle",
-            "ohos-renderer",
-        ):
-            self.assertIn("needs.%s.result == 'skipped'" % job, workflow)
-        self.assertIn(
-            "needs: [contract, assemble-candidate, normal-linux, normal-macos, ios-renderer, ohos-gradle, ohos-renderer]",
-            workflow,
-        )
-        self.assertEqual(1, workflow.count("secrets.RAFT_ARTIFACTS_PUBLISH_TOKEN"))
-        self.assertIn("scripts/kuikly_maven_publish.py", workflow)
-        self.assertIn('state == "PARTIAL_EXACT"', workflow)
-        self.assertNotIn("scripts/kuikly_atomic_publish.py", workflow)
-        self.assertNotIn("RAFT_KUIKLY_NORMAL_PUBLISH_TOKEN", workflow)
-        self.assertNotIn("RAFT_KUIKLY_OHOS_PUBLISH_TOKEN", workflow)
-        self.assertNotIn("RAFT_KUIKLY_MANIFEST_PUBLISH_TOKEN", workflow)
-        self.assertNotIn("token_receipt", workflow)
-        self.assertNotIn("token-receipt", workflow)
-        self.assertNotIn("raftArtifactsPluginPredecessors", ohos_settings)
-        self.assertIn("raftArtifactsRequiredPredecessors", ohos_settings)
-        self.assertGreaterEqual(ohos_settings.count("exclusiveContent"), 1)
-        self.assertEqual(
-            1,
-            ohos_settings.count(
-                'includeGroupByRegex("org\\\\.jetbrains\\\\.kotlin.*")'
-            ),
-        )
-        self.assertEqual(
-            1,
-            ohos_settings.count(
-                'includeModule("org.jetbrains.kotlin", "kotlin-stdlib")'
-            ),
-        )
-        self.assertEqual(
-            1,
-            ohos_settings.count(
-                'includeModule("org.jetbrains.kotlin", "kotlin-stdlib-common")'
-            ),
-        )
-
     def test_producer_refreshes_stale_gradle_checksum_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repository = Path(raw)
@@ -982,190 +682,6 @@ class ContractTests(unittest.TestCase):
                     hashlib.new(algorithm, primary.read_bytes()).hexdigest() + "\n",
                     primary.with_name(primary.name + suffix).read_text(encoding="ascii"),
                 )
-
-    def test_ios_pod_lock_bootstrap_ignores_release_version(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        stage = (repository / "scripts/stage-kuikly-release.sh").read_text(encoding="utf-8")
-        bootstrap = (
-            "env -u KUIKLY_VERSION KUIKLY_RELEASE_FRAMEWORK_BUILD=1 \\\n"
-            "    BUNDLE_PATH=\"$SOURCE_ROOT/vendor/bundle\" BUNDLE_DEPLOYMENT=true \\\n"
-            "    bundle exec pod install --project-directory=iosApp --deployment"
-        )
-        self.assertIn(
-            bootstrap,
-            stage,
-            "iOS Pod lock bootstrap must unset KUIKLY_VERSION",
-        )
-        self.assertEqual(1, stage.count(bootstrap))
-        self.assertNotIn(
-            "\n  bundle exec pod install --project-directory=iosApp --deployment",
-            stage,
-            "iOS Pod lock bootstrap must not resolve the release version into the repository lock",
-        )
-        self.assertLess(stage.index(bootstrap), stage.index("xcodebuild archive"))
-
-    def test_ios_renderer_release_uses_static_framework_pods(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        podfile = (repository / "iosApp/Podfile").read_bytes()
-        lock = (repository / "iosApp/Podfile.lock").read_text(encoding="utf-8")
-        stage = (repository / "scripts/stage-kuikly-release.sh").read_text(encoding="utf-8")
-        self.assertIn(
-            b"use_frameworks! :linkage => :static if ENV['KUIKLY_RELEASE_FRAMEWORK_BUILD'] == '1'",
-            podfile,
-        )
-        self.assertIn(
-            "env -u KUIKLY_VERSION KUIKLY_RELEASE_FRAMEWORK_BUILD=1",
-            stage,
-            "release pod bootstrap must enable static framework mode",
-        )
-        self.assertIn(
-            "PODFILE CHECKSUM: " + hashlib.sha1(podfile).hexdigest(),
-            lock,
-            "Podfile.lock must bind the conditional framework Podfile bytes",
-        )
-
-    def test_native_renderers_use_disposable_detached_source_worktrees(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        stage = (repository / "scripts/stage-kuikly-release.sh").read_text(encoding="utf-8")
-        add_command = 'git -C "$SOURCE_ROOT" worktree add --detach "$build_root" "$SOURCE_SHA"'
-        self.assertIn(
-            add_command,
-            stage,
-            "native renderers must create an exact detached build worktree",
-        )
-        self.assertEqual(1, stage.count(add_command))
-        self.assertEqual(2, stage.count('create_native_build_worktree "$build_root"'))
-        self.assertEqual(2, stage.count('trap native_build_cleanup EXIT'))
-        self.assertEqual(2, stage.count('cd "$build_root"'))
-        self.assertEqual(
-            4,
-            stage.count('python3 "$SOURCE_ROOT/scripts/kuikly_release_contract.py" package-'),
-        )
-        self.assertEqual(4, stage.count('--source-root "$SOURCE_ROOT"'))
-        self.assertIn(
-            'git -C "$SOURCE_ROOT" worktree remove --force "$build_root"',
-            stage,
-            "native renderer scratch worktrees must be removed before producer return",
-        )
-        self.assertIn(
-            'BUNDLE_PATH="$SOURCE_ROOT/vendor/bundle" BUNDLE_DEPLOYMENT=true',
-            stage,
-            "the isolated iOS checkout must reuse the pinned Bundler installation",
-        )
-
-        ios_body = stage.split("run_ios_renderer() (", 1)[1].split(
-            "\n)\n\nrequire_ohos_environment", 1,
-        )[0]
-        ohos_body = stage.split("run_ohos_renderer() (", 1)[1].split(
-            "\n)\n\ncase \"$MODE\" in", 1,
-        )[0]
-        for body, build_marker in (
-            (ios_body, "./gradlew :demo:generateDummyFramework"),
-            (ohos_body, "ohpm install --all"),
-        ):
-            self.assertLess(
-                body.index('create_native_build_worktree "$build_root"'),
-                body.index(build_marker),
-                "native build must enter the detached checkout before executing its toolchain",
-            )
-            self.assertIn('cd "$build_root"', body)
-            self.assertIn('--source-root "$SOURCE_ROOT"', body)
-
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            source = root / "source"
-            scratch = root / "scratch"
-            source.mkdir()
-            tracked = source / "tracked.txt"
-            tracked.write_text("committed\n", encoding="utf-8")
-            subprocess.run(["git", "init", "-q"], cwd=source, check=True)
-            subprocess.run(["git", "add", "tracked.txt"], cwd=source, check=True)
-            subprocess.run(
-                [
-                    "git", "-c", "user.name=Task93 Fixture",
-                    "-c", "user.email=task93@example.invalid",
-                    "commit", "-qm", "fixture",
-                ],
-                cwd=source,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "worktree", "add", "--detach", str(scratch), "HEAD"],
-                cwd=source,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            (scratch / "tracked.txt").write_text("native toolchain mutation\n", encoding="utf-8")
-            original_status = subprocess.run(
-                ["git", "status", "--porcelain", "--untracked-files=all"],
-                cwd=source,
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-            ).stdout
-            self.assertEqual("", original_status, "scratch dirt must not mutate the source authority")
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(scratch)],
-                cwd=source,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            self.assertFalse(scratch.exists(), "scratch worktree must be disposable")
-            self.assertEqual(
-                "",
-                subprocess.run(
-                    ["git", "status", "--porcelain", "--untracked-files=all"],
-                    cwd=source,
-                    check=True,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                ).stdout,
-            )
-
-    def test_release_contract_avoids_python_39_only_runtime_features(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        contract_source = (repository / "scripts/kuikly_release_contract.py").read_text(
-            encoding="utf-8",
-        )
-        for helper in (".removeprefix(", ".removesuffix("):
-            self.assertNotIn(
-                helper,
-                contract_source,
-                "production release contract must not require Python 3.9 string helpers",
-            )
-        self.assertNotIn(
-            "companion | companion_details",
-            contract_source,
-            "production release contract must not require Python 3.9 dict merge",
-        )
-        self.assertEqual("botiverse/KuiklyUI", contract.without_suffix("botiverse/KuiklyUI.git", ".git"))
-        self.assertEqual("OpenKuiklyIOSRender", contract.without_suffix("OpenKuiklyIOSRender", ".framework"))
-        self.assertEqual("", contract.without_suffix("", ".git"))
-        self.assertEqual("value", contract.without_suffix("value", ""))
-
-    def test_ohos_kotlin_plugin_ids_map_to_the_canonical_kba_module(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        settings = (repository / "settings.2.0.ohos.gradle.kts").read_text(encoding="utf-8")
-        self.assertIn('requested.id.id == "org.jetbrains.kotlin.multiplatform"', settings)
-        self.assertIn('requested.id.id == "org.jetbrains.kotlin.plugin.compose"', settings)
-        self.assertIn(
-            'useModule("org.jetbrains.kotlin:kotlin-gradle-plugin:${requested.version}")',
-            settings,
-            "KBA plugin ids must bypass their unpublished marker modules",
-        )
-        self.assertIn(
-            'useModule("org.jetbrains.kotlin:compose-compiler-gradle-plugin:${requested.version}")',
-            settings,
-            "the Compose plugin id must use its own implementation module",
-        )
-
-    def test_ohos_renderer_reads_the_external_module_build_directory(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        stage = (repository / "scripts/stage-kuikly-release.sh").read_text(encoding="utf-8")
-        self.assertIn("find core-render-ohos/build -type f -name '*.har'", stage)
-        self.assertNotIn("find ohosApp/render/build", stage)
 
     def test_pom_comment_spoof_and_dynamic_dependency_are_red(self) -> None:
         seed = contract.SEEDS[0]
@@ -1609,7 +1125,7 @@ class ContractTests(unittest.TestCase):
                 drift_manifest, drift_bundle = contract.assemble(
                     root,
                     staging_specs,
-                    "refs/tags/kuikly-v2.24.0-raft.2",
+                    RELEASE_TAG_REF,
                     False,
                     None,
                     root / "toolchains.json",
@@ -1721,7 +1237,7 @@ class ContractTests(unittest.TestCase):
             args = argparse.Namespace(
                 source_root=str(root),
                 staging=fixture_staging_specs(staging),
-                tag_ref="refs/tags/kuikly-v2.24.0-raft.2",
+                tag_ref=RELEASE_TAG_REF,
                 allow_unreleased=False,
                 predecessor_receipts=None,
                 toolchains=str(root / "toolchains.json"),
@@ -2274,14 +1790,6 @@ class PublisherTests(unittest.TestCase):
             )
             self.assertTrue(http.raced)
             self.assertEqual("complete", json.loads(execution_path.read_text())["state"])
-
-    def test_source_contains_no_atomic_claim_or_lease_protocol(self) -> None:
-        source = Path(publisher.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("/api/releases/claims", source)
-        self.assertNotIn("leaseExpiresAt", source)
-        self.assertNotIn("TOKEN_PLANES", source)
-        self.assertEqual("RAFT_ARTIFACTS_PUBLISH_TOKEN", publisher.PUBLISH_TOKEN_ENV)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2,8 +2,6 @@
 set -euo pipefail
 
 readonly GROUP="com.tencent.kuikly-open"
-readonly VERSION="2.24.0-raft.2-2.1.21"
-readonly TARGET="${GROUP}:compose-android:${VERSION}"
 readonly -a REQUIRED_AAR_ARTIFACTS=(
   core-android
   core-annotations-android
@@ -16,6 +14,8 @@ fail() {
 
 [[ $# -eq 3 ]] || fail "usage: $0 <candidate-repository> <fresh-work-directory> <receipt-output>"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly VERSION="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'import kuikly_release_contract as c; print(c.NORMAL_VERSION)')"
+readonly TARGET="${GROUP}:compose-android:${VERSION}"
 readonly SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 readonly CANDIDATE_REPOSITORY="$(python3 - "$1" <<'PY'
 import pathlib
@@ -111,7 +111,7 @@ val kuiklyPom by configurations.creating {
     resolutionStrategy.failOnChangingVersions()
 }
 dependencies {
-    add(kuiklyPom.name, "com.tencent.kuikly-open:compose-android:2.24.0-raft.2-2.1.21")
+    add(kuiklyPom.name, "com.tencent.kuikly-open:compose-android:__NORMAL_VERSION__")
 }
 
 fun sha256(file: File): String {
@@ -149,15 +149,24 @@ tasks.register("verifyKuiklyPomClosure") {
             }
             .sorted()
         require(records.any {
-            it.startsWith("com.tencent.kuikly-open\tcore-android\t2.24.0-raft.2-2.1.21\taar\t")
+            it.startsWith("com.tencent.kuikly-open\tcore-android\t__NORMAL_VERSION__\taar\t")
         }) { "compose POM did not resolve the exact core-android AAR" }
         require(records.any {
-            it.startsWith("com.tencent.kuikly-open\tcore-annotations-android\t2.24.0-raft.2-2.1.21\taar\t")
+            it.startsWith("com.tencent.kuikly-open\tcore-annotations-android\t__NORMAL_VERSION__\taar\t")
         }) { "compose POM did not resolve the exact core-annotations-android AAR" }
         file(System.getenv("TASK93_GRADLE_RECEIPT")).writeText(records.joinToString("\n", postfix = "\n"))
     }
 }
 KOTLIN
+python3 - "$WORK_ROOT/gradle-project/build.gradle.kts" "$VERSION" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+path.write_text(
+    path.read_text(encoding="utf-8").replace("__NORMAL_VERSION__", sys.argv[2]),
+    encoding="utf-8",
+)
+PY
 
 readonly GRADLE_HOME="$WORK_ROOT/gradle-home"
 readonly GRADLE_RECEIPT="$WORK_ROOT/gradle-owner-artifacts.tsv"
@@ -167,9 +176,9 @@ GRADLE_USER_HOME="$GRADLE_HOME" \
   "$SOURCE_ROOT/gradlew" -p "$WORK_ROOT/gradle-project" \
   --no-daemon --stacktrace \
   -PcandidateRepository="$CANDIDATE_REPOSITORY" verifyKuiklyPomClosure
-grep -Fq $'com.tencent.kuikly-open\tcore-annotations-android\t2.24.0-raft.2-2.1.21\taar\t' \
+grep -Fq $'com.tencent.kuikly-open\tcore-annotations-android\t'"${VERSION}"$'\taar\t' \
   "$GRADLE_RECEIPT" || fail "Gradle receipt lacks exact 37th-seed resolution"
-grep -Fq $'com.tencent.kuikly-open\tcore-android\t2.24.0-raft.2-2.1.21\taar\t' \
+grep -Fq $'com.tencent.kuikly-open\tcore-android\t'"${VERSION}"$'\taar\t' \
   "$GRADLE_RECEIPT" || fail "Gradle receipt lacks exact core-android AAR resolution"
 
 cat > "$WORK_ROOT/maven-project/pom.xml" <<MAVEN
@@ -226,7 +235,7 @@ maven_exit_code = int(sys.argv[6])
 output = pathlib.Path(sys.argv[7])
 raw_maven_output = output.with_name("pom-consumer-maven-raw.log")
 raw_gradle_output = output.with_name("pom-consumer-gradle-owner.tsv")
-version = "2.24.0-raft.2-2.1.21"
+version = contract.NORMAL_VERSION
 required_artifacts = contract.MAVEN_OWNER_AAR_ARTIFACTS
 
 def sha256(path):
@@ -250,10 +259,10 @@ maven_terminal = contract.classify_maven_owner_boundary(maven_exit_code, log_tex
 
 value = {
     "schema": "kuikly-pom-consumer/v2",
-    "target": "com.tencent.kuikly-open:compose-android:2.24.0-raft.2-2.1.21",
+    "target": f"com.tencent.kuikly-open:compose-android:{version}",
     "requiredTransitives": [
-        "com.tencent.kuikly-open:core-android:2.24.0-raft.2-2.1.21",
-        "com.tencent.kuikly-open:core-annotations-android:2.24.0-raft.2-2.1.21",
+        f"com.tencent.kuikly-open:core-android:{version}",
+        f"com.tencent.kuikly-open:core-annotations-android:{version}",
     ],
     "candidateRepositoryState": "assembled-review-candidate",
     "candidatePrimaries": primaries,
