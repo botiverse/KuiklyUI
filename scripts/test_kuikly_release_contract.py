@@ -763,9 +763,9 @@ class ContractTests(unittest.TestCase):
             publish_workflow,
         )
         self.assertIn(
-            "'.state == \"PARTIAL_EXACT\" and .presentCount >= 69 and .presentCount < 920 and .productFileCount == 920",
+            "'((.state == \"ALL_ABSENT\" and .presentCount == 0) or (.state == \"PARTIAL_EXACT\" and .presentCount > 0)) and .presentCount < 920 and .productFileCount == 920",
             publish_workflow,
-            "a resumed writer must accept only a non-regressing exact partial publication",
+            "a first write may be ALL_ABSENT; a resume must stay PARTIAL_EXACT",
         )
         self.assertEqual(
             5,
