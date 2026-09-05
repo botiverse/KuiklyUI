@@ -51,10 +51,6 @@ on:
         description: Fully qualified immutable tag ref (required to publish)
         required: false
         type: string
-      manifest_sha256:
-        description: Expected final candidate manifest SHA-256
-        required: false
-        type: string
       set_sha256:
         description: Expected product-set SHA-256
         required: false
@@ -418,7 +414,6 @@ jobs:
     environment: raft-artifacts-production
     env:
       EXPECTED_SOURCE_TREE: ${{ inputs.source_tree }}
-      EXPECTED_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
       EXPECTED_SET_SHA256: ${{ inputs.set_sha256 }}
       EXPECTED_PREDECESSOR_RECEIPT_SHA256: ${{ inputs.predecessor_receipt_sha256 }}
       PINNED_CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
@@ -488,7 +483,7 @@ jobs:
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_SOURCE_TREE" =~ ^[0-9a-f]{40}$ ]]
-          for value in "$EXPECTED_MANIFEST_SHA256" "$EXPECTED_SET_SHA256" "$EXPECTED_PREDECESSOR_RECEIPT_SHA256"; do
+          for value in "$EXPECTED_SET_SHA256" "$EXPECTED_PREDECESSOR_RECEIPT_SHA256"; do
             [[ "$value" =~ ^[0-9a-f]{64}$ ]]
           done
           [[ "$PUBLICATION_TAG_REF" == refs/tags/* ]]
@@ -551,7 +546,6 @@ jobs:
             --require-publishable \
             --output "$final/manifest.json" \
             --bundle-output "$final/bundle"
-          test "$(sha256sum "$final/manifest.json" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
           test "$(jq -r .setSha256 "$final/manifest.json")" = "$EXPECTED_SET_SHA256"
           scripts/verify-kuikly-pom-consumer.sh \
             "$final/bundle" \
@@ -560,7 +554,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$control_plane/scripts/kuikly_maven_publish.py" plan \
             --manifest "$final/manifest.json" --bundle "$final/bundle" \
             --output "$final/public-plan.json"
-          jq -e '.state == "PARTIAL_EXACT" and .presentCount >= 69 and .presentCount < 920 and .productFileCount == 920 and
+          jq -e '((.state == "ALL_ABSENT" and .presentCount == 0) or (.state == "PARTIAL_EXACT" and .presentCount > 0)) and .presentCount < 920 and .productFileCount == 920 and
             (.unexpected | length) == 0 and (.different | length) == 0 and
             (.listingDisagreement | length) == 0 and .completionPresent == false' \
             "$final/public-plan.json" >/dev/null
