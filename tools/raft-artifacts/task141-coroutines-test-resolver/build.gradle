@@ -1,0 +1,59 @@
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+
+def version = "1.8.0-KBA-002"
+def rootGav = "org.jetbrains.kotlinx:kotlinx-coroutines-test:${version}"
+def ohosGav = "org.jetbrains.kotlinx:kotlinx-coroutines-test-ohosarm64:${version}"
+
+// Only the OHOS platform module is asserted through module metadata. Resolving
+// the multiplatform root on a JVM host selects jvmApiElements-published, which
+// redirects via available-at to kotlinx-coroutines-test-jvm — a platform this
+// task deliberately does not mirror. That redirect is a property of the host,
+// not of the frozen bytes, so the root is checked as artifact bytes instead.
+def ohosMetadataClosure = configurations.create("task141OhosMetadataClosure") {
+    canBeConsumed = false
+    canBeResolved = true
+}
+def artifactClosure = configurations.create("task141ArtifactClosure") {
+    canBeConsumed = false
+    canBeResolved = true
+}
+
+dependencies {
+    add(ohosMetadataClosure.name, ohosGav) { transitive = false }
+    // Artifact-only notation keeps this check on the frozen authority bytes and
+    // off Kotlin/Native variant matching, which needs the OHOS toolchain. Real
+    // OHOS variant selection is proven separately by the Mobile compileTest.
+    add(artifactClosure.name, "${rootGav}@jar") { transitive = false }
+    add(artifactClosure.name, "${ohosGav}@klib") { transitive = false }
+}
+
+tasks.register("resolveTask141Authority") {
+    doLast {
+        def actualComponents = ohosMetadataClosure.incoming.resolutionResult.allComponents
+            .collect { it.id }
+            .findAll { it instanceof ModuleComponentIdentifier }
+            .collect { "${it.group}:${it.module}:${it.version}" }
+            .toSet()
+        assert actualComponents == [ohosGav].toSet():
+            "unexpected task #141 OHOS metadata closure: ${actualComponents.sort()}"
+
+        def expectedArtifacts = [
+            ("kotlinx-coroutines-test-${version}.jar".toString()):
+                "41faf619ea9466712501851e6ba4f0328be2673415c5c136054955f0d70a045b",
+            ("kotlinx-coroutines-test-ohosarm64-${version}.klib".toString()):
+                "ce0cf5e6683d55254ed89c733d05ca65581f024d6475f4f1f36b66017b8c75fb",
+        ]
+        def actualArtifacts = artifactClosure.resolve().collectEntries { file ->
+            def digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(file.bytes)
+                .encodeHex()
+                .toString()
+            [(file.name): digest]
+        }
+        assert actualArtifacts == expectedArtifacts:
+            "unexpected task #141 authority artifacts: ${actualArtifacts}"
+        println "TASK141_TENCENT_AUTHORITY_RESOLVE_PASS ohos_components=1 artifacts=2"
+        println "TASK141_DISCLOSURE mirrored root resolves for OHOS targets only; " +
+            "non-OHOS available-at platforms are not mirrored by task #141"
+    }
+}

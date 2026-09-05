@@ -75,6 +75,9 @@ private val DefaultColor = Color.Black
  * @param background The background color for the text.
  * @param textDecoration The decorations to paint on the text (e.g., an underline).
  * @param shadow The shadow effect applied on the text.
+ * @param textDecorationColor The color used for text decorations such as underlines.
+ * @param textDecorationThickness The thickness used for text decorations such as underlines.
+ * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
  * @param platformStyle Platform specific [SpanStyle] parameters.
  * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke around
  * the edges.
@@ -98,8 +101,12 @@ class SpanStyle internal constructor(
 //    val textGeometricTransform: TextGeometricTransform? = null,
 //    val localeList: LocaleList? = null,
     val background: Color = Color.Unspecified,  // kuikly暂时不支持
+    val inlineBoxStyle: InlineBoxSpanStyle? = null,
     val textDecoration: TextDecoration? = null,
     val shadow: Shadow? = null,
+    val textDecorationColor: Color = Color.Unspecified,
+    val textDecorationThickness: TextUnit = TextUnit.Unspecified,
+    val textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //    val platformStyle: PlatformSpanStyle? = null,
 //    val drawStyle: DrawStyle? = null
 ) {
@@ -131,6 +138,9 @@ class SpanStyle internal constructor(
      * @param background The background color for the text.
      * @param textDecoration The decorations to paint on the text (e.g., an underline).
      * @param shadow The shadow effect applied on the text.
+     * @param textDecorationColor The color used for text decorations such as underlines.
+     * @param textDecorationThickness The thickness used for text decorations such as underlines.
+     * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
      * @param platformStyle Platform specific [SpanStyle] parameters.
      * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke
      * around the edges.
@@ -152,8 +162,12 @@ class SpanStyle internal constructor(
 //        textGeometricTransform: TextGeometricTransform? = null,
 //        localeList: LocaleList? = null,
         background: Color = Color.Unspecified,
+        inlineBoxStyle: InlineBoxSpanStyle? = null,
         textDecoration: TextDecoration? = null,
         shadow: Shadow? = null,
+        textDecorationColor: Color = Color.Unspecified,
+        textDecorationThickness: TextUnit = TextUnit.Unspecified,
+        textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //        platformStyle: PlatformSpanStyle? = null,
 //        drawStyle: DrawStyle? = null
     ) : this(
@@ -169,8 +183,12 @@ class SpanStyle internal constructor(
 //        textGeometricTransform = textGeometricTransform,
 //        localeList = localeList,
         background = background,
+        inlineBoxStyle = inlineBoxStyle,
         textDecoration = textDecoration,
         shadow = shadow,
+        textDecorationColor = textDecorationColor,
+        textDecorationThickness = textDecorationThickness,
+        textDecorationOffset = textDecorationOffset,
 //        platformStyle = platformStyle,
 //        drawStyle = drawStyle
     )
@@ -206,6 +224,9 @@ class SpanStyle internal constructor(
      * @param background The background color for the text.
      * @param textDecoration The decorations to paint on the text (e.g., an underline).
      * @param shadow The shadow effect applied on the text.
+     * @param textDecorationColor The color used for text decorations such as underlines.
+     * @param textDecorationThickness The thickness used for text decorations such as underlines.
+     * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
      * @param platformStyle Platform specific [SpanStyle] parameters.
      * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke
      * around the edges.
@@ -228,8 +249,12 @@ class SpanStyle internal constructor(
 //        textGeometricTransform: TextGeometricTransform? = null,
 //        localeList: LocaleList? = null,
         background: Color = Color.Unspecified,
+        inlineBoxStyle: InlineBoxSpanStyle? = null,
         textDecoration: TextDecoration? = null,
         shadow: Shadow? = null,
+        textDecorationColor: Color = Color.Unspecified,
+        textDecorationThickness: TextUnit = TextUnit.Unspecified,
+        textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //        platformStyle: PlatformSpanStyle? = null,
 //        drawStyle: DrawStyle? = null
     ) : this(
@@ -245,8 +270,12 @@ class SpanStyle internal constructor(
 //        textGeometricTransform = textGeometricTransform,
 //        localeList = localeList,
         background = background,
+        inlineBoxStyle = inlineBoxStyle,
         textDecoration = textDecoration,
         shadow = shadow,
+        textDecorationColor = textDecorationColor,
+        textDecorationThickness = textDecorationThickness,
+        textDecorationOffset = textDecorationOffset,
 //        platformStyle = platformStyle,
 //        drawStyle = drawStyle
     )
@@ -294,8 +323,12 @@ class SpanStyle internal constructor(
 //            textGeometricTransform = other.textGeometricTransform,
 //            localeList = other.localeList,
             background = other.background,
+            inlineBoxStyle = other.inlineBoxStyle,
             textDecoration = other.textDecoration,
             shadow = other.shadow,
+            textDecorationColor = other.textDecorationColor,
+            textDecorationThickness = other.textDecorationThickness,
+            textDecorationOffset = other.textDecorationOffset,
 //            platformStyle = other.platformStyle,
 //            drawStyle = other.drawStyle
         )
@@ -320,8 +353,12 @@ class SpanStyle internal constructor(
 //        textGeometricTransform: TextGeometricTransform? = this.textGeometricTransform,
 //        localeList: LocaleList? = this.localeList,
         background: Color = this.background,
+        inlineBoxStyle: InlineBoxSpanStyle? = this.inlineBoxStyle,
         textDecoration: TextDecoration? = this.textDecoration,
         shadow: Shadow? = this.shadow,
+        textDecorationColor: Color = this.textDecorationColor,
+        textDecorationThickness: TextUnit = this.textDecorationThickness,
+        textDecorationOffset: TextUnit = this.textDecorationOffset,
 //        platformStyle: PlatformSpanStyle? = this.platformStyle,
 //        drawStyle: DrawStyle? = this.drawStyle
     ): SpanStyle {
@@ -342,8 +379,12 @@ class SpanStyle internal constructor(
 //            textGeometricTransform = textGeometricTransform,
 //            localeList = localeList,
             background = background,
+            inlineBoxStyle = inlineBoxStyle,
             textDecoration = textDecoration,
             shadow = shadow,
+            textDecorationColor = textDecorationColor,
+            textDecorationThickness = textDecorationThickness,
+            textDecorationOffset = textDecorationOffset,
 //            platformStyle = platformStyle,
 //            drawStyle = drawStyle
         )
@@ -363,8 +404,12 @@ class SpanStyle internal constructor(
 //        textGeometricTransform: TextGeometricTransform? = this.textGeometricTransform,
 //        localeList: LocaleList? = this.localeList,
         background: Color = this.background,
+        inlineBoxStyle: InlineBoxSpanStyle? = this.inlineBoxStyle,
         textDecoration: TextDecoration? = this.textDecoration,
         shadow: Shadow? = this.shadow,
+        textDecorationColor: Color = this.textDecorationColor,
+        textDecorationThickness: TextUnit = this.textDecorationThickness,
+        textDecorationOffset: TextUnit = this.textDecorationOffset,
 //        platformStyle: PlatformSpanStyle? = this.platformStyle,
 //        drawStyle: DrawStyle? = this.drawStyle
     ): SpanStyle {
@@ -381,8 +426,12 @@ class SpanStyle internal constructor(
 //            textGeometricTransform = textGeometricTransform,
 //            localeList = localeList,
             background = background,
+            inlineBoxStyle = inlineBoxStyle,
             textDecoration = textDecoration,
             shadow = shadow,
+            textDecorationColor = textDecorationColor,
+            textDecorationThickness = textDecorationThickness,
+            textDecorationOffset = textDecorationOffset,
 //            platformStyle = platformStyle,
 //            drawStyle = drawStyle
         )
@@ -408,6 +457,7 @@ class SpanStyle internal constructor(
 //        if (textGeometricTransform != other.textGeometricTransform) return false
 //        if (localeList != other.localeList) return false
         if (background != other.background) return false
+        if (inlineBoxStyle != other.inlineBoxStyle) return false
 //        if (platformStyle != other.platformStyle) return false
         return true
     }
@@ -415,6 +465,9 @@ class SpanStyle internal constructor(
     internal fun hasSameNonLayoutAttributes(other: SpanStyle): Boolean {
         if (textForegroundStyle != other.textForegroundStyle) return false
         if (textDecoration != other.textDecoration) return false
+        if (textDecorationColor != other.textDecorationColor) return false
+        if (textDecorationThickness != other.textDecorationThickness) return false
+        if (textDecorationOffset != other.textDecorationOffset) return false
         if (shadow != other.shadow) return false
 //        if (drawStyle != other.drawStyle) return false
         return true
@@ -435,7 +488,11 @@ class SpanStyle internal constructor(
 //        result = 31 * result + (textGeometricTransform?.hashCode() ?: 0)
 //        result = 31 * result + (localeList?.hashCode() ?: 0)
         result = 31 * result + background.hashCode()
+        result = 31 * result + (inlineBoxStyle?.hashCode() ?: 0)
         result = 31 * result + (textDecoration?.hashCode() ?: 0)
+        result = 31 * result + textDecorationColor.hashCode()
+        result = 31 * result + textDecorationThickness.hashCode()
+        result = 31 * result + textDecorationOffset.hashCode()
         result = 31 * result + (shadow?.hashCode() ?: 0)
 //        result = 31 * result + (platformStyle?.hashCode() ?: 0)
 //        result = 31 * result + (drawStyle?.hashCode() ?: 0)
@@ -454,6 +511,7 @@ class SpanStyle internal constructor(
 //        result = 31 * result + (textGeometricTransform?.hashCode() ?: 0)
 //        result = 31 * result + (localeList?.hashCode() ?: 0)
         result = 31 * result + background.hashCode()
+        result = 31 * result + (inlineBoxStyle?.hashCode() ?: 0)
 //        result = 31 * result + (platformStyle?.hashCode() ?: 0)
         return result
     }
@@ -477,7 +535,11 @@ class SpanStyle internal constructor(
 //            append("textGeometricTransform=$textGeometricTransform, ")
 //            append("localeList=$localeList, ")
             append("background=$background, ")
+            append("inlineBoxStyle=$inlineBoxStyle, ")
             append("textDecoration=$textDecoration, ")
+            append("textDecorationColor=$textDecorationColor, ")
+            append("textDecorationThickness=$textDecorationThickness, ")
+            append("textDecorationOffset=$textDecorationOffset, ")
             append("shadow=$shadow, ")
 //            append("platformStyle=$platformStyle, ")
 //            append("drawStyle=$drawStyle")
@@ -564,9 +626,25 @@ fun lerp(start: SpanStyle, stop: SpanStyle, fraction: Float): SpanStyle {
             stop.background,
             fraction
         ),
+        inlineBoxStyle = lerpDiscrete(start.inlineBoxStyle, stop.inlineBoxStyle, fraction),
         textDecoration = lerpDiscrete(
             start.textDecoration,
             stop.textDecoration,
+            fraction
+        ),
+        textDecorationColor = lerp(
+            start.textDecorationColor,
+            stop.textDecorationColor,
+            fraction
+        ),
+        textDecorationThickness = lerpTextUnitInheritable(
+            start.textDecorationThickness,
+            stop.textDecorationThickness,
+            fraction
+        ),
+        textDecorationOffset = lerpTextUnitInheritable(
+            start.textDecorationOffset,
+            stop.textDecorationOffset,
             fraction
         ),
         shadow = lerp(
@@ -613,7 +691,11 @@ internal fun resolveSpanStyleDefaults(style: SpanStyle) = SpanStyle(
 //    textGeometricTransform = style.textGeometricTransform ?: TextGeometricTransform.None,
 //    localeList = style.localeList ?: LocaleList.current,
     background = style.background.takeOrElse { DefaultBackgroundColor },
+    inlineBoxStyle = style.inlineBoxStyle,
     textDecoration = style.textDecoration ?: TextDecoration.None,
+    textDecorationColor = style.textDecorationColor,
+    textDecorationThickness = style.textDecorationThickness,
+    textDecorationOffset = style.textDecorationOffset,
     shadow = style.shadow ?: Shadow.None,
 //    platformStyle = style.platformStyle,
 //    drawStyle = style.drawStyle ?: Fill
@@ -634,8 +716,12 @@ internal fun SpanStyle.fastMerge(
 //    textGeometricTransform: TextGeometricTransform?,
 //    localeList: LocaleList?,
     background: Color,
+    inlineBoxStyle: InlineBoxSpanStyle?,
     textDecoration: TextDecoration?,
     shadow: Shadow?,
+    textDecorationColor: Color = Color.Unspecified,
+    textDecorationThickness: TextUnit = TextUnit.Unspecified,
+    textDecorationOffset: TextUnit = TextUnit.Unspecified,
 //    platformStyle: PlatformSpanStyle?,
 //    drawStyle: DrawStyle?
 ): SpanStyle {
@@ -661,6 +747,9 @@ internal fun SpanStyle.fastMerge(
         fontFamily != null && fontFamily !== this.fontFamily ||
         letterSpacing.isSpecified && letterSpacing != this.letterSpacing ||
         textDecoration != null && textDecoration != this.textDecoration ||
+        textDecorationColor.isSpecified && textDecorationColor != this.textDecorationColor ||
+        textDecorationThickness.isSpecified && textDecorationThickness != this.textDecorationThickness ||
+        textDecorationOffset.isSpecified && textDecorationOffset != this.textDecorationOffset ||
         // then compare the remaining params, for potential non-Text merges
         brush != textForegroundStyle.brush ||
         brush != null && alpha != this.textForegroundStyle.alpha ||
@@ -670,6 +759,7 @@ internal fun SpanStyle.fastMerge(
 //        textGeometricTransform != null && textGeometricTransform != this.textGeometricTransform ||
 //        localeList != null && localeList != this.localeList ||
         background.isSpecified && background != this.background ||
+        inlineBoxStyle != null && inlineBoxStyle != this.inlineBoxStyle ||
         shadow != null && shadow != this.shadow
 //            ||
 //        platformStyle != null && platformStyle != this.platformStyle ||
@@ -703,7 +793,19 @@ internal fun SpanStyle.fastMerge(
 //        textGeometricTransform = textGeometricTransform ?: this.textGeometricTransform,
 //        localeList = localeList ?: this.localeList,
         background = background.takeOrElse { this.background },
+        inlineBoxStyle = inlineBoxStyle ?: this.inlineBoxStyle,
         textDecoration = textDecoration ?: this.textDecoration,
+        textDecorationColor = textDecorationColor.takeOrElse { this.textDecorationColor },
+        textDecorationThickness = if (!textDecorationThickness.isUnspecified) {
+            textDecorationThickness
+        } else {
+            this.textDecorationThickness
+        },
+        textDecorationOffset = if (!textDecorationOffset.isUnspecified) {
+            textDecorationOffset
+        } else {
+            this.textDecorationOffset
+        },
         shadow = shadow ?: this.shadow,
 //        platformStyle = mergePlatformStyle(platformStyle),
 //        drawStyle = drawStyle ?: this.drawStyle

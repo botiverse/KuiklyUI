@@ -390,6 +390,21 @@ open class TextAttr : Attr() {
         return this
     }
 
+    open fun textDecorationColor(color: Color): TextAttr {
+        TextConst.TEXT_DECORATION_COLOR with color.toString()
+        return this
+    }
+
+    open fun textDecorationThickness(thickness: Float): TextAttr {
+        TextConst.TEXT_DECORATION_THICKNESS with thickness
+        return this
+    }
+
+    open fun textDecorationOffset(offset: Float): TextAttr {
+        TextConst.TEXT_DECORATION_OFFSET with offset
+        return this
+    }
+
     open fun textAlignCenter(): TextAttr {
         TextConst.TEXT_ALIGN with TextAlign.CENTER.value
         return this
@@ -538,6 +553,9 @@ object TextConst {
     const val FONT_FAMILY = "fontFamily"
     const val TEXT_OVERFLOW = "lineBreakMode"
     const val TEXT_DECORATION = "textDecoration"
+    const val TEXT_DECORATION_COLOR = "textDecorationColor"
+    const val TEXT_DECORATION_THICKNESS = "textDecorationThickness"
+    const val TEXT_DECORATION_OFFSET = "textDecorationOffset"
     const val TEXT_COLOR = "color"
     const val TINT_COLOR = "tintColor"
     const val LINES = "numberOfLines"
@@ -553,6 +571,18 @@ object TextConst {
     const val STROKE_WIDTH = "strokeWidth"
     const val TEXT_POST_PROCESSOR = "textPostProcessor"
     const val TEXT_USE_DP_FONT_SIZE_DIM = "useDpFontSizeDim"
+    const val SLOCK_INLINE_CODE = "slockInlineCode"
+    const val SLOCK_INLINE_CODE_TRAILING_MARGIN = "slockInlineCodeTrailingMargin"
+    const val INLINE_BOX_BACKGROUND_COLOR = "inlineBoxBackgroundColor"
+    const val INLINE_BOX_BORDER_COLOR = "inlineBoxBorderColor"
+    const val INLINE_BOX_BORDER_WIDTH = "inlineBoxBorderWidth"
+    const val INLINE_BOX_PADDING_START = "inlineBoxPaddingStart"
+    const val INLINE_BOX_PADDING_END = "inlineBoxPaddingEnd"
+    const val INLINE_BOX_PADDING_TOP = "inlineBoxPaddingTop"
+    const val INLINE_BOX_PADDING_BOTTOM = "inlineBoxPaddingBottom"
+    const val INLINE_BOX_MARGIN_START = "inlineBoxMarginStart"
+    const val INLINE_BOX_MARGIN_END = "inlineBoxMarginEnd"
+    const val INLINE_BOX_CORNER_RADIUS = "inlineBoxCornerRadius"
 
     const val SHADOW_METHOD_IS_LINE_BREAK_MARGIN = "isLineBreakMargin"
     const val PLACEHOLDER = "placeholder"

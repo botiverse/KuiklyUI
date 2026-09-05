@@ -63,6 +63,23 @@ typedef NS_ENUM(NSUInteger, KuiklyRenderNativeMethod) {
     KuiklyRenderNativeMethodCallTDFModuleMethod = 17,   /// "callTDFModuleMethod" 方法
 };
 
+NS_INLINE BOOL KRNativeMethodRequiresContextThread(KuiklyRenderNativeMethod method, NSArray *args) {
+    if (method == KuiklyRenderNativeMethodCallModuleMethod) {
+        id syncCall = args.count > 4 ? args[4] : nil;
+        return [syncCall isKindOfClass:[NSNumber class]] ? [syncCall boolValue] : NO;
+    }
+    return method == KuiklyRenderNativeMethodCalculateRenderViewSize ||
+           method == KuiklyRenderNativeMethodCreateShadow ||
+           method == KuiklyRenderNativeMethodRemoveShadow ||
+           method == KuiklyRenderNativeMethodSetShadowForView ||
+           method == KuiklyRenderNativeMethodSetShadowProp ||
+           method == KuiklyRenderNativeMethodSetTimeout ||
+           method == KuiklyRenderNativeMethodCallShadowMethod ||
+           method == KuiklyRenderNativeMethodFireFatalException ||
+           method == KuiklyRenderNativeMethodSyncFlushUI ||
+           method == KuiklyRenderNativeMethodCallTDFModuleMethod;
+}
+
 
 typedef id _Nullable (^KuiklyRenderNativeMethodCallback)(KuiklyRenderNativeMethod method, NSArray *args);
 

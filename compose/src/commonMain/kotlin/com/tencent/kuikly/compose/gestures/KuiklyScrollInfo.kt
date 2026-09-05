@@ -18,10 +18,12 @@ package com.tencent.kuikly.compose.gestures
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.tencent.kuikly.compose.coroutines.internal.KuiklyContextScheduler
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
 import com.tencent.kuikly.compose.ui.unit.IntOffset
 import com.tencent.kuikly.core.layout.Frame
+import com.tencent.kuikly.core.manager.BridgeManager
 import com.tencent.kuikly.core.pager.PageData
 import com.tencent.kuikly.core.views.ScrollerAttr
 import com.tencent.kuikly.core.views.ScrollerEvent
@@ -29,6 +31,75 @@ import com.tencent.kuikly.core.views.ScrollerView
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+
+internal class ScrollViewBindingGate<T : Any> {
+    private val binding = MutableStateFlow<T?>(null)
+
+    var current: T? = null
+        private set
+
+    fun update(value: T?) {
+        current = value
+        binding.value = value
+    }
+
+    suspend fun <R> withCurrentBinding(block: (T) -> R): R {
+        while (true) {
+            val candidate = binding.filterNotNull().first()
+            if (current === candidate) {
+                return block(candidate)
+            }
+        }
+    }
+}
+
+internal class DeferredScrollOffsetAlignmentCoordinator<T>(
+    private val pendingAlignment: () -> T?,
+    private val updatePendingAlignment: (T?) -> Unit
+) {
+    private var generation = 0L
+
+    fun replacePendingAlignment(
+        cancelPendingAlignment: (T) -> Unit,
+        launchAlignment: (DeferredScrollOffsetAlignmentRequest) -> T?
+    ) {
+        val request = DeferredScrollOffsetAlignmentRequest(++generation)
+        pendingAlignment()?.let(cancelPendingAlignment)
+        updatePendingAlignment(launchAlignment(request))
+    }
+
+    fun isCurrent(request: DeferredScrollOffsetAlignmentRequest): Boolean {
+        return request.generation == generation
+    }
+
+    fun cancelAndInvalidate(cancelPendingAlignment: (T) -> Unit) {
+        generation += 1
+        pendingAlignment()?.let(cancelPendingAlignment)
+        updatePendingAlignment(null)
+    }
+
+    fun retryAfterScrollEnd(scheduleAlignment: () -> Unit) {
+        scheduleAlignment()
+    }
+}
+
+internal fun <T> invalidateDeferredScrollOffsetAlignmentOwnersOnReuse(
+    oldCoordinator: DeferredScrollOffsetAlignmentCoordinator<T>?,
+    newCoordinator: DeferredScrollOffsetAlignmentCoordinator<T>,
+    cancelPendingAlignment: (T) -> Unit
+) {
+    oldCoordinator?.cancelAndInvalidate(cancelPendingAlignment)
+    if (newCoordinator !== oldCoordinator) {
+        newCoordinator.cancelAndInvalidate(cancelPendingAlignment)
+    }
+}
+
+internal class DeferredScrollOffsetAlignmentRequest internal constructor(
+    internal val generation: Long
+)
 
 /**
  * Scroll information management class, responsible for handling scroll-related state and calculations
@@ -40,10 +111,62 @@ class KuiklyScrollInfo {
         private const val DEFAULT_DENSITY = 3f
     }
 
+    private val scrollViewBinding =
+        ScrollViewBindingGate<ScrollerView<ScrollerAttr, ScrollerEvent>>()
+
     /**
      * Scroll offset that needs to be ignored
      */
     var ignoreScrollOffset: IntOffset? = null
+
+    internal fun consumeIgnoredScrollOffset(
+        offsetX: Float,
+        offsetY: Float,
+        epsilon: Double,
+    ): Boolean {
+        val ignoredOffset = ignoreScrollOffset ?: return false
+        val matched = kotlin.math.abs(ignoredOffset.x - offsetX) <= epsilon &&
+            kotlin.math.abs(ignoredOffset.y - offsetY) <= epsilon
+        ignoreScrollOffset = null
+        return matched
+    }
+
+    /**
+     * Disposition of a native scroll callback relative to a pending programmatic
+     * offset move ([ignoreScrollOffset]).
+     *
+     * A programmatic move ([applyOffsetDelta]) can land somewhere other than its
+     * recorded target: the native scroller clamps against its own (asynchronously
+     * updated) content size, or splits one move into several callbacks. Such an
+     * off-target callback is still an echo of our own move — never user input.
+     * Interpreting it as a user scroll dispatches a large phantom delta into
+     * compose; on a bottom-anchored list whose content size is still estimated
+     * this feeds the expand/align retry loop and serially composes every row up
+     * to the list start, blocking the Kotlin thread for seconds (task #318).
+     */
+    internal enum class NativeScrollEventDisposition {
+        /** Exact echo of the programmatic move: drop the event entirely. */
+        Consume,
+        /** Off-target echo of the programmatic move: adopt the reported offset
+         *  into bookkeeping, but never dispatch a compose scroll. */
+        SyncOnly,
+        /** Genuine scroll: dispatch to compose. */
+        Dispatch
+    }
+
+    internal fun resolveNativeScrollEvent(
+        offsetX: Float,
+        offsetY: Float,
+        epsilon: Double,
+    ): NativeScrollEventDisposition {
+        val hadPendingProgrammaticMove = ignoreScrollOffset != null
+        val matched = consumeIgnoredScrollOffset(offsetX, offsetY, epsilon)
+        return when {
+            matched -> NativeScrollEventDisposition.Consume
+            hadPendingProgrammaticMove && !isDragging -> NativeScrollEventDisposition.SyncOnly
+            else -> NativeScrollEventDisposition.Dispatch
+        }
+    }
 
     /**
      * Scroll view instance
@@ -51,10 +174,15 @@ class KuiklyScrollInfo {
     var scrollView: ScrollerView<ScrollerAttr, ScrollerEvent>? = null
         set(value) {
             field = value
+            scrollViewBinding.update(value)
             if (hasPullToRefresh && value != null) {
-                value.setHasPullToRefresh(true)
+                updatePullToRefreshOnScrollView(value, true)
             }
         }
+
+    internal suspend fun <R> withCurrentScrollViewBinding(
+        block: (ScrollerView<ScrollerAttr, ScrollerEvent>) -> R
+    ): R = scrollViewBinding.withCurrentBinding(block)
 
     /**
      * Scroll orientation
@@ -108,6 +236,12 @@ class KuiklyScrollInfo {
      */
     internal var appleScrollViewOffsetJob: Job? = null
 
+    internal val deferredScrollOffsetAlignmentCoordinator =
+        DeferredScrollOffsetAlignmentCoordinator(
+            pendingAlignment = { appleScrollViewOffsetJob },
+            updatePendingAlignment = { appleScrollViewOffsetJob = it }
+        )
+
     /**
      * Coroutine scope
      */
@@ -132,12 +266,32 @@ class KuiklyScrollInfo {
     var hasPullToRefresh: Boolean = false
         set(value) {
             field = value
-            if (value) {
-                scrollView?.setHasPullToRefresh(true)
-            } else {
-                scrollView?.setHasPullToRefresh(false)
+            scrollView?.let { updatePullToRefreshOnScrollView(it, value) }
+        }
+
+    private fun updatePullToRefreshOnScrollView(
+        targetScrollView: ScrollerView<ScrollerAttr, ScrollerEvent>,
+        enabled: Boolean
+    ) {
+        val pagerId = targetScrollView.pagerId.ifEmpty { BridgeManager.currentPageId }
+        fun applyIfCurrent() {
+            if (scrollView === targetScrollView && hasPullToRefresh == enabled) {
+                targetScrollView.setHasPullToRefresh(enabled)
             }
         }
+        if (KuiklyContextScheduler.isOnKuiklyThread(pagerId)) {
+            applyIfCurrent()
+            return
+        }
+        if (pagerId.isEmpty()) {
+            return
+        }
+        KuiklyContextScheduler.runOnKuiklyThread(pagerId) { cancel ->
+            if (!cancel) {
+                applyIfCurrent()
+            }
+        }
+    }
 
     /**
      * Extra top inset on the pull-to-refresh lazy item in pixels,
@@ -182,8 +336,7 @@ class KuiklyScrollInfo {
      */
     fun resetForNewScrollView() {
         // Cancel and clear any pending tasks
-        appleScrollViewOffsetJob?.cancel()
-        appleScrollViewOffsetJob = null
+        deferredScrollOffsetAlignmentCoordinator.cancelAndInvalidate { it.cancel() }
 
         // Reset basic offset and scroll state
         ignoreScrollOffset = null

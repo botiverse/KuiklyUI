@@ -6,23 +6,33 @@ plugins {
     signing
 }
 
+apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
+val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
+    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
+
 group = MavenConfig.GROUP
 version = Version.getCoreVersion()
+val kuiklyOhosOnly = providers.gradleProperty("kuiklyOhosOnly")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
+    .get()
 
 publishing {
     repositories {
-        val username = MavenConfig.getUsername(project)
-        val password = MavenConfig.getPassword(project)
-        if (username.isNotEmpty() && password.isNotEmpty()) {
-            maven {
-                credentials {
-                    setUsername(username)
-                    setPassword(password)
+        if (!raftPublicationMode) {
+            val username = MavenConfig.getUsername(project)
+            val password = MavenConfig.getPassword(project)
+            if (username.isNotEmpty() && password.isNotEmpty()) {
+                maven {
+                    credentials {
+                        setUsername(username)
+                        setPassword(password)
+                    }
+                    url = uri(MavenConfig.getRepoUrl(version as String))
                 }
-                url = uri(MavenConfig.getRepoUrl(version as String))
+            } else {
+                mavenLocal()
             }
-        } else {
-            mavenLocal()
         }
     }
 
@@ -48,29 +58,31 @@ kotlin {
     }
 
     ohosArm64()
-    android {
-        compilations.all {
-            kotlinOptions {
-                moduleName = "${project.group}.${project.name}"
+    if (!kuiklyOhosOnly) {
+        android {
+            compilations.all {
+                kotlinOptions {
+                    moduleName = "${project.group}.${project.name}"
+                }
             }
         }
-    }
 
-    iosArm64()
-    iosX64()
-    iosSimulatorArm64()
+        iosArm64()
+        iosX64()
+        iosSimulatorArm64()
 
-    js(IR) {
-        browser()
-    }
+        js(IR) {
+            browser()
+        }
 
-    cocoapods {
-        summary = "Some description for the Shared Module"
-        homepage = "Link to the Shared Module homepage"
-        ios.deploymentTarget = "14.1"
+        cocoapods {
+            summary = "Some description for the Shared Module"
+            homepage = "Link to the Shared Module homepage"
+            ios.deploymentTarget = "14.1"
 //        framework {
 //            baseName = "core-annotations"
 //        }
+        }
     }
 
     sourceSets {

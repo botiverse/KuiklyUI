@@ -233,7 +233,7 @@ void SetArkUIMargin(ArkUI_NodeHandle handle, float start, float top, float end, 
 
 void SetArkUIPadding(ArkUI_NodeHandle handle, float start, float top, float end, float bottom);
 
-void UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status);
+bool UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status);
 
 void UpdateInputNodeFocusable(ArkUI_NodeHandle node, int32_t enable);
 

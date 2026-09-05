@@ -22,6 +22,7 @@ import androidx.compose.runtime.collection.mutableVectorOf
 import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.Modifier
 import com.tencent.kuikly.compose.ui.layout.LayoutCoordinates
+import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy
 import com.tencent.kuikly.compose.ui.node.Nodes
 import com.tencent.kuikly.compose.ui.node.dispatchForKind
 import com.tencent.kuikly.compose.ui.node.layoutCoordinates
@@ -99,7 +100,7 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
     fun dispatchChanges(
         internalPointerEvent: InternalPointerEvent,
         isInBounds: Boolean = true
-    ): Boolean {
+    ): HitPathDispatchResult {
         val changed = root.buildCache(
             internalPointerEvent.changes,
             rootCoordinates,
@@ -108,8 +109,11 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
         )
         if (!changed) {
             root.cleanUpHover()
-            return false
+            return HitPathDispatchResult(dispatched = false, nativeDispatchCaptured = false)
         }
+        val nativeDispatchCaptured = root.capturesNativeDispatch()
+        // NOTE: capture resolution is branch-scoped (see resolveNativeDispatchPolicy):
+        // a RELEASE node only neutralizes CAPTURE ancestors on its own hit branch.
         var dispatchHit = root.dispatchMainEventPass(
             internalPointerEvent.changes,
             rootCoordinates,
@@ -118,7 +122,10 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
         )
         dispatchHit = root.dispatchFinalEventPass(internalPointerEvent) || dispatchHit
 
-        return dispatchHit
+        return HitPathDispatchResult(
+            dispatched = dispatchHit,
+            nativeDispatchCaptured = nativeDispatchCaptured
+        )
     }
 
     /**
@@ -143,6 +150,11 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
     }
 }
 
+internal data class HitPathDispatchResult(
+    val dispatched: Boolean,
+    val nativeDispatchCaptured: Boolean
+)
+
 /**
  * Represents a parent node in the [HitPathTracker]'s tree.  This primarily exists because the tree
  * necessarily has a root that is very similar to all other nodes, except that it does not track any
@@ -150,7 +162,7 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
  */
 /*@VisibleForTesting*/
 @OptIn(InternalCoreApi::class, ExperimentalComposeUiApi::class)
-internal open class NodeParent {
+internal open class NodeParent : NativeDispatchPolicyTreeNode {
     val children: MutableVector<Node> = mutableVectorOf()
 
     open fun buildCache(
@@ -215,6 +227,22 @@ internal open class NodeParent {
         cleanUpHits(internalPointerEvent)
         cleanUpHover()
         return dispatched
+    }
+
+    fun capturesNativeDispatch(): Boolean =
+        resolveNativeDispatchPolicyTree(this, NativeDispatchPolicy.INHERIT) ==
+            NativeDispatchPolicy.CAPTURE
+
+    /**
+     * The root has no modifiers and therefore no stance of its own; branch
+     * resolution semantics live in [resolveNativeDispatchPolicyTree], which
+     * this tree shares with the policy-tree tests.
+     */
+    override val ownNativeDispatchStance: NativeDispatchPolicy
+        get() = NativeDispatchPolicy.INHERIT
+
+    override fun forEachPolicyChild(action: (NativeDispatchPolicyTreeNode) -> Unit) {
+        children.forEach(action)
     }
 
     /**
@@ -360,6 +388,24 @@ internal class Node(val modifierNode: Modifier.Node) : NodeParent() {
         clearCache()
         return result
     }
+
+    /**
+     * This node's own stance from its pointer-input modifiers; branch
+     * resolution (top-down inherited stance, deepest-wins per path,
+     * any-capture-wins across siblings) is the shared
+     * resolveNativeDispatchPolicyTree traversal.
+     */
+    override val ownNativeDispatchStance: NativeDispatchPolicy
+        get() {
+            if (relevantChanges.isEmpty() || !modifierNode.isAttached) {
+                return NativeDispatchPolicy.INHERIT
+            }
+            var own = NativeDispatchPolicy.INHERIT
+            modifierNode.dispatchForKind(Nodes.PointerInput) {
+                own = combineSameNodeNativeDispatchPolicies(own, it.resolvedNativeDispatchPolicy())
+            }
+            return own
+        }
 
     /**
      * Calculates cached properties that will be stored in this [Node] for the duration of both

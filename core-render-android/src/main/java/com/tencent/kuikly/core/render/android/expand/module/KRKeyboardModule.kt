@@ -17,6 +17,7 @@ package com.tencent.kuikly.core.render.android.expand.module
 
 import android.app.Activity
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.graphics.Rect
 import android.os.Build
 import android.view.Gravity
@@ -27,10 +28,11 @@ import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.PopupWindow
-import java.util.concurrent.CopyOnWriteArrayList
 import com.tencent.kuikly.core.render.android.adapter.KuiklyRenderLog
 import com.tencent.kuikly.core.render.android.css.ktx.isAfterAndroid11
+import com.tencent.kuikly.core.render.android.css.ktx.isMainThread
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderBaseModule
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 用于获取/监听键盘的相关状态
@@ -78,6 +80,109 @@ class KRKeyboardModule : KuiklyRenderBaseModule() {
 }
 
 /**
+ * Keeps the latest window-level IME height independently from any individual text editor.
+ *
+ * Text editors can be replaced while the keyboard stays visible (for example, after a send clears
+ * and retires the active editor session). A replacement listener must first receive the current
+ * height; otherwise its local initial value is also zero and the next visible -> hidden transition
+ * is incorrectly suppressed as a duplicate zero.
+ *
+ * Registration, removal, replay and transition callbacks are serialized under [dispatchLock] so a
+ * replay cannot arrive after a newer transition. All registry entry points are main-thread-only;
+ * [verifyKeyboardHeightRegistryMainThread] makes that ordering premise executable instead of relying
+ * on callback comments.
+ */
+internal class KeyboardHeightListenerRegistry(
+    private val failFastOnThreadViolation: Boolean,
+    private val isOnMainThread: () -> Boolean = ::isMainThread,
+    private val reportThreadViolation: (String) -> Unit = { message ->
+        KuiklyRenderLog.e(KRKeyboardModule.MODULE_NAME, message)
+    }
+) {
+    private val listeners = CopyOnWriteArrayList<KeyboardStatusListener>()
+    private val dispatchLock = Any()
+    private var currentHeight = 0
+
+    fun addListener(listener: KeyboardStatusListener) {
+        verifyMainThread("addListener")
+        synchronized(dispatchLock) {
+            listeners.add(listener)
+            listener.onHeightChanged(currentHeight)
+        }
+    }
+
+    fun removeListener(listener: KeyboardStatusListener) {
+        verifyMainThread("removeListener")
+        synchronized(dispatchLock) {
+            listeners.remove(listener)
+        }
+    }
+
+    fun dispatchHeight(height: Int) {
+        verifyMainThread("dispatchHeight")
+        synchronized(dispatchLock) {
+            if (height == currentHeight) return
+            currentHeight = height
+            for (listener in listeners) {
+                listener.onHeightChanged(height)
+            }
+        }
+    }
+
+    fun clear() {
+        verifyMainThread("clear")
+        synchronized(dispatchLock) {
+            listeners.clear()
+            currentHeight = 0
+        }
+    }
+
+    private fun verifyMainThread(operation: String) {
+        verifyKeyboardHeightRegistryMainThread(
+            operation = operation,
+            isOnMainThread = isOnMainThread(),
+            failFast = failFastOnThreadViolation,
+            reportViolation = reportThreadViolation
+        )
+    }
+}
+
+internal fun verifyKeyboardHeightRegistryMainThread(
+    operation: String,
+    isOnMainThread: Boolean,
+    failFast: Boolean,
+    reportViolation: (String) -> Unit
+) {
+    if (isOnMainThread) return
+
+    val message =
+        "KeyboardHeightListenerRegistry.$operation must run on the Android main thread; " +
+            "actual=${Thread.currentThread().name}"
+    if (failFast) {
+        throw IllegalStateException(message)
+    }
+    reportViolation(message)
+}
+
+/**
+ * Deduplicates keyboard heights within one editor listener lifetime.
+ *
+ * The first value is always accepted, including zero. A replacement editor can be registered after
+ * the watcher has already observed a visible -> hidden transition while no listener was attached;
+ * in that ordering the registry replays zero, and that replay must still retire the page's stale
+ * non-zero inset.
+ */
+internal class KeyboardHeightDispatchGate {
+    private var lastHeight: Int? = null
+
+    fun accept(height: Int): Boolean {
+        if (lastHeight == height) return false
+        lastHeight = height
+        return true
+    }
+}
+
+/**
  * Android 11 以下键盘状态监听，通过往 Activity 添加一个 popupView 监听键盘状态变化
  */
 class KeyboardStatusWatcher(private val activity: Activity) : PopupWindow(activity),
@@ -95,7 +200,10 @@ class KeyboardStatusWatcher(private val activity: Activity) : PopupWindow(activi
     private var lastVisibleHeight = -1
     private var lastVisibleBottom = -1
     private var lastScreenHeight = -1
-    private val listeners = CopyOnWriteArrayList<KeyboardStatusListener>()
+    private val listenerRegistry =
+        KeyboardHeightListenerRegistry(
+            failFastOnThreadViolation = activity.isDebuggableApplication()
+        )
 
     init {
         contentView = popupView
@@ -175,17 +283,15 @@ class KeyboardStatusWatcher(private val activity: Activity) : PopupWindow(activi
     }
 
     fun addListener(listener: KeyboardStatusListener) {
-        listeners.add(listener)
+        listenerRegistry.addListener(listener)
     }
 
     fun removeListener(listener: KeyboardStatusListener) {
-        listeners.remove(listener)
+        listenerRegistry.removeListener(listener)
     }
 
     private fun notifyKeyboardHeightChanged(height: Int) {
-        for (listener in listeners) {
-            listener.onHeightChanged(height)
-        }
+        listenerRegistry.dispatchHeight(height)
     }
 
     fun destroy() {
@@ -194,7 +300,7 @@ class KeyboardStatusWatcher(private val activity: Activity) : PopupWindow(activi
             dismiss()
         }
         popupView.viewTreeObserver.removeOnGlobalLayoutListener(this)
-        listeners.clear()
+        listenerRegistry.clear()
     }
 
 }
@@ -204,8 +310,10 @@ class KeyboardStatusWatcher(private val activity: Activity) : PopupWindow(activi
  */
 class Android11PlusKeyboardWatcher(private val activity: Activity) : ViewTreeObserver.OnGlobalLayoutListener {
     
-    private var lastKeyboardHeight = 0
-    private val listeners = CopyOnWriteArrayList<KeyboardStatusListener>()
+    private val listenerRegistry =
+        KeyboardHeightListenerRegistry(
+            failFastOnThreadViolation = activity.isDebuggableApplication()
+        )
 
     init {
         val parentView = activity.findViewById<View>(android.R.id.content)
@@ -226,30 +334,21 @@ class Android11PlusKeyboardWatcher(private val activity: Activity) : ViewTreeObs
             0
         }
 
-        if (newKeyboardHeight != lastKeyboardHeight) {
-            notifyKeyboardHeightChanged(newKeyboardHeight)
-            lastKeyboardHeight = newKeyboardHeight
-        }
+        listenerRegistry.dispatchHeight(newKeyboardHeight)
     }
 
     fun addListener(listener: KeyboardStatusListener) {
-        listeners.add(listener)
+        listenerRegistry.addListener(listener)
     }
 
     fun removeListener(listener: KeyboardStatusListener) {
-        listeners.remove(listener)
-    }
-
-    private fun notifyKeyboardHeightChanged(height: Int) {
-        for (listener in listeners) {
-            listener.onHeightChanged(height)
-        }
+        listenerRegistry.removeListener(listener)
     }
 
     fun destroy() {
         val parentView = activity.findViewById<View>(android.R.id.content)
         parentView?.viewTreeObserver?.removeOnGlobalLayoutListener(this)
-        listeners.clear()
+        listenerRegistry.clear()
     }
 }
 
@@ -259,3 +358,6 @@ class Android11PlusKeyboardWatcher(private val activity: Activity) : ViewTreeObs
 interface KeyboardStatusListener {
     fun onHeightChanged(height: Int)
 }
+
+private fun Context.isDebuggableApplication(): Boolean =
+    applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0

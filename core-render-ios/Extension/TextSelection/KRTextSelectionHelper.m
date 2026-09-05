@@ -20,6 +20,7 @@
 #import "KRTextMagnifierView.h"
 #import "KRScrollView.h"
 #import "KRLogModule.h"
+#import "KuiklyRenderBridge.h"
 
 #define KR_ANCHOR_TAG_LEFT 1001
 #define KR_ANCHOR_TAG_RIGHT 1002
@@ -696,6 +697,47 @@ static const CGFloat kMagnifierVerticalOffset = 60.0;
 
 #pragma mark - Public Methods
 
+- (NSString *)kr_restoredTextForLabel:(KRLabel *)label range:(NSRange)range {
+    NSTextStorage *textStorage = label.textRender.textStorage;
+    if (!textStorage || range.location == NSNotFound || NSMaxRange(range) > textStorage.length) {
+        return @"";
+    }
+    NSMutableString *result = [NSMutableString string];
+    __block NSUInteger cursor = range.location;
+    [textStorage enumerateAttribute:NSAttachmentAttributeName
+                             inRange:range
+                             options:0
+                          usingBlock:^(id value, NSRange attachmentRange, BOOL *stop) {
+        if (attachmentRange.location > cursor) {
+            [result appendString:[textStorage.string substringWithRange:NSMakeRange(cursor, attachmentRange.location - cursor)]];
+        }
+        if ([value respondsToSelector:@selector(kr_originlTextBeforeTextAttachment)]) {
+            id<KRTextAttachmentStringProtocol> attachment = (id<KRTextAttachmentStringProtocol>)value;
+            [result appendString:[attachment kr_originlTextBeforeTextAttachment] ?: @""];
+        } else {
+            [result appendString:[textStorage.string substringWithRange:attachmentRange]];
+        }
+        cursor = NSMaxRange(attachmentRange);
+    }];
+    if (cursor < NSMaxRange(range)) {
+        [result appendString:[textStorage.string substringWithRange:NSMakeRange(cursor, NSMaxRange(range) - cursor)]];
+    }
+    return result;
+}
+
+- (NSString *)kr_restoredTextFromIndex:(NSUInteger)index inLabel:(KRLabel *)label {
+    NSUInteger length = label.textRender.textStorage.length;
+    if (index >= length) {
+        return @"";
+    }
+    return [self kr_restoredTextForLabel:label range:NSMakeRange(index, length - index)];
+}
+
+- (NSString *)kr_restoredTextToIndex:(NSUInteger)index inLabel:(KRLabel *)label {
+    NSUInteger length = label.textRender.textStorage.length;
+    return [self kr_restoredTextForLabel:label range:NSMakeRange(0, MIN(index, length))];
+}
+
 - (NSArray<NSString *> *)getSelectedTexts {
     if (!self.startLabel || !self.endLabel || self.startIndex < 0 || self.endIndex < 0) {
         return @[];
@@ -707,32 +749,28 @@ static const CGFloat kMagnifierVerticalOffset = 60.0;
     for (KRLabel *label in self.labels) {
         if (label == self.startLabel && label == self.endLabel) {
             // Single label selection
-            NSString *text = label.textRender.textStorage.string;
             NSRange range = NSMakeRange(self.startIndex, self.endIndex - self.startIndex);
-            if (range.location + range.length <= text.length) {
-                [texts addObject:[text substringWithRange:range]];
+            if (range.location + range.length <= label.textRender.textStorage.length) {
+                [texts addObject:[self kr_restoredTextForLabel:label range:range]];
             }
             break;
         } else if (label == self.startLabel) {
             // Start of multi-label selection
-            NSString *text = label.textRender.textStorage.string;
-            if (self.startIndex < text.length) {
-                [texts addObject:[text substringFromIndex:self.startIndex]];
+            if (self.startIndex < label.textRender.textStorage.length) {
+                [texts addObject:[self kr_restoredTextFromIndex:self.startIndex inLabel:label]];
             }
             collecting = YES;
         } else if (label == self.endLabel) {
             // End of multi-label selection
-            NSString *text = label.textRender.textStorage.string;
-            if (self.endIndex <= text.length) {
-                [texts addObject:[text substringToIndex:self.endIndex]];
+            if (self.endIndex <= label.textRender.textStorage.length) {
+                [texts addObject:[self kr_restoredTextToIndex:self.endIndex inLabel:label]];
             }
             collecting = NO;
             break;
         } else if (collecting) {
             // Middle labels - select all text
-            NSString *text = label.textRender.textStorage.string;
-            if (text.length > 0) {
-                [texts addObject:text];
+            if (label.textRender.textStorage.length > 0) {
+                [texts addObject:[self kr_restoredTextForLabel:label range:NSMakeRange(0, label.textRender.textStorage.length)]];
             }
         }
     }
@@ -756,15 +794,14 @@ static const CGFloat kMagnifierVerticalOffset = 60.0;
     // Add previous label's text if exists
     if (startLabelIndex > 0) {
         KRLabel *previousLabel = self.labels[startLabelIndex - 1];
-        NSString *previousText = previousLabel.textRender.textStorage.string;
+        NSString *previousText = [self kr_restoredTextForLabel:previousLabel range:NSMakeRange(0, previousLabel.textRender.textStorage.length)];
         [preContent addObject:previousText ?: @""];
     }
     
     // Add text before selection in start label
     // According to requirement b): if selection starts at index 0 (covers from beginning), this should be ""
-    NSString *startLabelText = self.startLabel.textRender.textStorage.string;
-    if (self.startIndex > 0 && self.startIndex <= startLabelText.length) {
-        [preContent addObject:[startLabelText substringToIndex:self.startIndex]];
+    if (self.startIndex > 0 && self.startIndex <= self.startLabel.textRender.textStorage.length) {
+        [preContent addObject:[self kr_restoredTextToIndex:self.startIndex inLabel:self.startLabel]];
     } else {
         // Selection starts at beginning, so preContent's last element is ""
         [preContent addObject:@""];
@@ -788,9 +825,8 @@ static const CGFloat kMagnifierVerticalOffset = 60.0;
     
     // Add text after selection in end label
     // According to requirement b): if selection ends at end of text (covers to end), this should be ""
-    NSString *endLabelText = self.endLabel.textRender.textStorage.string;
-    if (self.endIndex < endLabelText.length) {
-        [postContent addObject:[endLabelText substringFromIndex:self.endIndex]];
+    if (self.endIndex < self.endLabel.textRender.textStorage.length) {
+        [postContent addObject:[self kr_restoredTextFromIndex:self.endIndex inLabel:self.endLabel]];
     } else {
         // Selection ends at end, so postContent's first element is ""
         [postContent addObject:@""];
@@ -799,7 +835,7 @@ static const CGFloat kMagnifierVerticalOffset = 60.0;
     // Add next label's text if exists
     if (endLabelIndex < self.labels.count - 1) {
         KRLabel *nextLabel = self.labels[endLabelIndex + 1];
-        NSString *nextText = nextLabel.textRender.textStorage.string;
+        NSString *nextText = [self kr_restoredTextForLabel:nextLabel range:NSMakeRange(0, nextLabel.textRender.textStorage.length)];
         [postContent addObject:nextText ?: @""];
     }
     
@@ -1001,4 +1037,3 @@ static const CGFloat kMagnifierVerticalOffset = 60.0;
 }
 
 @end
-

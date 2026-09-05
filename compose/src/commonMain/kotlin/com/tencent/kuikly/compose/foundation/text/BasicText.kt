@@ -194,7 +194,7 @@ private fun _BasicText(
     color: ColorProducer? = null
 ) {
     val inText = annoText ?: AnnotatedString(text ?: "")
-    val hasInlineContent = inlineContent.isNotEmpty()
+    val hasInlineContent = inlineContent.isNotEmpty() && inText.hasInlineContent()
 
     if (hasInlineContent) {
         LayoutWithLinksAndInlineContent(
@@ -257,8 +257,10 @@ private fun LayoutWithLinksAndInlineContent(
                 softWrap = softWrap,
                 maxLines = maxLines,
                 onTextLayout = { result ->
-                    // 获取 placeholder 的位置信息
-                    measuredPlaceholderPositions.value = result.placeholderRects
+                    val placeholderRects = result.placeholderRects
+                    if (measuredPlaceholderPositions.value != placeholderRects) {
+                        measuredPlaceholderPositions.value = placeholderRects
+                    }
                     onTextLayout?.invoke(result)
                 },
                 inlineContent = inlineContent,

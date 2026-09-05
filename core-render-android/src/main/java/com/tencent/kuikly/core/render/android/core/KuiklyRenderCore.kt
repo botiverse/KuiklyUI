@@ -29,6 +29,7 @@ import com.tencent.kuikly.core.render.android.context.KuiklyRenderNativeMethodCa
 import com.tencent.kuikly.core.render.android.context.IKuiklyRenderContextHandler
 import com.tencent.kuikly.core.render.android.context.KuiklyRenderNativeMethod
 import com.tencent.kuikly.core.render.android.context.KuiklyRenderJvmContextHandler
+import com.tencent.kuikly.core.render.android.context.kuiklyNativeMethodRequiresContextThread
 import com.tencent.kuikly.core.render.android.context.nativeMethodCallCounts
 import com.tencent.kuikly.core.render.android.css.ktx.fifthArg
 import com.tencent.kuikly.core.render.android.css.ktx.fourthArg
@@ -49,7 +50,6 @@ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreTask
 import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreUIScheduler
 import com.tencent.tdf.module.TDFBaseModule
 import org.json.JSONObject
-import java.util.Locale
 
 class KuiklyRenderCore(
     private var contextHandler: IKuiklyRenderContextHandler? = null
@@ -437,14 +437,7 @@ class KuiklyRenderCore(
                 args.fourthArg()
             )
         )
-        return if (size == null) {
-            "0|0"
-        } else {
-            // %.2f 会四舍五入，第三位小数 <5 时会被舍去（如 10.999 -> 10.99），
-            // 导致回传尺寸比真实值偏小，可能引发布局截断。这里给宽高各加 0.005 再格式化，
-            // 整体抬高半个最小精度，使回传尺寸倾向于向上取整，避免变小。
-            String.format(Locale.ENGLISH, "%.2f|%.2f", size.width + 0.005f, size.height + 0.005f)
-        }
+        return formatLayoutSizeForReport(size?.width, size?.height)
     }
 
     private fun callViewMethod(method: KuiklyRenderNativeMethod, args: List<Any?>): Any? {
@@ -611,25 +604,7 @@ class KuiklyRenderCore(
     }
 
     private fun isSyncMethodCall(method: KuiklyRenderNativeMethod, args: List<Any?>): Boolean {
-        if (method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallModuleMethod ||
-            method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod
-        ) {
-            val fifthArg = if (args.size >= IKuiklyRenderContextHandler.CALL_ARGS_COUNT) {
-                args[KRExtConst.SIXTH_ARG_INDEX] as? Int ?: KRExtConst.FIRST_ARG_INDEX
-            } else {
-                KRExtConst.FIRST_ARG_INDEX
-            }
-            return fifthArg == SYNC_CALL_TYPE
-        }
-
-        return method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCalculateRenderViewSize ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCreateShadow ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodRemoveShadow ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowForView ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowProp ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetTimeout ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallShadowMethod ||
-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSyncFlushUI
+        return kuiklyNativeMethodRequiresContextThread(method, args)
     }
 
     /**
@@ -666,7 +641,6 @@ class KuiklyRenderCore(
 
     companion object {
         private var instanceIdProducer = 0L
-        private const val SYNC_CALL_TYPE = 1
         private const val LAYOUT_VIEW_MAX_LOG_COUNT = 10
     }
 

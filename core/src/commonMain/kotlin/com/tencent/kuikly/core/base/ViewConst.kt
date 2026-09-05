@@ -43,6 +43,7 @@ object ViewConst {
     const val TYPE_TEXT_FIELD = "KRTextFieldView"
     const val TYPE_MASK = "KRMaskView"
     const val TYPE_TEXT_AREA = "KRTextAreaView"
+    const val TYPE_SELECTABLE_TEXT = "KRSelectableTextView"
     const val TYPE_SCROLL_CONTENT_VIEW = "KRScrollContentView"
     const val TYPE_BLUR_VIEW = "KRBlurView"
     

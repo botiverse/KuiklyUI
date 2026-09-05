@@ -16,6 +16,8 @@
 package com.tencent.kuikly.compose.profiler
 
 import com.tencent.kuikly.compose.material3.internal.identityHashCode
+import com.tencent.kuikly.compose.ui.createSynchronizedObject
+import com.tencent.kuikly.compose.ui.synchronized
 
 /**
  * State 身份注册表。
@@ -24,9 +26,14 @@ import com.tencent.kuikly.compose.material3.internal.identityHashCode
  * - 上一次已知的 value（prevValue），用于输出 "prev=x, now=y" 格式
  * - 读取该 State 的 Composable 名称集合（readers）
  *
- * 本类非线程安全，由 [RecompositionTracker] 负责同步。
+ * 线程安全：所有公共方法内部加锁（[lock]）。调用方包括 Kuikly context 线程
+ * （traceEventEnd 精确路径）与 Snapshot apply 线程（apply observer），
+ * 此前依赖 RecompositionTracker 同步但并未实现，导致 formatState 迭代 readers
+ * 时并发修改 LinkedHashMap 抛 CME（device 实证）。
  */
 internal class StateIdentityRegistry {
+
+    private val lock = createSynchronizedObject()
 
     /** identity hash → 上次 apply 时记录的 value 字符串（作为下次的 prev） */
     private val identityToPrevValue = mutableMapOf<Int, String?>()
@@ -42,7 +49,9 @@ internal class StateIdentityRegistry {
      */
     fun updateLastSeenValue(state: Any) {
         val hash = identityHashCode(state)
-        identityToPrevValue[hash] = extractValue(state.toString())
+        synchronized(lock) {
+            identityToPrevValue[hash] = extractValue(state.toString())
+        }
     }
 
     /**
@@ -53,7 +62,9 @@ internal class StateIdentityRegistry {
      */
     fun recordReader(state: Any, composableName: String) {
         val hash = identityHashCode(state)
-        identityToReaders.getOrPut(hash) { mutableSetOf() }.add(composableName)
+        synchronized(lock) {
+            identityToReaders.getOrPut(hash) { mutableSetOf() }.add(composableName)
+        }
     }
 
     /**
@@ -69,9 +80,11 @@ internal class StateIdentityRegistry {
      */
     fun formatState(state: Any): String {
         val hash = identityHashCode(state)
-        val prevValue = identityToPrevValue[hash]
+        // 锁内取快照，锁外格式化（避免迭代 readers 时被并发修改）
+        val (prevValue, readers) = synchronized(lock) {
+            (identityToPrevValue[hash]) to (identityToReaders[hash]?.toSet())
+        }
         val nowValue = extractValue(state.toString())
-        val readers = identityToReaders[hash]
 
         return buildString {
             append("State(")
@@ -100,8 +113,9 @@ internal class StateIdentityRegistry {
      */
     fun formatStateFromCache(state: Any, stateChangeCache: Map<Int, Pair<String?, String?>>): String {
         val hash = identityHashCode(state)
-        val readers = identityToReaders[hash]
-        val cached = stateChangeCache[hash]
+        val (readers, cached) = synchronized(lock) {
+            (identityToReaders[hash]?.toSet()) to (stateChangeCache[hash])
+        }
 
         return buildString {
             append("State(")
@@ -130,8 +144,10 @@ internal class StateIdentityRegistry {
      * 清除所有注册数据。在 profiler reset 时调用。
      */
     fun clear() {
-        identityToPrevValue.clear()
-        identityToReaders.clear()
+        synchronized(lock) {
+            identityToPrevValue.clear()
+            identityToReaders.clear()
+        }
     }
 
     /**

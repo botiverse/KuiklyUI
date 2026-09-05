@@ -270,7 +270,7 @@ KuiklyProcessor.autoUpdateRootViewSizeOnResize = true
 > 2. 首次 `onAttach` 传入的 `size` 仍然是初始尺寸，自动转发器会以此为 baseline，只在**尺寸真的变化**后才第一次触发事件，不会引起首屏抖动。
 > 3. 开启自动模式后，移动端也会跟随 `resize` 重排。iOS/Android 上软键盘弹起会缩小 `window.innerHeight`，可能引起不必要的布局跳变；如果只想响应"横竖屏切换"而不想响应软键盘，建议关掉自动模式、走方式 A 自行判断后再调用 `updateRootViewSize`。
 
-## 多模块工程下 UMD 全局命名空间被覆盖问题
+ ## 多模块工程下 UMD 全局命名空间被覆盖问题
 
 ### 现象
 
