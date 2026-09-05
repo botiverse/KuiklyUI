@@ -95,7 +95,7 @@ env:
   PUBLICATION_SOURCE_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.event.pull_request.head.sha || github.sha }}
   PUBLICATION_TAG_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_ref || '' }}
   RAFT_REQUIRE_PUBLIC_PREDECESSORS: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && 'true' || 'false' }}
-  RELEASE_SET: 2.24.0-raft.1
+  RELEASE_SET: 2.24.0-raft.2
 
 jobs:
   contract:
