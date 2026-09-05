@@ -39,7 +39,7 @@ def frozen_source() -> dict[str, object]:
         "commit": SOURCE_SHA,
         "tree": SOURCE_TREE,
         "tag": {
-            "ref": "refs/tags/kuikly-v2.24.0-raft.1",
+            "ref": "refs/tags/kuikly-v2.24.0-raft.2",
             "object": None,
             "commit": SOURCE_SHA,
             "state": "frozen",
@@ -247,7 +247,7 @@ def fixture_staging_specs(staging: Path) -> list[str]:
 def write_toolchains(
     path: Path,
     *,
-    tag_ref: str | None = "refs/tags/kuikly-v2.24.0-raft.1",
+    tag_ref: str | None = "refs/tags/kuikly-v2.24.0-raft.2",
 ) -> None:
     path.write_bytes(contract.json_bytes({
         "schema": "kuikly-toolchains/v1",
@@ -267,7 +267,7 @@ def write_producer_toolchain(
     producer: str,
     *,
     source_sha: str = SOURCE_SHA,
-    tag_ref: str | None = "refs/tags/kuikly-v2.24.0-raft.1",
+    tag_ref: str | None = "refs/tags/kuikly-v2.24.0-raft.2",
 ) -> None:
     path.write_bytes(contract.json_bytes({
         "schema": "kuikly-producer-toolchain/v1",
@@ -291,7 +291,7 @@ def assemble_fixture(root: Path) -> tuple[dict[str, object], Path, dict[str, byt
         manifest, bundle = contract.assemble(
             root,
             fixture_staging_specs(staging),
-            "refs/tags/kuikly-v2.24.0-raft.1",
+            "refs/tags/kuikly-v2.24.0-raft.2",
             False,
             None,
             toolchains,
@@ -377,7 +377,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual([], success["externalUnresolvedCoordinates"])
 
         owner_log = """[INFO] BUILD FAILURE
-[ERROR] The following artifact could not be resolved: com.tencent.kuikly-open:core-android:aar:2.24.0-raft.1-2.1.21: Could not find artifact com.tencent.kuikly-open:core-android:aar:2.24.0-raft.1-2.1.21 -> [Help 1]
+[ERROR] The following artifact could not be resolved: com.tencent.kuikly-open:core-android:aar:2.24.0-raft.2-2.1.21: Could not find artifact com.tencent.kuikly-open:core-android:aar:2.24.0-raft.2-2.1.21 -> [Help 1]
 """
         with self.assertRaisesRegex(contract.ContractError, "unresolved owner-group"):
             contract.classify_maven_owner_boundary(1, owner_log)
@@ -842,14 +842,14 @@ class ContractTests(unittest.TestCase):
             1,
             consumer.count(
                 '            it.startsWith("com.tencent.kuikly-open\\tcore-android\\t'
-                '2.24.0-raft.1-2.1.21\\taar\\t")'
+                '2.24.0-raft.2-2.1.21\\taar\\t")'
             ),
         )
         self.assertEqual(
             1,
             consumer.count(
                 '            it.startsWith("com.tencent.kuikly-open\\tcore-annotations-android\\t'
-                '2.24.0-raft.1-2.1.21\\taar\\t")'
+                '2.24.0-raft.2-2.1.21\\taar\\t")'
             ),
         )
         self.assertIn("        require(records.any {", consumer)
@@ -1609,7 +1609,7 @@ class ContractTests(unittest.TestCase):
                 drift_manifest, drift_bundle = contract.assemble(
                     root,
                     staging_specs,
-                    "refs/tags/kuikly-v2.24.0-raft.1",
+                    "refs/tags/kuikly-v2.24.0-raft.2",
                     False,
                     None,
                     root / "toolchains.json",
@@ -1721,7 +1721,7 @@ class ContractTests(unittest.TestCase):
             args = argparse.Namespace(
                 source_root=str(root),
                 staging=fixture_staging_specs(staging),
-                tag_ref="refs/tags/kuikly-v2.24.0-raft.1",
+                tag_ref="refs/tags/kuikly-v2.24.0-raft.2",
                 allow_unreleased=False,
                 predecessor_receipts=None,
                 toolchains=str(root / "toolchains.json"),

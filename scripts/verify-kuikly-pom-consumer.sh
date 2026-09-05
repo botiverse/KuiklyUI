@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly GROUP="com.tencent.kuikly-open"
-readonly VERSION="2.24.0-raft.1-2.1.21"
+readonly VERSION="2.24.0-raft.2-2.1.21"
 readonly TARGET="${GROUP}:compose-android:${VERSION}"
 readonly -a REQUIRED_AAR_ARTIFACTS=(
   core-android
@@ -111,7 +111,7 @@ val kuiklyPom by configurations.creating {
     resolutionStrategy.failOnChangingVersions()
 }
 dependencies {
-    add(kuiklyPom.name, "com.tencent.kuikly-open:compose-android:2.24.0-raft.1-2.1.21")
+    add(kuiklyPom.name, "com.tencent.kuikly-open:compose-android:2.24.0-raft.2-2.1.21")
 }
 
 fun sha256(file: File): String {
@@ -149,10 +149,10 @@ tasks.register("verifyKuiklyPomClosure") {
             }
             .sorted()
         require(records.any {
-            it.startsWith("com.tencent.kuikly-open\tcore-android\t2.24.0-raft.1-2.1.21\taar\t")
+            it.startsWith("com.tencent.kuikly-open\tcore-android\t2.24.0-raft.2-2.1.21\taar\t")
         }) { "compose POM did not resolve the exact core-android AAR" }
         require(records.any {
-            it.startsWith("com.tencent.kuikly-open\tcore-annotations-android\t2.24.0-raft.1-2.1.21\taar\t")
+            it.startsWith("com.tencent.kuikly-open\tcore-annotations-android\t2.24.0-raft.2-2.1.21\taar\t")
         }) { "compose POM did not resolve the exact core-annotations-android AAR" }
         file(System.getenv("TASK93_GRADLE_RECEIPT")).writeText(records.joinToString("\n", postfix = "\n"))
     }
@@ -167,9 +167,9 @@ GRADLE_USER_HOME="$GRADLE_HOME" \
   "$SOURCE_ROOT/gradlew" -p "$WORK_ROOT/gradle-project" \
   --no-daemon --stacktrace \
   -PcandidateRepository="$CANDIDATE_REPOSITORY" verifyKuiklyPomClosure
-grep -Fq $'com.tencent.kuikly-open\tcore-annotations-android\t2.24.0-raft.1-2.1.21\taar\t' \
+grep -Fq $'com.tencent.kuikly-open\tcore-annotations-android\t2.24.0-raft.2-2.1.21\taar\t' \
   "$GRADLE_RECEIPT" || fail "Gradle receipt lacks exact 37th-seed resolution"
-grep -Fq $'com.tencent.kuikly-open\tcore-android\t2.24.0-raft.1-2.1.21\taar\t' \
+grep -Fq $'com.tencent.kuikly-open\tcore-android\t2.24.0-raft.2-2.1.21\taar\t' \
   "$GRADLE_RECEIPT" || fail "Gradle receipt lacks exact core-android AAR resolution"
 
 cat > "$WORK_ROOT/maven-project/pom.xml" <<MAVEN
@@ -226,7 +226,7 @@ maven_exit_code = int(sys.argv[6])
 output = pathlib.Path(sys.argv[7])
 raw_maven_output = output.with_name("pom-consumer-maven-raw.log")
 raw_gradle_output = output.with_name("pom-consumer-gradle-owner.tsv")
-version = "2.24.0-raft.1-2.1.21"
+version = "2.24.0-raft.2-2.1.21"
 required_artifacts = contract.MAVEN_OWNER_AAR_ARTIFACTS
 
 def sha256(path):
@@ -250,10 +250,10 @@ maven_terminal = contract.classify_maven_owner_boundary(maven_exit_code, log_tex
 
 value = {
     "schema": "kuikly-pom-consumer/v2",
-    "target": "com.tencent.kuikly-open:compose-android:2.24.0-raft.1-2.1.21",
+    "target": "com.tencent.kuikly-open:compose-android:2.24.0-raft.2-2.1.21",
     "requiredTransitives": [
-        "com.tencent.kuikly-open:core-android:2.24.0-raft.1-2.1.21",
-        "com.tencent.kuikly-open:core-annotations-android:2.24.0-raft.1-2.1.21",
+        "com.tencent.kuikly-open:core-android:2.24.0-raft.2-2.1.21",
+        "com.tencent.kuikly-open:core-annotations-android:2.24.0-raft.2-2.1.21",
     ],
     "candidateRepositoryState": "assembled-review-candidate",
     "candidatePrimaries": primaries,

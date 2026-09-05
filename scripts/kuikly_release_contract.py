@@ -8,7 +8,7 @@ closure, POM/module provenance and native-host package shapes, then emits the
 only input accepted by the create-only publisher.
 
 The public completion marker is release-owner authorized as:
-  com.tencent.kuikly-open:kuikly-release-manifest:2.24.0-raft.1
+  com.tencent.kuikly-open:kuikly-release-manifest:2.24.0-raft.2
 It is transport metadata, not a 38th product publication, and is therefore
 not included in the manifest's recursive publication byte set.
 """
@@ -44,7 +44,7 @@ SOURCE_SCM_CONNECTION = f"scm:git:https://github.com/{REPOSITORY}.git"
 SOURCE_SCM_DEVELOPER_CONNECTION = f"scm:git:ssh://git@github.com/{REPOSITORY}.git"
 GROUP = "com.tencent.kuikly-open"
 GROUP_PATH = "com/tencent/kuikly-open"
-RELEASE = "2.24.0-raft.1"
+RELEASE = "2.24.0-raft.2"
 NORMAL_VERSION = f"{RELEASE}-2.1.21"
 OHOS_VERSION = f"{RELEASE}-2.0.21-ohos"
 MANIFEST_ARTIFACT = "kuikly-release-manifest"
@@ -1116,7 +1116,7 @@ def canonical_set_digest(publications: Sequence[dict[str, Any]]) -> str:
 def raft_required(group: str, version: str) -> bool:
     return (
         group.startswith("com.tencent.kuikly-open.compose")
-        or version.endswith("-raft.1")
+        or version.endswith("-raft.2")
         or "-KBA-" in version
     )
 
