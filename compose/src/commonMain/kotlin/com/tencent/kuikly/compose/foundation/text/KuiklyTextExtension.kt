@@ -478,7 +478,12 @@ internal fun RichTextAttr.applyAnnotatedString(
                             range.start <= inlineBoxRange.start && range.end >= inlineBoxRange.end
                         }
                         .forEach { range ->
-                            applySpanStyle(range.item, density, includeInlineBox = false)
+                            applySpanStyle(
+                                range.item,
+                                density,
+                                includeInlineBox = false,
+                                preserveInheritedFontFamily = true,
+                            )
                         }
 
                     // Geometry and background belong to the outer group. Children keep
@@ -498,7 +503,12 @@ internal fun RichTextAttr.applyAnnotatedString(
                             range.start > inlineBoxRange.start || range.end < inlineBoxRange.end
                         }
                         .forEach { range ->
-                            applySpanStyle(range.item, density, includeInlineBox = false)
+                            applySpanStyle(
+                                range.item,
+                                density,
+                                includeInlineBox = false,
+                                preserveInheritedFontFamily = true,
+                            )
                         }
                 } else {
                     overlappingSpanStyles.forEach { range ->
@@ -567,12 +577,15 @@ internal fun TextSpan.applySpanStyle(
     spanStyle: SpanStyle,
     density: Density,
     includeInlineBox: Boolean = true,
+    preserveInheritedFontFamily: Boolean = false,
 ) {
     // Apply font styles
     if (spanStyle.fontSize.isSpecified) {
         fontSize(scaleToDensity(density, spanStyle.fontSize.value))
     }
-    applyFontFamily(spanStyle.fontFamily)
+    if (!preserveInheritedFontFamily || spanStyle.fontFamily != null) {
+        applyFontFamily(spanStyle.fontFamily)
+    }
     applyFontWeight(spanStyle.fontWeight)
     applyFontStyle(spanStyle.fontStyle)
     applyShadow(spanStyle.shadow)
