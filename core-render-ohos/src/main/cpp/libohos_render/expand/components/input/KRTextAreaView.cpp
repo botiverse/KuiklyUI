@@ -23,6 +23,7 @@
 
 constexpr char kLineHeight[] = "lineHeight";
 constexpr char kSlockSystemNewlineAction[] = "slockSystemNewlineAction";
+constexpr char kSlockImeActionRequested[] = "slockImeActionRequested";
 constexpr int32_t kSystemNewlineMenuItemId = ARKUI_TEXT_MENU_ITEM_ID_APP_RESERVED_BEGIN;
 
 void KRTextAreaView::DidInit() {
@@ -45,6 +46,18 @@ bool KRTextAreaView::SetProp(const std::string &prop_key, const KRAnyValue &prop
             SetupSystemNewlineEditMenu();
         } else {
             TeardownSystemNewlineEditMenu();
+        }
+        return true;
+    }
+    if (kuikly::util::isEqual(prop_key, kSlockImeActionRequested)) {
+        ime_action_requested_ = prop_value->toInt() != 0;
+        if (!ime_action_requested_) {
+            // TextArea's native newline key is the safe default for the
+            // preference-off path.  A later returnKeyType prop is also gated
+            // below, so modifier attachment order cannot re-enable Send.
+            ArkUI_NumberValue value[] = {{.i32 = ARKUI_ENTER_KEY_TYPE_NEW_LINE}};
+            ArkUI_AttributeItem item = {value, sizeof(value) / sizeof(ArkUI_NumberValue)};
+            kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_AREA_ENTER_KEY_TYPE, &item);
         }
         return true;
     }
@@ -91,7 +104,10 @@ void KRTextAreaView::UpdateInputNodeKeyboardType(const std::string &propValue) {
 void KRTextAreaView::UpdateInputNodeEnterKeyType(const std::string &propValue) {
     // KRTextAreaView 底层是 ARKUI_NODE_TEXT_AREA，需写 NODE_TEXT_AREA_ENTER_KEY_TYPE，
     // 否则 returnKeyType 不生效或写入到 TextInput 属性上。
-    ArkUI_NumberValue value[] = {{.i32 = kuikly::util::ConvertToEnterKeyType(propValue)}};
+    const auto type = ime_action_requested_
+        ? kuikly::util::ConvertToEnterKeyType(propValue)
+        : ARKUI_ENTER_KEY_TYPE_NEW_LINE;
+    ArkUI_NumberValue value[] = {{.i32 = type}};
     ArkUI_AttributeItem item = {value, sizeof(value) / sizeof(ArkUI_NumberValue)};
     kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_AREA_ENTER_KEY_TYPE, &item);
 }
