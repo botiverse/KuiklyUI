@@ -63,6 +63,14 @@ class CanvasView : DeclarativeBaseView<Attr, Event>() {
         draw()
     }
 
+    /**
+     * 显式触发一次重绘。供外部在动态设置 drawCallback 后主动调用
+     * （createRenderView/setFrameToRenderView 之外的路径不会自动触发 draw）。
+     */
+    fun redraw() {
+        draw()
+    }
+
     private fun draw() {
         if (renderView == null || flexNode.layoutFrame.isDefaultValue()) {
             return
