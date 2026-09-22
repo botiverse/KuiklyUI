@@ -128,9 +128,10 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
     }
 
     private var inDrawCall = false
+    private var resetSeq = 0
 
     private fun reset() {
-        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_reset ts=${System.currentTimeMillis()} inst=${System.identityHashCode(this)} opCount=${drawOperationList.size} inDraw=$inDrawCall attached=$isAttachedToWindow")
+        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_reset ts=${System.currentTimeMillis()} inst=${System.identityHashCode(this)} seq=${++resetSeq} opCount=${drawOperationList.size} inDraw=$inDrawCall attached=$isAttachedToWindow")
         drawOperationList.clear()
         currentDrawStyle = DrawStyle(kuiklyRenderContext)
     }
