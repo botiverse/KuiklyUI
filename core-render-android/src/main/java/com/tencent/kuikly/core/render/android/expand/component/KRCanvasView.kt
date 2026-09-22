@@ -133,6 +133,7 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
     }
 
     private fun performDrawOperationList(canvas: Canvas) {
+        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_draw w=$width h=$height opCount=${drawOperationList.size} hw=${canvas.isHardwareAccelerated}")
         if (drawOperationList.isEmpty()) {
             return
         }
