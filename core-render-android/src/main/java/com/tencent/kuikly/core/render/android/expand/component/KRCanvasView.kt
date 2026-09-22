@@ -128,12 +128,13 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
     }
 
     private fun reset() {
+        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_reset ts=${System.currentTimeMillis()} inst=${System.identityHashCode(this)} opCount=${drawOperationList.size}")
         drawOperationList.clear()
         currentDrawStyle = DrawStyle(kuiklyRenderContext)
     }
 
     private fun performDrawOperationList(canvas: Canvas) {
-        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_draw w=$width h=$height opCount=${drawOperationList.size} hw=${canvas.isHardwareAccelerated}")
+        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_draw ts=${System.currentTimeMillis()} inst=${System.identityHashCode(this)} w=$width h=$height opCount=${drawOperationList.size} hw=${canvas.isHardwareAccelerated}")
         if (drawOperationList.isEmpty()) {
             return
         }
@@ -266,6 +267,11 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
         flushDrawCommand()
     }
 
+    private fun enqueueDrawOp(op: DrawOperation) {
+        drawOperationList.add(op)
+        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_flush ts=${System.currentTimeMillis()} inst=${System.identityHashCode(this)} opCount=${drawOperationList.size}")
+    }
+
     private fun flushDrawCommand() {
         hrPath.also {
             it.pushDrawStyle(DrawStyle(kuiklyRenderContext).apply {
@@ -282,7 +288,7 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
                 // 已经含有currentDrawOperation的话移除掉，保证绘制的指令时最新的
                 drawOperationList.remove(it)
             }
-            drawOperationList.add(it)
+            enqueueDrawOp(it)
             invalidate()
         }
     }
@@ -375,7 +381,7 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
             kuiklyRenderContext.toPxF(y.toFloat()),
             drawStyle
         )
-        drawOperationList.add(op)
+        enqueueDrawOp(op)
         invalidate()
     }
 
@@ -410,12 +416,12 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
             sWidth,
             sHeight
         )
-        drawOperationList.add(op)
+        enqueueDrawOp(op)
         invalidate()
     }
 
     private fun save() {
-        drawOperationList.add(LambdaOp { _, canvas -> canvas.save() })
+        enqueueDrawOp(LambdaOp { _, canvas -> canvas.save() })
     }
 
     private fun saveLayer(params: String?) {
@@ -424,11 +430,11 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
         val y = kuiklyRenderContext.toPxF(json.optDouble(KRViewConst.Y).toFloat())
         val width = kuiklyRenderContext.toPxF(json.optDouble(KRViewConst.WIDTH).toFloat())
         val height = kuiklyRenderContext.toPxF(json.optDouble(KRViewConst.HEIGHT).toFloat())
-        drawOperationList.add(SaveLayerOp(x, y, x + width, y + height))
+        enqueueDrawOp(SaveLayerOp(x, y, x + width, y + height))
     }
 
     private fun restore() {
-        drawOperationList.add(LambdaOp { _, canvas -> canvas.restore() })
+        enqueueDrawOp(LambdaOp { _, canvas -> canvas.restore() })
     }
 
     private fun clip(params: String?) {
@@ -439,7 +445,7 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
             } else {
                 Region.Op.DIFFERENCE
             }
-            drawOperationList.add(LambdaOp { _, canvas -> canvas.clipPath(it, op) })
+            enqueueDrawOp(LambdaOp { _, canvas -> canvas.clipPath(it, op) })
         }
     }
 
@@ -447,27 +453,27 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
         val json = params.toJSONObjectSafely()
         val x = kuiklyRenderContext.toPxF(json.optDouble(KRViewConst.X).toFloat())
         val y = kuiklyRenderContext.toPxF(json.optDouble(KRViewConst.Y).toFloat())
-        drawOperationList.add(LambdaOp { _, canvas -> canvas.translate(x, y) })
+        enqueueDrawOp(LambdaOp { _, canvas -> canvas.translate(x, y) })
     }
 
     private fun scale(params: String?) {
         val paramsJSON = params.toJSONObjectSafely()
         val x = paramsJSON.optDouble(KRViewConst.X).toFloat()
         val y = paramsJSON.optDouble(KRViewConst.Y).toFloat()
-        drawOperationList.add(LambdaOp { _, canvas -> canvas.scale(x, y) })
+        enqueueDrawOp(LambdaOp { _, canvas -> canvas.scale(x, y) })
     }
 
     private fun rotate(params: String?) {
         val paramsJSON = params.toJSONObjectSafely()
         val degrees = paramsJSON.optDouble("angle") * KRViewConst.PI_AS_ANGLE / PI
-        drawOperationList.add(LambdaOp { _, canvas -> canvas.rotate(degrees.toFloat()) })
+        enqueueDrawOp(LambdaOp { _, canvas -> canvas.rotate(degrees.toFloat()) })
     }
 
     private fun skew(params: String?) {
         val json = params.toJSONObjectSafely()
         val x = json.optDouble(KRViewConst.X).toFloat()
         val y = json.optDouble(KRViewConst.Y).toFloat()
-        drawOperationList.add(LambdaOp { _, canvas -> canvas.skew(x, y) })
+        enqueueDrawOp(LambdaOp { _, canvas -> canvas.skew(x, y) })
     }
 
     private fun transform(params: String?) {
@@ -485,7 +491,7 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
             }
         }
         val m = Matrix().apply { setValues(array) }
-        drawOperationList.add(LambdaOp { _, canvas -> canvas.concat(m) })
+        enqueueDrawOp(LambdaOp { _, canvas -> canvas.concat(m) })
     }
 
     /**
