@@ -74,6 +74,15 @@ class CanvasView : DeclarativeBaseView<Attr, Event>() {
         draw()
     }
 
+    /**
+     * flex 布局是否尚未产出 layoutFrame（缺省值）。
+     * 供外部在动态设置 drawCallback 后判断 draw 守卫的放行条件：
+     * 缺省时 draw 会回退使用最近一次下发 native 的 frame 作为尺寸来源。
+     */
+    fun isLayoutFrameDefault(): Boolean {
+        return flexNode.layoutFrame.isDefaultValue()
+    }
+
     private fun draw() {
         if (renderView == null || noDrawableSize()) {
             return
