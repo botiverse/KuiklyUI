@@ -127,8 +127,10 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
         drawCommonForegroundDecoration(width, height, canvas)
     }
 
+    private var inDrawCall = false
+
     private fun reset() {
-        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_reset ts=${System.currentTimeMillis()} inst=${System.identityHashCode(this)} opCount=${drawOperationList.size}")
+        KuiklyRenderLog.e("KRCanvas", "mermaid_perf_reset ts=${System.currentTimeMillis()} inst=${System.identityHashCode(this)} opCount=${drawOperationList.size} inDraw=$inDrawCall attached=$isAttachedToWindow")
         drawOperationList.clear()
         currentDrawStyle = DrawStyle(kuiklyRenderContext)
     }
@@ -503,13 +505,18 @@ class KRCanvasView(context: Context) : View(context), IKuiklyRenderViewExport {
         if (params.isNullOrEmpty()) return
         try {
             val arr = JSONArray(params)
-            for (i in 0 until arr.length()) {
-                val item = arr.optJSONObject(i) ?: continue
-                val method = item.optString("m")
-                val p = item.optString("p", null)
-                if (method.isNotEmpty()) {
-                    call(method, p, null)
+            inDrawCall = true
+            try {
+                for (i in 0 until arr.length()) {
+                    val item = arr.optJSONObject(i) ?: continue
+                    val method = item.optString("m")
+                    val p = item.optString("p", null)
+                    if (method.isNotEmpty()) {
+                        call(method, p, null)
+                    }
                 }
+            } finally {
+                inDrawCall = false
             }
         } catch (e: Exception) {
             KuiklyRenderLog.e("KRCanvas", "batchDraw parse error: ${e.message}")
