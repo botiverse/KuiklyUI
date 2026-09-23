@@ -518,8 +518,9 @@ jobs:
             --source-sha "$SOURCE_SHA" \
             --staging3-sha "$live_staging3"
           echo "post-verify workspace status (diagnostic):"
-          git status --porcelain --untracked-files=all
-          test -z "$(git status --porcelain --untracked-files=all)"
+          publish_status="$(git -c core.untrackedCache=false status --porcelain --untracked-files=all)"
+          printf '%s\n' "$publish_status"
+          test -z "$publish_status"
 
           protected="$RUNNER_TEMP/kuikly-protected"
           final="$RUNNER_TEMP/kuikly-final"
@@ -569,8 +570,9 @@ jobs:
             (.listingDisagreement | length) == 0 and .completionPresent == false' \
             "$final/public-plan.json" >/dev/null
           echo "post-plan workspace status (diagnostic):"
-          git status --porcelain --untracked-files=all
-          test -z "$(git status --porcelain --untracked-files=all)"
+          publish_status="$(git -c core.untrackedCache=false status --porcelain --untracked-files=all)"
+          printf '%s\n' "$publish_status"
+          test -z "$publish_status"
       - name: Publish or resume immutable release and verify public bytes
         run: |
           set -euo pipefail
