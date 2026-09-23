@@ -109,7 +109,7 @@ class Http:
             headers["Content-Type"] = content_type
         request = urllib.request.Request(origin + path, data=body, method=method, headers=headers)
         try:
-            with self.opener.open(request, timeout=60) as response:
+            with self.opener.open(request, timeout=180) as response:
                 return response.status, response.read()
         except PublishError:
             raise
