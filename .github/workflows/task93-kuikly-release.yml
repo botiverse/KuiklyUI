@@ -513,10 +513,12 @@ jobs:
           test "$(git -C "$control_plane" rev-parse HEAD)" = "$CONTROL_PLANE_SHA"
           PYTHONDONTWRITEBYTECODE=1 python3 "$control_plane/scripts/test_kuikly_release_contract.py" \
             PublisherTests.test_checksum_listing_is_optional_but_exact_get_is_required
-          python3 scripts/kuikly_release_contract.py verify-landed-source \
+          PYTHONDONTWRITEBYTECODE=1 python3 scripts/kuikly_release_contract.py verify-landed-source \
             --source-root "$GITHUB_WORKSPACE" \
             --source-sha "$SOURCE_SHA" \
             --staging3-sha "$live_staging3"
+          echo "post-verify workspace status (diagnostic):"
+          git status --porcelain --untracked-files=all
           test -z "$(git status --porcelain --untracked-files=all)"
 
           protected="$RUNNER_TEMP/kuikly-protected"
@@ -566,6 +568,8 @@ jobs:
             (.unexpected | length) == 0 and (.different | length) == 0 and
             (.listingDisagreement | length) == 0 and .completionPresent == false' \
             "$final/public-plan.json" >/dev/null
+          echo "post-plan workspace status (diagnostic):"
+          git status --porcelain --untracked-files=all
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: Publish or resume immutable release and verify public bytes
         run: |
