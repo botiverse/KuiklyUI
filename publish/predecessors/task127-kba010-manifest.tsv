@@ -1,0 +1,30 @@
+# schema=1
+# task=127
+# selected_by=task #93 candidate manifest generated POM/module dependency graph
+# selection=current org.jetbrains.kotlin 2.0.21-KBA-010 runtime stdlib closure only
+# candidate_source_exact=c6afb625cd5ab547e5fbe2db85d420ede7cee847
+# candidate_manifest_sha256=2bad4e20e97721e05553acffb5a6168ebe39fcf8bbc946c8f6d6505ab8a48fb4
+# candidate_product_set_sha256=ab47b636d19b7261645f8621ed604cefc80382b2b079773bd941d6877d73e61a
+# candidate_packet_sha256=61842fd1a2d5b65403ca0440aff5b8faa8e5a0b85e43cdf8ac43672024993e1a
+# inventory_authority_manifest_sha256=ce0301ae1a49a526435686a633133c47364c4fe206fed71f80963cdc9a0641e0
+# predecessor_gavs=2
+# files=13
+# total_bytes=15128114
+# deterministic_set_sha256=3a789c3fc63d7ae70966c793f0cc07f483b0cfaa3dc860428937dc1a96c2c906
+# excluded=Kotlin Gradle plugin, compiler, Konan/toolchain, JDK7/JDK8, JS and Wasm redirects
+# source_tag_audit=no public JetBrains v2.0.21-KBA-010 tag at inventory freeze
+# provenance=canonical Tencent Maven bytes and embedded metadata; source-to-publication lineage is not publicly auditable and metadata is not reconstructed
+groupId	artifactId	version	path	size	sha256	authority
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010-javadoc.jar	257	4200a274bbbdfe19ef5418d3013075dddaca4d2f14c85bade6652dc6d8ad42ce	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010-javadoc.jar
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010-sources.jar	2745488	1737b7d499d15cf04c23fec378bb4930a03f2239c219793bb06491396434174c	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010-sources.jar
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.jar	452936	56a16a46f9e3c3699f1afa188da779dfd9a5593148e047e36123482ac463ae1a	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.jar
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.module	640	a22a2f26c4ea5e651df0f4669ee176d2bfa4cd89f20d2fccbf6ad140e740b12f	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.module
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.pom	1825	344140de45690be3bf6e73cddba7bc303d062b1b399000340b1bdf9caf103e51	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.pom
+org.jetbrains.kotlin	kotlin-stdlib-common	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.spdx.json	1114	a9fb438b0d91235d0213d1caf4d4563738db028e3cdef60c243fb293280d9c68	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib-common/2.0.21-KBA-010/kotlin-stdlib-common-2.0.21-KBA-010.spdx.json
+org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-all.jar	390848	81c3348c7e99d78a760b9539ee50340c8d77eaf8d894f74ae3cb5f576a91910a	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-all.jar
+org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-common-sources.jar	2749788	9b1929e556e52f064d37b0fa08a4547363016843cdbaee5f751b2ccf1513155e	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-common-sources.jar
+org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-common.jar	452763	5b2ebead274a77b3e14fb799b9333a98d74a848a5bd719dffa2c7bf27acc05e2	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-common.jar
+org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-sources.jar	3860929	0257add2b8d5316c19f39bab582f8eea9efb92d143d27d784e924ca38230dec4	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010-sources.jar
+org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010.jar	4455716	110eda211833f9cad02c773fa65a04961d12afe0e702c9e47bfe8b6bc73ab166	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010.jar
+org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010.module	13472	73036a7d997e5712cc425626ae619c48eeef25513cf58ade2339031323660edf	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010.module
+org.jetbrains.kotlin	kotlin-stdlib	2.0.21-KBA-010	org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010.pom	2338	d47605a43bf86e65938b8a1f72f18120d82c8ab3dc261a8b41d937a411fa3fda	https://mirrors.tencent.com/repository/maven-tencent/org/jetbrains/kotlin/kotlin-stdlib/2.0.21-KBA-010/kotlin-stdlib-2.0.21-KBA-010.pom

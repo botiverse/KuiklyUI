@@ -15,6 +15,7 @@
 
 #include "libohos_render/utils/KRConvertUtil.h"
 #include "libohos_render/foundation/KRConfig.h"
+#include "libohos_render/utils/KRLayoutSizeFormatter.h"
 #include <codecvt>
 #include <iostream>
 #include <locale>
@@ -127,6 +128,18 @@ OH_Drawing_TextDecoration ConvertToTextDecoration(const std::string &textDecorat
         return TEXT_DECORATION_LINE_THROUGH;
     }
     return TEXT_DECORATION_NONE;
+}
+
+double ConvertToTextDecorationThicknessScale(double thicknessPx, double fontSizePx) {
+    // OH_Drawing_SetTextStyleDecorationThicknessScale takes a MULTIPLIER, not
+    // an absolute width. The OHOS text engine paints a decoration line as
+    //   strokePx = fontSizePx * UNDER_LINE_THICKNESS_RATIO * scale
+    // with UNDER_LINE_THICKNESS_RATIO = 1/18 (skparagraph Decorations under
+    // OHOS_SUPPORT; identical on 5.0.x-Release and m133). The scale must
+    // divide out that base; dividing by fontSize alone renders thickness/18,
+    // which collapses any sane design value to a sub-pixel hairline.
+    constexpr double kEngineUnderlineThicknessRatio = 1.0 / 18.0;
+    return thicknessPx / (fontSizePx * kEngineUnderlineThicknessRatio);
 }
 
 OH_Drawing_EllipsisModal ConvertToTextBreakMode(const std::string &breakeMode) {
@@ -263,10 +276,9 @@ static_assert(ConvertFontWeightCommon(600, 1.5) == 8);
 
 std::string ConvertSizeToString(const KRSize &size) {
     std::array<char, 50> buffer;
-    // %.2lf 会四舍五入，第三位小数 <5 时会被舍去（如 10.999 -> 10.99），
-    // 导致回传尺寸比真实值偏小，可能引发布局截断。这里给宽高各加 0.005 再格式化，
-    // 确保回传尺寸不小于真实尺寸（向上截取保留 2 位小数）。
-    std::snprintf(buffer.data(), buffer.size(), "%.2lf|%.2lf", size.width + 0.005, size.height + 0.005);
+    std::snprintf(buffer.data(), buffer.size(), "%.2lf|%.2lf",
+                  CeilLayoutSizeToHundredth(size.width),
+                  CeilLayoutSizeToHundredth(size.height));
     return std::string(buffer.data());
 }
 

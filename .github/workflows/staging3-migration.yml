@@ -1,0 +1,295 @@
+name: Staging3 Migration Exact Matrix
+
+on:
+  push:
+    branches:
+      - staging3
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact staging3 commit to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging3-migration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EXPECTED_HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_sha || github.sha }}
+
+jobs:
+  identity-ancestry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Verify replay ancestry, first-parent DCO and exact tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/staging3-evidence
+          python3 tools/test-staging3-migration.py
+          python3 tools/check-staging3-migration.py \
+            --expected-head "$EXPECTED_HEAD_SHA" | tee build/staging3-evidence/identity.txt
+          git diff --check 76a866795903014cfd2d0363ee31ccee7895775e...HEAD
+          git show -s --format='head=%H%ntree=%T%nparents=%P%nauthor=%an <%ae>%ncommitter=%cn <%ce>' \
+            HEAD | tee build/staging3-evidence/head.txt
+
+      - name: Upload identity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging3-identity-${{ env.EXPECTED_HEAD_SHA }}
+          path: build/staging3-evidence
+
+  linux-android-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+
+      - name: Compile common metadata and run Android, Compose and Web suites
+        run: |
+          ./gradlew \
+            :core:compileCommonMainKotlinMetadata \
+            :compose:compileCommonMainKotlinMetadata \
+            :core:testDebugUnitTest \
+            :compose:testDebugUnitTest \
+            :core-render-android:testDebugUnitTest \
+            :core-render-web:base:jsNodeTest \
+            --no-build-cache --no-daemon
+
+      - name: Require non-empty production suites
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          modules = {
+              "compose": Path("compose/build/test-results"),
+              "core-render-android": Path("core-render-android/build/test-results"),
+              "core-render-web-base": Path("core-render-web/base/build/test-results"),
+          }
+          for name, root in modules.items():
+              reports = sorted(root.glob("**/TEST-*.xml"))
+              tests = failures = errors = 0
+              for report in reports:
+                  suite = ET.parse(report).getroot()
+                  tests += int(suite.attrib.get("tests", "0"))
+                  failures += int(suite.attrib.get("failures", "0"))
+                  errors += int(suite.attrib.get("errors", "0"))
+              print(f"{name}: tests={tests} failures={failures} errors={errors}")
+              if tests == 0 or failures or errors:
+                  raise SystemExit(1)
+          PY
+
+      - name: Upload Linux test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging3-linux-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            compose/build/test-results
+            core-render-android/build/test-results
+            core-render-web/base/build/test-results
+
+  ios-renderer:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify exact checkout and select Xcode 16.2
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+
+      - name: Generate CocoaPods dummy framework
+        run: ./gradlew :demo:generateDummyFramework --no-build-cache --no-daemon
+
+      - name: Install locked Pods
+        run: bundle exec pod install --project-directory=iosApp --deployment
+
+      - name: Compile Kotlin Native main and tests
+        run: |
+          ./gradlew \
+            :core:compileKotlinIosSimulatorArm64 \
+            :compose:compileKotlinIosSimulatorArm64 \
+            :compose:compileTestKotlinIosSimulatorArm64 \
+            --no-build-cache --no-daemon
+
+      - name: Run native renderer fixtures
+        run: |
+          tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+          tools/ios-renderer-tests/run-layout-size-formatter-test.sh
+
+      - name: Build production renderer with warnings as errors
+        shell: bash
+        run: |
+          mkdir -p build
+          set -o pipefail
+          xcodebuild \
+            -workspace iosApp/iosApp.xcworkspace \
+            -scheme OpenKuiklyIOSRender \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            -derivedDataPath build/ios-derived \
+            -resultBundlePath build/ios-renderer.xcresult \
+            build | tee build/ios-renderer.log
+
+      - name: Upload iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging3-ios-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            build/ios-renderer.log
+            build/ios-renderer.xcresult
+
+  ohos-native:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
+    timeout-minutes: 60
+    env:
+      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
+      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Trust workspace and verify exact checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+
+      - name: Run host-native OHOS contract fixtures
+        run: |
+          core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
+          core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
+
+      - name: Prepare OHOS native dependency metadata
+        working-directory: ohosApp
+        run: |
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          ohpm install --all
+          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+          hvigorw assembleHar \
+            --mode module \
+            -p module=render@default \
+            -p product=default \
+            -p buildMode=debug \
+            --analyze=normal \
+            --parallel \
+            --no-daemon
+
+      - name: Fresh arm64 production libkuikly compile and link
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          tools/ohos-renderer-tests/run-arm64-direct-link.sh "$GITHUB_WORKSPACE/build/ohos-evidence"
+
+      - name: Upload OHOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging3-ohos-${{ env.EXPECTED_HEAD_SHA }}
+          path: build/ohos-evidence
+
+  source-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+
+      - name: Run source and host contracts
+        run: |
+          python3 tools/check-compose-node-event-freshness.py --self-test
+          python3 tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
+          python3 tools/check-ios-scroll-event-finiteness.py --self-test
+          python3 tools/check-profiler-observer-state-partition.py --self-test
+          python3 tools/check-profiler-file-output-lifecycle.py --self-test
+          python3 tools/check-layout-size-report-rounding.py --self-test
+          core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
+          core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
+
+  exact-matrix:
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - identity-ancestry
+      - linux-android-web
+      - ios-renderer
+      - ohos-native
+      - source-contracts
+    steps:
+      - name: Require every exact-bound gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          needs = json.loads(os.environ["RESULTS"])
+          failed = {
+              name: value["result"]
+              for name, value in needs.items()
+              if value["result"] != "success"
+          }
+          print(json.dumps(needs, indent=2, sort_keys=True))
+          if failed:
+              raise SystemExit(f"staging3 exact matrix failed: {failed}")
+          PY

@@ -79,3 +79,30 @@ export const sendEventSync: (
 export const createNativeRoot: (content: Object, instanceId: string) => void;
 
 export const isBackPressConsumed: (instanceId: string, sendTime: number) => number;
+
+/** Releases one generation, or every generation, for an opaque typed-avatar bytes key in every live root. */
+export const avatarCacheRetireDecoded: (
+  nativeBytesKey: string,
+  commitGeneration?: string,
+  callerAuthority?: string
+) => boolean;
+/** Retains the accepted generation and releases older decoded generations for the same opaque bytes key. */
+export const avatarCachePromoteDecoded: (
+  nativeBytesKey: string,
+  commitGeneration: string,
+  callerAuthority: string
+) => boolean;
+/** Retains both candidate and prior generations during the shared rollback acknowledgement window. */
+export const avatarCacheRetainDecoded: (
+  nativeBytesKey: string,
+  commitGeneration: string,
+  callerAuthority: string,
+  priorGeneration: string,
+  priorCallerAuthority: string
+) => boolean;
+/** Returns whether the exact generation is still backed by a live decoded PixelMap. */
+export const avatarCacheHasDecoded: (
+  nativeBytesKey: string,
+  commitGeneration: string,
+  callerAuthority: string
+) => boolean;

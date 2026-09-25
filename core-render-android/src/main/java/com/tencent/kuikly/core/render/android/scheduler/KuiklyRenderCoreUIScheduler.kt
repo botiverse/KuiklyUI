@@ -31,22 +31,15 @@ import com.tencent.kuikly.core.render.android.expand.KuiklyRenderTracer
 class KuiklyRenderCoreUIScheduler(
     private val preRunKuiklyRenderCoreUITask: PreRunKuiklyRenderCoreTask? = null
 ) : IKuiklyRenderCoreScheduler {
-    /**
-     *  Context线程上的主线程任务集合
-     */
-    private var mainThreadTasksOnContextQueue: MutableList<KuiklyRenderCoreTaskExecutor>? = null
-    /**
-     * 主线程上的任务集合
-     */
-    private var mainThreadTasks = mutableListOf<KuiklyRenderCoreTaskExecutor>()
-    /**
-     * 待批量同步主线程任务任务闭包，用于保证一个runLoop中，不管[scheduleTask]调用多少次，最后只会批量调度一次
-     */
-    private var needSyncMainQueueTasksBlock : ((sync: Boolean) -> Unit)? = null
+    private val taskQueue = KuiklyRenderCoreTaskQueue()
     /*
      * 需要立即回到主线程执行的同步主线程执行任务闭包
      */
-    var mainThreadTaskWaitToSyncBlock : (() -> Unit)? = null
+    var mainThreadTaskWaitToSyncBlock: (() -> Unit)?
+        get() = taskQueue.peekMainThreadWaitBlock()
+        set(value) {
+            taskQueue.replaceMainThreadWaitBlock(value)
+        }
     /*
      *  是否执行主线程任务中
      */
@@ -100,7 +93,11 @@ class KuiklyRenderCoreUIScheduler(
 
     override fun destroy() {
         KuiklyRenderLog.i("KuiklyRenderCoreUIScheduler", "--destroy uiScheduler--")
+        taskQueue.destroy()
         uiHandler.removeCallbacksAndMessages(null)
+        viewDidLoadMainThreadTasks.clear()
+        viewTreeUpdateListener = null
+        exceptionListener = null
     }
 
     fun setViewTreeUpdateListener(listener: IKuiklyRenderViewTreeUpdateListener) {
@@ -112,27 +109,26 @@ class KuiklyRenderCoreUIScheduler(
     }
 
     fun performSyncMainQueueTasksBlockIfNeed(sync: Boolean) {
+        if (taskQueue.destroyed) return
         var tracer: KuiklyRenderTracer? = null
         if (debugLogEnable && logPerformIfNeedCount < UI_SCHEDULER_MAX_LOG_COUNT) {
-            tracer = KuiklyRenderTracer("invoke needSyncMainQueueTasksBlock $logPerformIfNeedCount isNull=${needSyncMainQueueTasksBlock == null} sync=$sync")
+            tracer = KuiklyRenderTracer("invoke needSyncMainQueueTasksBlock $logPerformIfNeedCount isNull=${!taskQueue.hasDrainBlock()} sync=$sync")
             logPerformIfNeedCount++
         }
-        if (needSyncMainQueueTasksBlock != null) {
-            needSyncMainQueueTasksBlock?.invoke(sync)
-            needSyncMainQueueTasksBlock = null
-        }
+        taskQueue.takeDrainBlock()?.invoke(sync)
         tracer?.end()
     }
 
     fun performMainThreadTaskWaitToSyncBlockIfNeed() {
+        if (taskQueue.destroyed) return
         var tracer: KuiklyRenderTracer? = null
         if (debugLogEnable && logRunCount < UI_SCHEDULER_MAX_LOG_COUNT) {
-            tracer = KuiklyRenderTracer("invoke mainThreadTaskWaitToSyncBlock $logRunCount isNull=${mainThreadTaskWaitToSyncBlock == null}")
+            tracer = KuiklyRenderTracer("invoke mainThreadTaskWaitToSyncBlock $logRunCount isNull=${!taskQueue.hasMainThreadWaitBlock()}")
             logRunCount++
         }
-        if (mainThreadTaskWaitToSyncBlock != null) {
-            mainThreadTaskWaitToSyncBlock?.invoke()
-            mainThreadTaskWaitToSyncBlock = null
+        val block = taskQueue.takeMainThreadWaitBlock()
+        if (!taskQueue.destroyed) {
+            block?.invoke()
         }
         tracer?.end()
     }
@@ -140,6 +136,7 @@ class KuiklyRenderCoreUIScheduler(
     // 首屏完成在执行任务
     fun performWhenViewDidLoad(task: KuiklyRenderCoreTask) {
         assert(isMainThread())
+        if (taskQueue.destroyed) return
         if (viewDidLoad) {
             task()
         } else {
@@ -149,10 +146,7 @@ class KuiklyRenderCoreUIScheduler(
 
     private fun addTaskToMainQueue(task: KuiklyRenderCoreTaskExecutor) {
         assert(!isMainThread())
-        val tasks = mainThreadTasksOnContextQueue ?: mutableListOf<KuiklyRenderCoreTaskExecutor>().apply {
-            mainThreadTasksOnContextQueue = this
-        }
-        tasks.add(task)
+        if (!taskQueue.enqueue(task)) return
         if (task.isUpdateViewTree) {
             viewTreeUpdateListener?.onUpdateViewTreeEnqueued()
         }
@@ -161,77 +155,75 @@ class KuiklyRenderCoreUIScheduler(
 
     private fun setNeedSyncMainQueueTasks() {
         assert(!isMainThread())
-        if (needSyncMainQueueTasksBlock != null) {
-            return
-        }
+        if (taskQueue.destroyed) return
         if (debugLogEnable && setNeedSyncLogCount < UI_SCHEDULER_MAX_LOG_COUNT) {
             KuiklyRenderLog.d("KuiklyUIScheduler", "--setNeedSyncMainQueueTasks${setNeedSyncLogCount}--")
             setNeedSyncLogCount++
         }
-        needSyncMainQueueTasksBlock = { sync ->
+        val block: (Boolean) -> Unit = syncBlock@ { sync ->
+            if (taskQueue.destroyed) return@syncBlock
             assert(!isMainThread())
             if (debugLogEnable && needSyncLogCount < UI_SCHEDULER_MAX_LOG_COUNT) {
                 KuiklyRenderLog.d("KuiklyUIScheduler", "--needSyncMainQueueTasksBlock${needSyncLogCount}--")
                 needSyncLogCount++
             }
             preRunKuiklyRenderCoreUITask?.invoke()
-            val performTasks = mainThreadTasksOnContextQueue
-            mainThreadTasksOnContextQueue = null
-            synchronized(this) {
-                mainThreadTasks.addAll(performTasks?.toList() ?: listOf())
-            }
+            if (!taskQueue.transferContextTasksToMain()) return@syncBlock
             performOnMainQueueWithTask(sync = sync) {
+                if (taskQueue.destroyed) return@performOnMainQueueWithTask
                 if (debugLogEnable && performFunLogCount < UI_SCHEDULER_MAX_LOG_COUNT) {
                     KuiklyRenderLog.d("KuiklyUIScheduler", "--performOnMainQueueWithTask:${sync} ${performFunLogCount}--")
                     performFunLogCount++
                 }
-                var tasks : List<KuiklyRenderCoreTaskExecutor>?
-                synchronized(this) {
-                    tasks = mainThreadTasks.toList()
-                    mainThreadTasks.clear()
-                }
-                runMainQueueTasks(tasks)
+                runMainQueueTasks(taskQueue.takeMainTasks())
             }
         }
+        if (!taskQueue.installDrainBlock(block)) return
         KuiklyRenderCoreContextScheduler.scheduleTask {
             performSyncMainQueueTasksBlockIfNeed(false)
         } // end task
     }
 
     fun performOnMainQueueWithTask(sync : Boolean, task: ()-> Unit) {
+        if (taskQueue.destroyed) return
         var tracer: KuiklyRenderTracer? = null
         if (debugLogEnable && performCount < UI_SCHEDULER_MAX_LOG_COUNT) {
-            tracer = KuiklyRenderTracer("performOnMainQueueWithTask $performCount sync=$sync isNull=${mainThreadTaskWaitToSyncBlock == null}")
+            tracer = KuiklyRenderTracer("performOnMainQueueWithTask $performCount sync=$sync isNull=${!taskQueue.hasMainThreadWaitBlock()}")
             performCount++
         }
         if (sync) {
             if (isMainThread()) {
-                task()
+                if (!taskQueue.destroyed) task()
             } else {
                 // 当前子线程等到主线程可能发生死锁，暂用闭包等后面立即回到主线程处理
-                mainThreadTaskWaitToSyncBlock = task
+                taskQueue.setMainThreadWaitBlock(task)
             }
         } else {
             uiHandler.post {
-                task()
+                if (!taskQueue.destroyed) task()
             }
         }
         tracer?.end()
     }
 
-    private fun runMainQueueTasks(tasks: List<KuiklyRenderCoreTaskExecutor>?) {
+    private fun runMainQueueTasks(tasks: List<KuiklyRenderCoreTaskExecutor?>?) {
         assert(isMainThread()) {
             "must call on ui thread"
         }
+        if (taskQueue.destroyed) return
         try {
             val uiTasks = tasks ?: return
             isPerformingMainQueueTask = true
-            for (task in uiTasks) {
-                task.execute()
-                if (task.isUpdateViewTree) {
-                    viewTreeUpdateListener?.onUpdateViewTreeFinish()
-                }
-            }
+            executeKuiklyRenderCoreTaskBatch(
+                tasks = uiTasks,
+                onNullTask = { index ->
+                    KuiklyRenderLog.e(
+                        "KuiklyRenderCoreUIScheduler",
+                        "skip null main queue task index=$index size=${uiTasks.size}"
+                    )
+                },
+                onUpdateViewTreeFinish = { viewTreeUpdateListener?.onUpdateViewTreeFinish() }
+            )
             isPerformingMainQueueTask = false
         } catch (e : Exception) {
             exceptionListener?.onRenderException(e, ErrorReason.UPDATE_VIEW_TREE)
@@ -252,7 +244,9 @@ class KuiklyRenderCoreUIScheduler(
 
     // perform all wait to viewDidLoad tasks
     private fun performViewDidLoadTasksIfNeed() {
+        if (taskQueue.destroyed) return
         performOnMainQueueWithTask(sync = false) {
+            if (taskQueue.destroyed) return@performOnMainQueueWithTask
             for (task in viewDidLoadMainThreadTasks.toList()) {
                 task()
             }
@@ -268,6 +262,106 @@ class KuiklyRenderCoreUIScheduler(
         private const val UI_SCHEDULER_MAX_LOG_COUNT = 10
     }
 
+}
+
+/**
+ * Owns all render-task queue state shared by context/native producers and the Android main thread.
+ * A non-main-thread assertion does not imply a single producer, so every mutation must use [lock].
+ */
+internal class KuiklyRenderCoreTaskQueue {
+    private val lock = Any()
+    private var contextTasks: MutableList<KuiklyRenderCoreTaskExecutor?>? = null
+    private val mainTasks = mutableListOf<KuiklyRenderCoreTaskExecutor?>()
+    private var drainBlock: ((Boolean) -> Unit)? = null
+    private var mainThreadWaitBlock: (() -> Unit)? = null
+
+    @Volatile
+    var destroyed = false
+        private set
+
+    fun enqueue(task: KuiklyRenderCoreTaskExecutor): Boolean = synchronized(lock) {
+        if (destroyed) return@synchronized false
+        val tasks = contextTasks ?: mutableListOf<KuiklyRenderCoreTaskExecutor?>().also {
+            contextTasks = it
+        }
+        tasks.add(task)
+        true
+    }
+
+    fun installDrainBlock(block: (Boolean) -> Unit): Boolean = synchronized(lock) {
+        if (destroyed || drainBlock != null) return@synchronized false
+        drainBlock = block
+        true
+    }
+
+    fun hasDrainBlock(): Boolean = synchronized(lock) { drainBlock != null }
+
+    fun takeDrainBlock(): ((Boolean) -> Unit)? = synchronized(lock) {
+        drainBlock.also { drainBlock = null }
+    }
+
+    fun transferContextTasksToMain(): Boolean = synchronized(lock) {
+        if (destroyed) return@synchronized false
+        mainTasks.addAll(contextTasks?.toList().orEmpty())
+        contextTasks = null
+        true
+    }
+
+    fun takeMainTasks(): List<KuiklyRenderCoreTaskExecutor?> = synchronized(lock) {
+        if (destroyed) return@synchronized emptyList()
+        mainTasks.toList().also { mainTasks.clear() }
+    }
+
+    fun hasMainThreadWaitBlock(): Boolean = synchronized(lock) { mainThreadWaitBlock != null }
+
+    fun peekMainThreadWaitBlock(): (() -> Unit)? = synchronized(lock) { mainThreadWaitBlock }
+
+    fun setMainThreadWaitBlock(block: () -> Unit): Boolean = synchronized(lock) {
+        if (destroyed) return@synchronized false
+        mainThreadWaitBlock = block
+        true
+    }
+
+    fun replaceMainThreadWaitBlock(block: (() -> Unit)?): Boolean = synchronized(lock) {
+        if (destroyed && block != null) return@synchronized false
+        mainThreadWaitBlock = block
+        true
+    }
+
+    fun takeMainThreadWaitBlock(): (() -> Unit)? = synchronized(lock) {
+        mainThreadWaitBlock.also { mainThreadWaitBlock = null }
+    }
+
+    fun destroy() {
+        synchronized(lock) {
+            destroyed = true
+            contextTasks?.clear()
+            contextTasks = null
+            mainTasks.clear()
+            drainBlock = null
+            mainThreadWaitBlock = null
+        }
+    }
+}
+
+internal fun executeKuiklyRenderCoreTaskBatch(
+    tasks: List<KuiklyRenderCoreTaskExecutor?>,
+    onNullTask: (Int) -> Unit = {},
+    onUpdateViewTreeFinish: () -> Unit = {}
+): Int {
+    var executed = 0
+    tasks.forEachIndexed { index, task ->
+        if (task == null) {
+            onNullTask(index)
+            return@forEachIndexed
+        }
+        task.execute()
+        executed++
+        if (task.isUpdateViewTree) {
+            onUpdateViewTreeFinish()
+        }
+    }
+    return executed
 }
 
 /**

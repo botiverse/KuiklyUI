@@ -22,6 +22,11 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
 
     private val taskMap = mutableMapOf<String, MutableList<(Boolean) -> Unit>>()
     private val scheduleMap = mutableMapOf<String, Boolean>()
+    private val idleTaskMap = mutableMapOf<String, MutableList<(Boolean) -> Unit>>()
+    private val idleScheduleMap = mutableMapOf<String, Boolean>()
+    private val normalGenerationMap = mutableMapOf<String, Long>()
+    private val idleScheduleGenerationMap = mutableMapOf<String, Long>()
+    private var executingIdlePagerId: String? = null
 
     init {
         platformInitScheduler()
@@ -40,10 +45,15 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
      * @param block 任务
      */
     fun runOnKuiklyThread(pagerId: String, block: (cancel: Boolean) -> Unit) {
+        if (executingIdlePagerId == pagerId && platformIsOnKuiklyThread(pagerId)) {
+            runOnKuiklyThreadIdle(pagerId, block)
+            return
+        }
         var needSchedule = false
         synchronized(this) {
             val taskList = taskMap[pagerId] ?: mutableListOf<(Boolean) -> Unit>().also { taskMap[pagerId] = it }
             taskList.add(block)
+            normalGenerationMap[pagerId] = (normalGenerationMap[pagerId] ?: 0L) + 1L
             if (scheduleMap[pagerId] != true) {
                 scheduleMap[pagerId] = true
                 needSchedule = true
@@ -52,6 +62,23 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
         if (needSchedule) {
             platformScheduleOnKuiklyThread(pagerId)
         }
+    }
+
+    /**
+     * Enqueues speculative work on the Kuikly context idle lane.
+     *
+     * Idle work runs one callback at a time only after normal context work has
+     * drained. Normal work queued before the callback executes invalidates the
+     * idle admission and moves the callback behind the new foreground work.
+     * Work scheduled recursively from an idle callback inherits the idle lane.
+     */
+    fun runOnKuiklyThreadIdle(pagerId: String, block: (cancel: Boolean) -> Unit) {
+        synchronized(this) {
+            val taskList = idleTaskMap[pagerId]
+                ?: mutableListOf<(Boolean) -> Unit>().also { idleTaskMap[pagerId] = it }
+            taskList.add(block)
+        }
+        scheduleIdleIfNeeded(pagerId)
     }
 
     /**
@@ -76,6 +103,77 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
                 platformNotifyKuiklyException(t)
             }
         }
+        scheduleIdleIfNeeded(pagerId)
+    }
+
+    /** Executes at most one idle callback. Called by the platform idle lane. */
+    internal fun runIdleTask(pagerId: String) {
+        val cancel = !BridgeManager.containNativeBridge(pagerId)
+        var task: ((Boolean) -> Unit)? = null
+        var shouldReschedule = false
+        synchronized(this) {
+            val scheduledGeneration = idleScheduleGenerationMap.remove(pagerId)
+            idleScheduleMap[pagerId] = false
+            val currentGeneration = normalGenerationMap[pagerId] ?: 0L
+            val hasNormalWork = scheduleMap[pagerId] == true || taskMap[pagerId].isNullOrEmpty().not()
+            val idleTasks = idleTaskMap[pagerId]
+            when (
+                kuiklyIdleAdmissionDecision(
+                    hasIdleWork = idleTasks.isNullOrEmpty().not(),
+                    hasNormalWork = hasNormalWork,
+                    scheduledGeneration = scheduledGeneration,
+                    currentGeneration = currentGeneration
+                )
+            ) {
+                KuiklyIdleAdmissionDecision.Run -> {
+                    val admittedTasks = idleTasks ?: return@synchronized
+                    task = admittedTasks.removeAt(0)
+                    if (admittedTasks.isEmpty()) {
+                        idleTaskMap.remove(pagerId)
+                    }
+                }
+                KuiklyIdleAdmissionDecision.Reschedule -> shouldReschedule = true
+                KuiklyIdleAdmissionDecision.WaitForNormalDrain,
+                KuiklyIdleAdmissionDecision.None -> Unit
+            }
+        }
+        if (shouldReschedule) {
+            scheduleIdleIfNeeded(pagerId)
+            return
+        }
+        val idleTask = task ?: return
+        BridgeManager.currentPageId = pagerId
+        executingIdlePagerId = pagerId
+        try {
+            idleTask(cancel)
+        } catch (t: Throwable) {
+            platformNotifyKuiklyException(t)
+        } finally {
+            executingIdlePagerId = null
+        }
+        scheduleIdleIfNeeded(pagerId)
+    }
+
+    private fun scheduleIdleIfNeeded(pagerId: String) {
+        var needSchedule = false
+        synchronized(this) {
+            val hasIdleWork = idleTaskMap[pagerId].isNullOrEmpty().not()
+            val hasNormalWork = scheduleMap[pagerId] == true || taskMap[pagerId].isNullOrEmpty().not()
+            if (
+                shouldScheduleKuiklyIdle(
+                    hasIdleWork = hasIdleWork,
+                    hasNormalWork = hasNormalWork,
+                    alreadyScheduled = idleScheduleMap[pagerId] == true
+                )
+            ) {
+                idleScheduleMap[pagerId] = true
+                idleScheduleGenerationMap[pagerId] = normalGenerationMap[pagerId] ?: 0L
+                needSchedule = true
+            }
+        }
+        if (needSchedule) {
+            platformScheduleIdleOnKuiklyThread(pagerId)
+        }
     }
 
 }
@@ -85,5 +183,7 @@ internal expect fun platformInitScheduler()
 internal expect inline fun platformIsOnKuiklyThread(pagerId: String): Boolean
 
 internal expect inline fun platformScheduleOnKuiklyThread(pagerId: String)
+
+internal expect inline fun platformScheduleIdleOnKuiklyThread(pagerId: String)
 
 internal expect inline fun platformNotifyKuiklyException(t: Throwable)

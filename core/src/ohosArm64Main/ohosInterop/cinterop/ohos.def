@@ -338,6 +338,7 @@ extern int com_tencent_kuikly_SetCallKotlin(CallKotlin callKotlin);
 extern void com_tencent_kuikly_CallNative(int methodId, const KRRenderCValue *arg0, const KRRenderCValue *arg1, const KRRenderCValue *arg2,
                                            const KRRenderCValue *arg3, const KRRenderCValue *arg4, const KRRenderCValue *arg5, KRRenderCValue *result);
 extern void com_tencent_kuikly_ScheduleContextTask(const char* pagerId, void (*onSchedule)(const char* pagerId));
+extern void com_tencent_kuikly_ScheduleContextIdleTask(const char* pagerId, void (*onSchedule)(const char* pagerId));
 extern bool com_tencent_kuikly_IsCurrentOnContextThread(const char* pagerId);
 
 long long com_tencent_kuikly_GetThreadCPUTimeInNanoseconds() {

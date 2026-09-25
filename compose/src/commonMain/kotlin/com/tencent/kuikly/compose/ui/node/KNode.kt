@@ -28,6 +28,7 @@ import com.tencent.kuikly.compose.ui.graphics.Matrix
 import com.tencent.kuikly.compose.ui.graphics.isIdentity
 import com.tencent.kuikly.compose.ui.layout.LayoutCoordinates
 import com.tencent.kuikly.compose.ui.platform.LocalDensity
+import com.tencent.kuikly.compose.ui.unit.IntOffset
 import com.tencent.kuikly.compose.ui.unit.IntSize
 import com.tencent.kuikly.compose.views.VirtualNodeView
 import com.tencent.kuikly.compose.layout.resetViewVisible
@@ -56,6 +57,24 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+
+internal fun correctedComposeOffsetForViewportChange(
+    composeOffset: Int,
+    nativeOffset: Int,
+    contentSize: Int,
+    previousViewportSize: Int,
+    newViewportSize: Int,
+    programmaticOffsetPending: Boolean,
+): Int? {
+    if (programmaticOffsetPending || previousViewportSize == newViewportSize) {
+        return null
+    }
+
+    val clampedNativeOffset = nativeOffset.coerceAtLeast(0)
+    val newMaxOffset = maxOf(0, contentSize - newViewportSize.coerceAtLeast(0))
+    val correctedOffset = minOf(clampedNativeOffset, newMaxOffset)
+    return correctedOffset.takeIf { it != composeOffset }
+}
 
 internal class KNode<T : DeclarativeBaseView<*, *>>(
     val view: T,
@@ -141,6 +160,21 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             view.getPager().removeNativeViewRef(view.nativeRef)
         }
         super.detach()
+    }
+
+    override fun onReuse() {
+        super.onReuse()
+        // A reusable Compose slot keeps the same native view while its modifier chain can now
+        // represent semantically different content. Always redraw so reset() -> flush() clears
+        // render-only state (for example borderRadius and clipPath) left by the previous item,
+        // even when the replacement modifiers are structurally equal and emit no invalidation.
+        //
+        // Reuse can start while this node is already dirty because onDeactivate/resetModifierState
+        // invalidated it under its previous parent. A normal invalidateDraw() is intentionally a
+        // no-op in that state, but the new parent may still be clean and therefore skip traversing
+        // this dirty child. Force propagation across the reuse boundary so the pending redraw is
+        // reachable from the new tree.
+        invalidateDrawAndForceAncestors()
     }
 
     override fun onRelease() {
@@ -232,6 +266,22 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         }
     }
 
+    internal fun invalidateDrawAndForceAncestors() {
+        drawInvalidated = true
+        val currentParent = parent
+        if (currentParent is KNode<*>) {
+            currentParent.invalidateDrawAndForceAncestors()
+        } else {
+            currentParent?.invalidateDraw()
+        }
+    }
+
+    internal fun clearDrawInvalidationForTest() {
+        drawInvalidated = false
+    }
+
+    internal fun isDrawInvalidatedForTest(): Boolean = drawInvalidated
+
     override fun onWillStartMeasure() {
         super.onWillStartMeasure()
         kuiklyCoordinates = null
@@ -302,18 +352,21 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
     }
 
     /**
-     * Corrects composeOffset when ScrollView height changes
+     * Reconciles composeOffset when the ScrollView viewport changes.
      * Mainly handles the following scenarios:
      * 1. When currently scrolled to the bottom and height becomes shorter, adjust offset to avoid exceeding boundaries
      * 2. When there is current offset but height increases, scrolling may no longer be needed, set offset to 0
+     * 3. When a programmatic owner is pending during a shrink, preserve its Compose target and return it
+     *    so updateFrame can replay the target only after the smaller native frame has been committed
      */
-    private fun updateScrollViewOffset(curFrame: Frame, newFrame: Frame) {
+    private fun updateScrollViewOffset(curFrame: Frame, newFrame: Frame): IntOffset? {
         if (view !is ScrollerView<*, *>) {
-            return
+            return null
         }
 
         val scrollerView = view as ScrollerView<*, *>
-        val kuiklyInfo = (scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo ?: return
+        val kuiklyInfo =
+            (scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo ?: return null
 
         if (curFrame != newFrame) {
             kuiklyInfo.offsetDirty = true
@@ -325,7 +378,7 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
 
         // If height hasn't changed, no correction needed
         if (curHeight == newHeight) {
-            return
+            return null
         }
 
         // Get current scroll offset - convert to pixel units
@@ -337,50 +390,52 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
 
         // Calculate maximum scrollable distance - use pixel units, consistent with composeOffset
         val currentContentSize = kuiklyInfo.currentContentSize // already in pixel units
+        val previousViewportSize = if (kuiklyInfo.isVertical()) {
+            (curHeight * kuiklyInfo.getDensity()).toInt()
+        } else {
+            (curFrame.width * kuiklyInfo.getDensity()).toInt()
+        }
         val viewportSize = if (kuiklyInfo.isVertical()) {
             (newHeight * kuiklyInfo.getDensity()).toInt()
         } else {
             (newFrame.width * kuiklyInfo.getDensity()).toInt()
         }
 
-        // Handle edge cases: if contentSize is 0 or viewportSize is 0, no scrolling needed
-        if (currentContentSize <= 0) {
-            kuiklyInfo.composeOffset = 0f
+        val pendingProgrammaticOffset = kuiklyInfo.ignoreScrollOffset
+        correctedComposeOffsetForViewportChange(
+            composeOffset = kuiklyInfo.composeOffset.toInt(),
+            nativeOffset = currentOffset,
+            contentSize = currentContentSize,
+            previousViewportSize = previousViewportSize,
+            newViewportSize = viewportSize,
+            programmaticOffsetPending = pendingProgrammaticOffset != null,
+        )?.let { correctedOffset ->
+            kuiklyInfo.composeOffset = correctedOffset.toFloat()
+        }
+
+        return pendingProgrammaticOffset?.takeIf { viewportSize < previousViewportSize }
+    }
+
+    private fun replayPendingScrollOffsetAfterViewportShrink(pendingOffset: IntOffset?) {
+        val offset = pendingOffset ?: return
+        val scrollerView = view as? ScrollerView<*, *> ?: return
+        val kuiklyInfo =
+            (scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo ?: return
+
+        // setFrameToRenderView can synchronously deliver the old native echo. Never resurrect a
+        // consumed target, or overwrite a newer programmatic owner captured during the resize.
+        if (kuiklyInfo.ignoreScrollOffset != offset) {
             return
         }
 
-        val maxScrollOffset = maxOf(0, currentContentSize - viewportSize)
-
-        // Correct composeOffset - use pixel units
-        val correctedOffset = when {
-            // If currently scrolled to bottom and height becomes shorter, adjust offset
-            currentOffset >= maxScrollOffset && newHeight < curHeight -> {
-                val newMaxScrollOffset = maxOf(0, currentContentSize - viewportSize)
-                minOf(currentOffset, newMaxScrollOffset)
-            }
-            // If there is current offset but height increases, check if adjustment is needed
-            currentOffset > 0 && newHeight > curHeight -> {
-                val newMaxScrollOffset = maxOf(0, currentContentSize - viewportSize)
-                if (newMaxScrollOffset <= 0) {
-                    0 // no scrolling needed
-                } else {
-                    // When height increases, keep composeOffset unchanged, but check if it exceeds boundaries
-                    if (currentOffset > newMaxScrollOffset) {
-                        newMaxScrollOffset // adjust to maximum when exceeding boundaries
-                    } else {
-                        currentOffset // keep unchanged when within boundaries
-                    }
-                }
-            }
-            // Other cases keep current offset
-            else -> {
-                currentOffset
-            }
-        }
-
-        // Update composeOffset
-        if (correctedOffset != currentOffset) {
-            kuiklyInfo.composeOffset = correctedOffset.toFloat()
+        val density = kuiklyInfo.getDensity()
+        val offsetX = offset.x / density
+        val offsetY = offset.y / density
+        if (scrollerView.contentView?.getPager()?.pageData?.isAndroid == true) {
+            // Keep the existing Android exact-bottom workaround used by applyOffsetDelta.
+            scrollerView.setContentOffset(max(0f, offsetX - 0.01f), max(0f, offsetY - 0.01f))
+        } else {
+            scrollerView.setContentOffset(offsetX, offsetY)
         }
     }
 
@@ -394,8 +449,9 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
                 height = newFrame.height
             )
 
-            updateScrollViewOffset(curFrame, densityFrame)
+            val pendingOffset = updateScrollViewOffset(curFrame, densityFrame)
             setFrameToRenderView(densityFrame)
+            replayPendingScrollOffsetAfterViewportShrink(pendingOffset)
             getViewEvent().notifyLayoutFrameDidChange(newFrame)
         }
     }

@@ -62,6 +62,12 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
     }
 }
 
+internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
+    setTimeout(pagerId, 0) {
+        KuiklyContextScheduler.runIdleTask(pagerId)
+    }
+}
+
 internal actual inline fun platformNotifyKuiklyException(t: Throwable) {
     BridgeManager.callExceptionMethod(t.stackTraceToString())
 }

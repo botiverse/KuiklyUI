@@ -21,6 +21,8 @@
 // 字典key常量
 NSString *const KRVFontSizeKey = @"fontSize";
 NSString *const KRVFontWeightKey = @"fontWeight";
+NSString *const KRVFontFamilyKey = @"fontFamily";
+NSString *const KRVFontContextParamKey = @"contextParam";
 
 /*
  * @brief 暴露给Kotlin侧调用的多行输入框组件
@@ -34,6 +36,8 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 @property (nonatomic, strong)  NSNumber *KUIKLY_PROP(fontSize);
 /** attr is fontWeight */
 @property (nonatomic, strong)  NSString *KUIKLY_PROP(fontWeight);
+/** attr is fontFamily */
+@property (nonatomic, strong)  NSString *KUIKLY_PROP(fontFamily);
 /** attr is placeholder */
 @property (nonatomic, strong)  NSString *KUIKLY_PROP(placeholder);
 /** attr is textAign */
@@ -79,8 +83,10 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
 - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
+- (void)p_updateFont;
 
 @end
+
 
 @implementation KRTextFieldView {
     /** text */
@@ -91,6 +97,9 @@ NSString *const KRVFontWeightKey = @"fontWeight";
     BOOL _setNeedUpdatePlaceholder;
     /** maxTextLength backing store */
     NSNumber *_css_maxTextLength;
+    NSNumber *_pendingFocusRequestId;
+    NSNumber *_pendingBlurRequestId;
+    NSUInteger _focusRequestEpoch;
     /** suppress native selection callback during programmatic selection updates */
     BOOL _ignoreSelectionChange;
     /** suppress intermediate textInputStateChange during programmatic state sync */
@@ -227,13 +236,17 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 - (void)setCss_fontSize:(NSNumber *)css_fontSize {
     _css_fontSize = css_fontSize;
-    self.font = [KRConvertUtil UIFont:@{KRVFontSizeKey: css_fontSize ?: @(16),
-                                        KRVFontWeightKey: _css_fontWeight ?: @"400"}];
+    [self p_updateFont];
 }
 
 - (void)setCss_fontWeight:(NSString *)css_fontWeight {
     _css_fontWeight = css_fontWeight;
-    [self setCss_fontSize:_css_fontSize];
+    [self p_updateFont];
+}
+
+- (void)setCss_fontFamily:(NSString *)css_fontFamily {
+    _css_fontFamily = css_fontFamily;
+    [self p_updateFont];
 }
 
 - (void)setCss_placeholder:(NSString *)css_placeholder {
@@ -248,7 +261,14 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 - (void)setCss_keyboardType:(NSString *)css_keyboardType {
     self.keyboardType = [KRConvertUtil hr_keyBoardType:css_keyboardType];
-    [self setSecureTextEntry:[css_keyboardType isEqualToString:@"password"]];
+    BOOL isPassword = [css_keyboardType isEqualToString:@"password"];
+    BOOL isEmail = [css_keyboardType isEqualToString:@"email"];
+    [self setSecureTextEntry:isPassword];
+    if (isEmail || isPassword) {
+        self.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        self.autocorrectionType = UITextAutocorrectionTypeNo;
+        self.spellCheckingType = UITextSpellCheckingTypeNo;
+    }
 }
 
 - (void)setCss_returnKeyType:(NSString *)css_returnKeyType {
@@ -276,13 +296,41 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 #pragma mark - css method
 
 - (void)css_focus:(NSDictionary *)args  {
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    NSUInteger requestEpoch = ++_focusRequestEpoch;
+    _pendingFocusRequestId = requestId;
+    _pendingBlurRequestId = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self becomeFirstResponder];
+        // The epoch is the cancellation token. A nullable request id cannot serve this purpose:
+        // legacy focus(nil) followed by blur/cancel would otherwise compare nil == nil and revive
+        // a stale first responder on the next main-queue drain.
+        if (requestEpoch != self->_focusRequestEpoch) {
+            return;
+        }
+        if (self.isFirstResponder) {
+            self->_pendingFocusRequestId = nil;
+            return;
+        }
+        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
+            self->_pendingFocusRequestId = nil;
+        }
     });
 }
 
 - (void)css_blur:(NSDictionary *)args  {
-    [self resignFirstResponder];
+    ++_focusRequestEpoch;
+    NSString *rawRequestId = args[KRC_PARAM_KEY];
+    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
+    _pendingFocusRequestId = nil;
+    if (!self.isFirstResponder || ![self resignFirstResponder]) {
+        _pendingBlurRequestId = nil;
+    }
+}
+
+- (void)css_cancelPendingFocus:(NSDictionary *)args {
+    ++_focusRequestEpoch;
+    _pendingFocusRequestId = nil;
 }
 
 - (void)css_setText:(NSDictionary *)args {
@@ -477,15 +525,27 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {  // 聚焦
+    _pendingBlurRequestId = nil;
     if (self.css_inputFocus) {
-        self.css_inputFocus(@{@"text": textField.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
+        if (_pendingFocusRequestId) {
+            payload[@"focusRequestId"] = _pendingFocusRequestId;
+        }
+        self.css_inputFocus(payload);
     }
+    _pendingFocusRequestId = nil;
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {  // 失焦
+    _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
-        self.css_inputBlur(@{@"text": textField.text.copy ?: @""});
+        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
+        if (_pendingBlurRequestId) {
+            payload[@"focusRequestId"] = _pendingBlurRequestId;
+        }
+        self.css_inputBlur(payload);
     }
+    _pendingBlurRequestId = nil;
 }
 
 - (void)textFieldDidChangeSelection:(UITextField *)textField {
@@ -569,6 +629,20 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 
 #pragma mark - private
+
+- (void)p_updateFont {
+    NSMutableDictionary *fontStyle = [@{
+        KRVFontSizeKey: _css_fontSize ?: @(16),
+        KRVFontWeightKey: _css_fontWeight ?: @"400"
+    } mutableCopy];
+    if (_css_fontFamily.length > 0) {
+        fontStyle[KRVFontFamilyKey] = _css_fontFamily;
+    }
+    if (self.hr_rootView.contextParam) {
+        fontStyle[KRVFontContextParamKey] = self.hr_rootView.contextParam;
+    }
+    self.font = [KRConvertUtil UIFont:fontStyle];
+}
 
 - (void)p_addKeyboardNotificationIfNeed {
     if (_didAddKeyboardNotification) {
@@ -914,5 +988,3 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 }
 
 @end
-
-

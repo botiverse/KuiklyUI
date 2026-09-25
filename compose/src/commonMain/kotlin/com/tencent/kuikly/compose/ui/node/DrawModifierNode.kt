@@ -32,10 +32,12 @@ import com.tencent.kuikly.core.base.DeclarativeBaseView
  * @sample com.tencent.kuikly.compose.ui.samples.DrawModifierNodeSample
  */
 interface DrawModifierNode : DelegatableNode {
-    fun ContentDrawScope.draw() { }
+    fun ContentDrawScope.draw() {
+        drawContent()
+    }
     fun onMeasureResultChanged() {}
     fun ContentDrawScope.draw(view: DeclarativeBaseView<*, *>?) {
-        drawContent()
+        draw()
     }
 }
 

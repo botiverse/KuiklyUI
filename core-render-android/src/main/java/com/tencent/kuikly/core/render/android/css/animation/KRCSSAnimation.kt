@@ -23,6 +23,9 @@ import com.tencent.kuikly.core.render.android.KuiklyRenderView
 import com.tencent.kuikly.core.render.android.const.KRCssConst
 import com.tencent.kuikly.core.render.android.css.ktx.frameHeight
 import com.tencent.kuikly.core.render.android.css.ktx.frameWidth
+import com.tencent.kuikly.core.render.android.css.ktx.getViewData
+import com.tencent.kuikly.core.render.android.css.ktx.putViewData
+import com.tencent.kuikly.core.render.android.css.ktx.removeViewData
 import com.tencent.kuikly.core.render.android.css.ktx.removeHRAnimation
 import com.tencent.kuikly.core.render.android.css.ktx.toPxF
 import com.tencent.kuikly.core.render.android.css.ktx.obtainViewDecorator
@@ -319,6 +322,12 @@ class KRCSSTransform(transform: String?, private val target: View) {
     var skewX: Float = DEFAULT_SKEW_X
     var skewY: Float = DEFAULT_SKEW_Y
 
+    /**
+     * 是否来自动画帧驱动（[TransformTypeEvaluator]）。动画帧必须走 View 属性
+     * 变换（RenderNode 硬件加速），不参与 canvas 矩阵旋转路径。
+     */
+    internal var fromAnimation = false
+
     init {
         initTransform(transform)
     }
@@ -327,7 +336,8 @@ class KRCSSTransform(transform: String?, private val target: View) {
      * 应用transform到targetView
      */
     fun applyTransform() {
-        target.rotation = rotate
+        val canvasRotation = shouldRenderRotationOnCanvas()
+        target.rotation = if (canvasRotation) DEFAULT_ROTATE else rotate
         target.rotationX = rotateX
         target.rotationY = rotateY
         target.scaleX = scaleX
@@ -346,7 +356,7 @@ class KRCSSTransform(transform: String?, private val target: View) {
             // For more information, see https://github.com/facebook/react-native/pull/18302
             target.cameraDistance = density * density * DEFAULT_PERSPECTIVE * sqrt(5f)
         }
-        applySkewTransform()
+        applyCanvasMatrixTransform(canvasRotation)
         handleOverflowBounds()
     }
 
@@ -399,7 +409,7 @@ class KRCSSTransform(transform: String?, private val target: View) {
     }
 
     private fun initTransformFromTargetView() {
-        rotate = target.rotation
+        rotate = target.getViewData<Float>(KEY_CANVAS_ROTATION) ?: target.rotation
         rotateX = target.rotationX
         rotateY = target.rotationY
         scaleX = target.scaleX
@@ -454,29 +464,68 @@ class KRCSSTransform(transform: String?, private val target: View) {
 
     }
 
-    private fun applySkewTransform() {
-        if (skewX == DEFAULT_SKEW_X && skewY == DEFAULT_SKEW_Y) {
+    /**
+     * 小角度静态旋转改走 canvas 矩阵而不是 View.rotation。
+     *
+     * View.rotation 是 RenderNode 属性变换：硬件渲染下文字 glyph 先按未旋转
+     * 方向栅格化进字体图集，再整体被 GPU 重采样，小字号文字明显发糊，旋转
+     * 四边形边缘也缺少抗锯齿（web 端同款问题见 slock index.css .tilt-neg-2）。
+     * canvas 层矩阵在录制 display list 时参与 glyph 栅格化（与 skew 走的
+     * [KRViewDecoration.matrix] 同一条路径），文字与边缘保持锐利。
+     *
+     * 仅在满足以下条件时启用，避免影响动画性能与触摸命中：
+     * 1. 非动画帧驱动（动画期间保持属性变换，保证逐帧性能）；
+     * 2. 纯 Z 轴旋转且无缩放/平移（canvas 矩阵不改 View 触摸映射，其他
+     *    分量混合时坐标语义复杂）；
+     * 3. 角度 ≤ [CANVAS_ROTATION_MAX_DEGREES]（装饰性小倾斜的触摸命中
+     *    误差只有 1~2px，可以忽略；大角度旋转的交互元素仍需属性变换）。
+     */
+    private fun shouldRenderRotationOnCanvas(): Boolean {
+        return !fromAnimation &&
+            rotate != DEFAULT_ROTATE &&
+            abs(rotate) <= CANVAS_ROTATION_MAX_DEGREES &&
+            rotateX == DEFAULT_ROTATE_X && rotateY == DEFAULT_ROTATE_Y &&
+            scaleX == DEFAULT_SCALE_X && scaleY == DEFAULT_SCALE_Y &&
+            translateX == DEFAULT_TRANSLATE_X && translateY == DEFAULT_TRANSLATE_Y
+    }
+
+    private fun applyCanvasMatrixTransform(canvasRotation: Boolean) {
+        val hasSkewValue = skewX != DEFAULT_SKEW_X || skewY != DEFAULT_SKEW_Y
+        if (!hasSkewValue && !canvasRotation) {
             target.optViewDecorator()?.matrix = null
-        } else {
+            target.removeViewData<Float>(KEY_CANVAS_ROTATION)
+            return
+        }
+        val matrix = Matrix()
+        if (hasSkewValue) {
             val horizontalSkewAngleInRadians = Math.toRadians(skewX.toDouble())
             val verticalSkewAngleInRadians = Math.toRadians(skewY.toDouble())
-            target.obtainViewDecorator().matrix = Matrix().apply {
-                setSkew(
-                    tan(horizontalSkewAngleInRadians).toFloat(),
-                    tan(verticalSkewAngleInRadians).toFloat(),
-                    pivotX,
-                    pivotY
-                )
-            }
+            matrix.setSkew(
+                tan(horizontalSkewAngleInRadians).toFloat(),
+                tan(verticalSkewAngleInRadians).toFloat(),
+                pivotX,
+                pivotY
+            )
         }
+        if (canvasRotation) {
+            matrix.postRotate(rotate, pivotX, pivotY)
+            // 记录 canvas 旋转角，供 initTransformFromTargetView 读取——
+            // 否则以当前状态为起点的动画会误把起始角当成 0。
+            target.putViewData(KEY_CANVAS_ROTATION, rotate)
+        } else {
+            target.removeViewData<Float>(KEY_CANVAS_ROTATION)
+        }
+        target.obtainViewDecorator().matrix = matrix
+        target.invalidate()
     }
 
     private fun resetSkewTransform() {
         if (skewX != DEFAULT_SKEW_X || skewY != DEFAULT_SKEW_Y) {
             skewX = DEFAULT_SKEW_X
             skewY = DEFAULT_SKEW_Y
-            target.optViewDecorator()?.matrix = null
         }
+        // 无条件清掉 canvas 矩阵：skew 或 canvas 旋转任一设置过都需要复位
+        target.optViewDecorator()?.matrix = null
     }
 
     private fun handleOverflowBounds() {
@@ -540,5 +589,7 @@ class KRCSSTransform(transform: String?, private val target: View) {
         private const val DEFAULT_SKEW_X = 0f
         private const val DEFAULT_SKEW_Y = 0f
         private const val DEFAULT_PERSPECTIVE = 1280f
+        private const val CANVAS_ROTATION_MAX_DEGREES = 15f
+        private const val KEY_CANVAS_ROTATION = "kr_canvas_rotation"
     }
 }

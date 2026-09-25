@@ -6,7 +6,6 @@ plugins {
     // Import maven publishing plugin
     id("maven-publish")
 }
-
 // maven 产物 groupId，com.tencent.kuikly
 group = MavenConfig.GROUP_WEB
 // maven 产物版本，这里统一使用 render 的版本号
@@ -64,4 +63,3 @@ kotlin {
         }
     }
 }
-

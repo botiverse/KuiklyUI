@@ -29,6 +29,23 @@ typedef NS_ENUM(NSUInteger, KRSetContentOffsetAnimation) {
     KRSetContentOffsetAnimationLinear = 1,
 };
 
+static BOOL KRScrollEventValueIsFinite(CGFloat value) {
+    return !isnan(value) && !isinf(value);
+}
+
+static BOOL KRScrollEventPointIsFinite(CGPoint point) {
+    return KRScrollEventValueIsFinite(point.x) && KRScrollEventValueIsFinite(point.y);
+}
+
+static void KRLogDroppedScrollEventValue(NSString *field,
+                                         CGFloat value,
+                                         NSString *action) {
+    NSLog(@"[kuikly error][KRScrollView] non-finite scroll event value field=%@ value=%@ action=%@",
+          field,
+          @(value),
+          action);
+}
+
 /*
  * @brief 暴露给Kotlin侧调用的Scoller组件
  */
@@ -36,6 +53,8 @@ typedef NS_ENUM(NSUInteger, KRSetContentOffsetAnimation) {
 
 /** attr is bouncesEnable  */
 @property (nonatomic, strong) NSNumber *KUIKLY_PROP(bouncesEnable);
+/** attr enables UIScrollViewKeyboardDismissModeInteractive on iOS */
+@property (nonatomic, strong) NSNumber *KUIKLY_PROP(keyboardDismissModeInteractiveIOS);
 /** attr is pagingEnabled  */
 @property (nonatomic, strong) NSNumber *KUIKLY_PROP(pagingEnabled);
 /** attr is isComposePager  */
@@ -152,10 +171,10 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     _offsetAnimator = nil;
 
     _ignoreDispatchScrollEvent = NO;
-    
+
     CGPoint currentOffset = self.contentOffset;
     [self setContentOffset:currentOffset animated:NO];
-    
+
     _nextEndScrollingAnimationCallback = nil;
 }
 
@@ -296,7 +315,10 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     [_ku_coreAnimator stop];
     _ku_coreAnimator = nil;
     if (_css_dragBegin) {
-       _css_dragBegin([self p_generateEventBaseParams]);
+        NSDictionary *eventParams = [self p_generateEventBaseParams];
+        if (eventParams) {
+            _css_dragBegin(eventParams);
+        }
     }
 }
 
@@ -305,11 +327,17 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     if (!decelerate) { // 滑动结束
         BOOL animating = [_ku_coreAnimator isAnimating];
         if (_css_scrollEnd && !animating) {
-            _css_scrollEnd([self p_generateEventBaseParams]);
+            NSDictionary *eventParams = [self p_generateEventBaseParams];
+            if (eventParams) {
+                _css_scrollEnd(eventParams);
+            }
         }
     }
     if (_css_dragEnd) {
-        _css_dragEnd([self p_generateEventBaseParams]);
+        NSDictionary *eventParams = [self p_generateEventBaseParams];
+        if (eventParams) {
+            _css_dragEnd(eventParams);
+        }
     }
     if (!UIEdgeInsetsEqualToEdgeInsets(_contentInsetWhenEndDrag, UIEdgeInsetsZero)
         && scrollView.contentOffset.y < -_contentInsetWhenEndDrag.top
@@ -317,13 +345,16 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
         UIEdgeInsets insets = _contentInsetWhenEndDrag;
         self.contentInset = insets;
     }
-    
+
 }
 
 - (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
     BOOL animating = [_ku_coreAnimator isAnimating];
     if (_css_scrollEnd && !animating) {
-        _css_scrollEnd([self p_generateEventBaseParams]);
+        NSDictionary *eventParams = [self p_generateEventBaseParams];
+        if (eventParams) {
+            _css_scrollEnd(eventParams);
+        }
     }
 }
 
@@ -338,7 +369,10 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 
 - (void)scrollViewDidEndScrollingAnimation:(UIScrollView *)scrollView {
     if (_css_scrollEnd) {
-        _css_scrollEnd([self p_generateEventBaseParams]);
+        NSDictionary *eventParams = [self p_generateEventBaseParams];
+        if (eventParams) {
+            _css_scrollEnd(eventParams);
+        }
     }
     if (_nextEndScrollingAnimationCallback) {
         _nextEndScrollingAnimationCallback();
@@ -402,7 +436,10 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
                         __strong typeof(weakSelf) strongSelf = weakSelf;
                         if (!strongSelf) return;
                         if (finished && strongSelf->_css_scrollEnd) {
-                            strongSelf->_css_scrollEnd([strongSelf p_generateEventBaseParams]);
+                            NSDictionary *eventParams = [strongSelf p_generateEventBaseParams];
+                            if (eventParams) {
+                                strongSelf->_css_scrollEnd(eventParams);
+                            }
                         }
                     }];
         }
@@ -427,11 +464,27 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 
         _targetContentOffset = targetContentOffset;
         NSMutableDictionary *params = [[self p_generateEventBaseParams] mutableCopy];
-        params[@"velocityX"] = @(velocity.x);
-        params[@"velocityY"] = @(velocity.y);
-        params[@"targetContentOffsetX"] = @((*targetContentOffset).x);
-        params[@"targetContentOffsetY"] = @((*targetContentOffset).y);
-        _css_willDragEnd(params); /// setContentOffset ()
+        CGPoint target = targetContentOffset ? *targetContentOffset : CGPointZero;
+        if (!KRScrollEventValueIsFinite(velocity.x)) {
+            KRLogDroppedScrollEventValue(@"velocityX", velocity.x, @"drop_event");
+            params = nil;
+        } else if (!KRScrollEventValueIsFinite(velocity.y)) {
+            KRLogDroppedScrollEventValue(@"velocityY", velocity.y, @"drop_event");
+            params = nil;
+        } else if (!KRScrollEventValueIsFinite(target.x)) {
+            KRLogDroppedScrollEventValue(@"targetContentOffsetX", target.x, @"drop_event");
+            params = nil;
+        } else if (!KRScrollEventValueIsFinite(target.y)) {
+            KRLogDroppedScrollEventValue(@"targetContentOffsetY", target.y, @"drop_event");
+            params = nil;
+        }
+        if (params) {
+            params[@"velocityX"] = @(velocity.x);
+            params[@"velocityY"] = @(velocity.y);
+            params[@"targetContentOffsetX"] = @(target.x);
+            params[@"targetContentOffsetY"] = @(target.y);
+            _css_willDragEnd(params); /// setContentOffset ()
+        }
         _targetContentOffset = nil;
     }
 }
@@ -465,11 +518,6 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     NSArray<NSString *> *points = [params componentsSeparatedByString:@" "];
     BOOL animated = [points count] > 4 ? [points[4] boolValue] : NO;
     UIEdgeInsets contentInset = UIEdgeInsetsMake([points[0] doubleValue], [points[1] doubleValue], [points[2] doubleValue], [points[3] doubleValue]);
-    // Skip if inset unchanged — avoids spurious animated setContentOffset that conflicts
-    // with a subsequent inset change (e.g. PullToRefresh REFRESHING→IDLE within same frame)
-    if (UIEdgeInsetsEqualToEdgeInsets(self.contentInset, contentInset)) {
-        return;
-    }
     if (animated) {
         CGPoint maxContentOffset = [self p_maxContentOffsetInContentInset:contentInset];
         if (!CGPointEqualToPoint(self.contentOffset, maxContentOffset)) {
@@ -502,6 +550,17 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     if (self.css_bouncesEnable != css_bouncesEnable) {
         _css_bouncesEnable = css_bouncesEnable;
         self.bounces = _css_bouncesEnable ? [css_bouncesEnable boolValue] : YES;
+    }
+}
+
+- (void)setCss_keyboardDismissModeInteractiveIOS:(NSNumber *)css_keyboardDismissModeInteractiveIOS {
+    if (self.css_keyboardDismissModeInteractiveIOS != css_keyboardDismissModeInteractiveIOS) {
+        _css_keyboardDismissModeInteractiveIOS = css_keyboardDismissModeInteractiveIOS;
+        #if !TARGET_OS_OSX // [macOS]
+        self.keyboardDismissMode = [css_keyboardDismissModeInteractiveIOS boolValue]
+            ? UIScrollViewKeyboardDismissModeInteractive
+            : UIScrollViewKeyboardDismissModeNone;
+        #endif // [macOS]
     }
 }
 
@@ -735,8 +794,8 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
                     syncCallback = ![self p_hasEnoughVisibleContentViews];
                 }
                 NSMutableDictionary *param = [[self p_generateEventBaseParams] mutableCopy];
-                param[KR_SYNC_CALLBACK_KEY] = @(syncCallback ? 1 : 0); // 同步加载
-                if (self.css_scroll) {
+                if (param) {
+                    param[KR_SYNC_CALLBACK_KEY] = @(syncCallback ? 1 : 0); // 同步加载
                     self.css_scroll(param);
                 }
             };
@@ -797,11 +856,46 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 
 
 - (NSDictionary *)p_generateEventBaseParams {
-    
+    CGFloat coreValues[] = {
+        _lastContentOffset.x,
+        _lastContentOffset.y,
+        self.contentSize.width,
+        self.contentSize.height,
+        self.frame.size.width,
+        self.frame.size.height,
+    };
+    NSArray<NSString *> *coreFields = @[
+        @"offsetX",
+        @"offsetY",
+        @"contentWidth",
+        @"contentHeight",
+        @"viewWidth",
+        @"viewHeight",
+    ];
+    for (NSUInteger i = 0; i < coreFields.count; i++) {
+        if (!KRScrollEventValueIsFinite(coreValues[i])) {
+            KRLogDroppedScrollEventValue(coreFields[i], coreValues[i], @"drop_event");
+            return nil;
+        }
+    }
+
     NSMutableArray *touchesParam = [NSMutableArray new];
     #if !TARGET_OS_OSX // [macOS]
     for (int i = 0; i < self.panGestureRecognizer.numberOfTouches; i++) {
         CGPoint pagePoint = [self.panGestureRecognizer locationOfTouch:i inView:self.hr_rootView];
+        if (!KRScrollEventPointIsFinite(pagePoint)) {
+            if (!KRScrollEventValueIsFinite(pagePoint.x)) {
+                KRLogDroppedScrollEventValue([NSString stringWithFormat:@"touches[%d].pageX", i],
+                                             pagePoint.x,
+                                             @"drop_touch");
+            }
+            if (!KRScrollEventValueIsFinite(pagePoint.y)) {
+                KRLogDroppedScrollEventValue([NSString stringWithFormat:@"touches[%d].pageY", i],
+                                             pagePoint.y,
+                                             @"drop_touch");
+            }
+            continue;
+        }
         [touchesParam addObject:@{
             @"pageX" : @(pagePoint.x),
             @"pageY" : @(pagePoint.y)
@@ -810,10 +904,19 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
     #else // [macOS
     // On macOS, get mouse location to simulate single touch point
     CGPoint mousePoint = [self kr_mouseLocationInView:self.hr_rootView];
-    [touchesParam addObject:@{
-        @"pageX" : @(mousePoint.x),
-        @"pageY" : @(mousePoint.y)
-    }];
+    if (KRScrollEventPointIsFinite(mousePoint)) {
+        [touchesParam addObject:@{
+            @"pageX" : @(mousePoint.x),
+            @"pageY" : @(mousePoint.y)
+        }];
+    } else {
+        if (!KRScrollEventValueIsFinite(mousePoint.x)) {
+            KRLogDroppedScrollEventValue(@"touches[0].pageX", mousePoint.x, @"drop_touch");
+        }
+        if (!KRScrollEventValueIsFinite(mousePoint.y)) {
+            KRLogDroppedScrollEventValue(@"touches[0].pageY", mousePoint.y, @"drop_touch");
+        }
+    }
     #endif // macOS]
     
     return @{
@@ -907,8 +1010,6 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 }
 
 @end
-
-
 @interface KRScrollContentView ()
 @property (nonatomic, weak) id<KRScrollContentViewDelegate> delegate;
 @end
@@ -1028,7 +1129,3 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
 }
 
 @end
-
-
-
-

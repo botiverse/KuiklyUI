@@ -15,6 +15,7 @@
 
 package com.tencent.kuikly.compose.extension
 
+import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.node.KNode
 import com.tencent.kuikly.compose.ui.semantics.Role
 import com.tencent.kuikly.compose.ui.semantics.SemanticsActions
@@ -32,22 +33,26 @@ import com.tencent.kuikly.core.base.attr.AccessibilityRole
  * 主要功能：
  * 1. 监听并处理 Compose 语义树的变更，自动为节点设置合适的无障碍文本和角色。
  * 2. 感知 stateDescription 的新增、变化和消失，并提供回调接口供业务自定义处理。
- * 3. 内部维护节点 stateDescription 的缓存，支持外部主动清理缓存，防止内存泄漏。
+ * 3. 内部维护节点 stateDescription 和原生语义状态，支持节点卸载与主动清理，防止内存泄漏。
  */
 class KuiklySemantisHandler {
 
     private val lastStateDescriptionMap = mutableMapOf<Int, String?>()
+    private val nativeSemanticsNodes = NativeSemanticsNodeRegistry<KNode<*>>()
 
     /**
      * 语义树变更回调，自动为节点设置无障碍文本和角色，并感知 stateDescription 变化。
      * @param semanticsOwner 当前 Compose 语义树的 owner
      */
+    @OptIn(ExperimentalComposeUiApi::class)
     fun onSemanticsChange(semanticsOwner: SemanticsOwner) {
         val allNodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = true)
         val currentNodeIds = mutableSetOf<Int>()
+        val currentNativeNodes = mutableMapOf<Int, KNode<*>>()
         allNodes.forEach { node ->
             val config = node.config
             val role = config.getOrNull(SemanticsProperties.Role)
+            val isInvisibleToUser = config.getOrNull(SemanticsProperties.InvisibleToUser) != null
             val stateDescription = config.getOrNull(SemanticsProperties.StateDescription)
             val nodeId = node.id
             currentNodeIds.add(nodeId)
@@ -55,15 +60,13 @@ class KuiklySemantisHandler {
             val isClickable = config.getOrNull(SemanticsActions.OnClick) != null
             val isLongClickable = config.getOrNull(SemanticsActions.OnLongClick) != null
             (node.layoutNode as? KNode<*>)?.run {
+                currentNativeNodes[nodeId] = this
                 val accessibility = buildAccessibilityText(node.config)
-                if (accessibility != "") {
-                    view.getViewAttr().accessibility(accessibility)
-                    val kuiklyAccRole = convertComposeRoleToKuiklyRole(role)
-                    view.getViewAttr().accessibilityRole(kuiklyAccRole)
-                }
-                if (isClickable || isLongClickable) {
-                    view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
-                }
+                view.getViewAttr().accessibility(accessibility)
+                view.getViewAttr().accessibilityRole(
+                    resolveNativeAccessibilityRole(isInvisibleToUser, accessibility.isNotEmpty(), role)
+                )
+                view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
 
                 val testTag = config.getOrNull(SemanticsProperties.TestTag)
                 if (testTag != null) {
@@ -82,6 +85,27 @@ class KuiklySemantisHandler {
                 lastStateDescriptionMap[nodeId] = stateDescription
             }
         }
+        val unmergedNodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = false)
+        val hiddenLayoutNodes = unmergedNodes
+            .filter { node ->
+                node.config.getOrNull(SemanticsProperties.InvisibleToUser) != null
+            }
+            .mapTo(mutableSetOf()) { node -> node.layoutNode }
+        // Semantic parent links can stop at merge/clear boundaries while the flattened native
+        // views remain descendants in the LayoutNode tree. Project hidden state through that
+        // stable ancestry so every native accessibility candidate is covered.
+        effectivelyHiddenNodes(
+            nodes = (allNodes + unmergedNodes).distinctBy(SemanticsNode::id),
+            firstAncestor = { node -> node.layoutNode },
+            isHidden = hiddenLayoutNodes::contains,
+            parentOf = { layoutNode -> layoutNode.parent }
+        ).forEach { node ->
+            (node.layoutNode as? KNode<*>)?.run {
+                currentNativeNodes[node.id] = this
+                hideNativeSemantics(this)
+            }
+        }
+        nativeSemanticsNodes.reconcile(currentNativeNodes).forEach(::clearNativeSemantics)
         val removedIds = lastStateDescriptionMap.keys - currentNodeIds
         for (removedId in removedIds) {
             val lastDesc = lastStateDescriptionMap[removedId]
@@ -164,20 +188,86 @@ class KuiklySemantisHandler {
         return textBuilder.toString()
     }
 
-    private fun convertComposeRoleToKuiklyRole(role: Role?): AccessibilityRole {
-        val kuiklyAccRole = when (role) {
-            Role.Image -> AccessibilityRole.IMAGE
-            Role.Checkbox -> AccessibilityRole.CHECKBOX
-            Role.Switch -> AccessibilityRole.TEXT
-            Role.Button -> AccessibilityRole.BUTTON
-            Role.RadioButton -> AccessibilityRole.CHECKBOX
-            else -> AccessibilityRole.TEXT
+    private fun clearNativeSemantics(node: KNode<*>) {
+        node.view.getViewAttr().apply {
+            accessibility("")
+            accessibilityRole(AccessibilityRole.NONE)
+            accessibilityInfo(false, false)
         }
-        return kuiklyAccRole
+    }
+
+    private fun hideNativeSemantics(node: KNode<*>) {
+        node.view.getViewAttr().accessibilityRole(AccessibilityRole.HIDDEN)
+    }
+
+    fun onNodeDetached(nodeId: Int) {
+        lastStateDescriptionMap.remove(nodeId)
+        nativeSemanticsNodes.remove(nodeId)
     }
 
     fun clearCache() {
         lastStateDescriptionMap.clear()
+        nativeSemanticsNodes.clear()
+    }
+}
+
+internal fun resolveNativeAccessibilityRole(
+    isInvisibleToUser: Boolean,
+    hasAccessibilityText: Boolean,
+    role: Role?
+): AccessibilityRole = when {
+    isInvisibleToUser -> AccessibilityRole.HIDDEN
+    !hasAccessibilityText && role == null -> AccessibilityRole.NONE
+    role == Role.Image -> AccessibilityRole.IMAGE
+    role == Role.Checkbox -> AccessibilityRole.CHECKBOX
+    role == Role.Button -> AccessibilityRole.BUTTON
+    role == Role.RadioButton -> AccessibilityRole.CHECKBOX
+    else -> AccessibilityRole.TEXT
+}
+
+internal class NativeSemanticsNodeRegistry<T : Any> {
+    private val nodes = mutableMapOf<Int, T>()
+
+    fun reconcile(current: Map<Int, T>): List<T> {
+        val removed = nodes.mapNotNull { (id, previousNode) ->
+            val currentNode = current[id]
+            previousNode.takeIf { currentNode == null || currentNode !== previousNode }
+        }
+        nodes.clear()
+        nodes.putAll(current)
+        return removed
     }
 
+    fun clear(): List<T> = nodes.values.toList().also { nodes.clear() }
+
+    fun remove(id: Int): T? = nodes.remove(id)
+}
+
+internal fun <T : Any> effectivelyHiddenNodes(
+    nodes: List<T>,
+    isHidden: (T) -> Boolean,
+    parentOf: (T) -> T?
+): Set<T> = effectivelyHiddenNodes(
+    nodes = nodes,
+    firstAncestor = { node -> node },
+    isHidden = isHidden,
+    parentOf = parentOf
+)
+
+internal fun <T : Any, A : Any> effectivelyHiddenNodes(
+    nodes: List<T>,
+    firstAncestor: (T) -> A,
+    isHidden: (A) -> Boolean,
+    parentOf: (A) -> A?
+): Set<T> = buildSet {
+    nodes.forEach { node ->
+        var ancestor: A? = firstAncestor(node)
+        while (ancestor != null) {
+            if (isHidden(ancestor)) {
+                add(node)
+                break
+            }
+            ancestor = parentOf(ancestor)
+        }
+    }
 }

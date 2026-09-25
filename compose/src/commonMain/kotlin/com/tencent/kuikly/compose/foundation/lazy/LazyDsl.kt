@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-@file:OptIn(ExperimentalFoundationApi::class)
-
 package com.tencent.kuikly.compose.foundation.lazy
 
 import com.tencent.kuikly.compose.foundation.ExperimentalFoundationApi

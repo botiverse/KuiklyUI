@@ -1,0 +1,52 @@
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+
+def version = "2.0.21-KBA-010"
+def gavs = [
+    "org.jetbrains.kotlin:kotlin-stdlib:${version}",
+    "org.jetbrains.kotlin:kotlin-stdlib-common:${version}",
+]
+
+def metadataClosure = configurations.create("task127MetadataClosure") {
+    canBeConsumed = false
+    canBeResolved = true
+}
+def jarClosure = configurations.create("task127JarClosure") {
+    canBeConsumed = false
+    canBeResolved = true
+}
+
+dependencies {
+    gavs.each { gav ->
+        add(metadataClosure.name, gav) { transitive = false }
+        add(jarClosure.name, "${gav}@jar") { transitive = false }
+    }
+}
+
+tasks.register("resolveTask127Authority") {
+    doLast {
+        def actualComponents = metadataClosure.incoming.resolutionResult.allComponents
+            .collect { it.id }
+            .findAll { it instanceof ModuleComponentIdentifier }
+            .collect { "${it.group}:${it.module}:${it.version}" }
+            .toSet()
+        assert actualComponents == gavs.toSet():
+            "unexpected task #127 metadata closure: ${actualComponents.sort()}"
+
+        def expectedJars = [
+            ("kotlin-stdlib-${version}.jar".toString()):
+                "110eda211833f9cad02c773fa65a04961d12afe0e702c9e47bfe8b6bc73ab166",
+            ("kotlin-stdlib-common-${version}.jar".toString()):
+                "56a16a46f9e3c3699f1afa188da779dfd9a5593148e047e36123482ac463ae1a",
+        ]
+        def actualJars = jarClosure.resolve().collectEntries { file ->
+            def digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(file.bytes)
+                .encodeHex()
+                .toString()
+            [(file.name): digest]
+        }
+        assert actualJars == expectedJars:
+            "unexpected task #127 authority jars: ${actualJars}"
+        println "TASK127_TENCENT_AUTHORITY_RESOLVE_PASS components=2 jars=2"
+    }
+}

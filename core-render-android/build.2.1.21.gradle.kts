@@ -5,24 +5,30 @@ plugins {
     signing
 }
 
+apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
+val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
+    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
+
 group = MavenConfig.GROUP
 version = Version.getCoreVersion()
 
 afterEvaluate {
     publishing {
         repositories {
-            val username = MavenConfig.getUsername(project)
-            val password = MavenConfig.getPassword(project)
-            if (username.isNotEmpty() && password.isNotEmpty()) {
-                maven {
-                    credentials {
-                        setUsername(username)
-                        setPassword(password)
+            if (!raftPublicationMode) {
+                val username = MavenConfig.getUsername(project)
+                val password = MavenConfig.getPassword(project)
+                if (username.isNotEmpty() && password.isNotEmpty()) {
+                    maven {
+                        credentials {
+                            setUsername(username)
+                            setPassword(password)
+                        }
+                        url = uri(MavenConfig.getRepoUrl(version as String))
                     }
-                    url = uri(MavenConfig.getRepoUrl(version as String))
+                } else {
+                    mavenLocal()
                 }
-            } else {
-                mavenLocal()
             }
         }
 
@@ -79,4 +85,9 @@ dependencies {
     compileOnly(project(":core"))
     implementation("androidx.appcompat:appcompat:1.2.0")
     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.12.2")
+    // task #476: real org.json for JVM unit tests (the android.jar stubs
+    // throw "not mocked") — needed by KuiklyRenderExtensionMarshalTest.
+    testImplementation("org.json:json:20231013")
 }

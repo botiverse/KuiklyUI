@@ -260,7 +260,7 @@ fun View.resetCommonProp(propKey: String): Boolean {
             return true
         }
         KRCssConst.BACKGROUND_COLOR -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.TOUCH_ENABLE -> {
@@ -272,19 +272,19 @@ fun View.resetCommonProp(propKey: String): Boolean {
             return true
         }
         KRCssConst.BACKGROUND_IMAGE -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.BOX_SHADOW -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.BORDER_RADIUS -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.BORDER -> {
-            resetBorder()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.CLICK -> {
@@ -534,16 +534,13 @@ private var View.borderStyle: String?
 /**
  * 重置View的background
  */
-private fun View.resetHRBackground() {
+private fun View.resetDecorationForReuse() {
+    optViewDecorator()?.resetForReuse()
     background = null
-    destroyViewDecorator()
-}
-
-private fun View.resetBorder() {
-    destroyViewDecorator()
     if (!isBeforeM) {
         foreground = null
     }
+    destroyViewDecorator()
 }
 
 /**
@@ -807,6 +804,7 @@ fun View.clearViewData() {
 fun String?.toJSONObjectSafely(): JSONObject = JSONObject(this ?: "{}")
 
 private const val ROLE_NONE = "none"
+private const val ROLE_HIDDEN = "hidden"
 private fun View.setAccessibilityRole(propValue: Any) {
     val value = when (propValue as String) {
         "button" -> Button::class.java.name
@@ -815,6 +813,7 @@ private fun View.setAccessibilityRole(propValue: Any) {
         "image" -> ImageView::class.java.name
         "checkbox" -> CheckBox::class.java.name
         "none" -> ROLE_NONE
+        "hidden" -> ROLE_HIDDEN
         else -> ""
     }
     putViewData(KRCssConst.ACCESSIBILITY_ROLE, value)
@@ -825,9 +824,18 @@ private fun View.setAccessibilityRole(propValue: Any) {
 private fun View.setTestTag(propValue: Any) {
     val tag = propValue as String
     putViewData(KRCssConst.TEST_TAG, tag)
-    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+    importantForAccessibility = resolveTestTagAccessibilityImportance(
+        getViewData(KRCssConst.ACCESSIBILITY_ROLE)
+    )
     initAccessibilityDelegate()
 }
+
+internal fun resolveTestTagAccessibilityImportance(role: String?): Int =
+    if (role == ROLE_HIDDEN) {
+        View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    } else {
+        View.IMPORTANT_FOR_ACCESSIBILITY_YES
+    }
 
 private fun View.setAccessibilityInfo(propValue: Any) {
     putViewData(KRCssConst.ACCESSIBILITY_INFO, propValue)
@@ -835,14 +843,19 @@ private fun View.setAccessibilityInfo(propValue: Any) {
 }
 
 private fun View.setAccessibilityImportance(description: String, role: String) {
-    importantForAccessibility = if (role == ROLE_NONE) {
+    importantForAccessibility = resolveAccessibilityImportance(description, role)
+}
+
+internal fun resolveAccessibilityImportance(description: String, role: String): Int =
+    if (role == ROLE_HIDDEN) {
+        View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+    } else if (role == ROLE_NONE) {
         View.IMPORTANT_FOR_ACCESSIBILITY_NO
     } else if (description.isEmpty()) {
         View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
     } else {
         View.IMPORTANT_FOR_ACCESSIBILITY_YES
     }
-}
 
 private fun View.resetAccessibilityImportance() {
     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
@@ -865,37 +878,7 @@ private fun View.initAccessibilityDelegate() {
     accessibilityDelegate = object : AccessibilityDelegate() {
         override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
             super.onInitializeAccessibilityNodeInfo(host, info)
-            val name = getViewData<String>(KRCssConst.ACCESSIBILITY_ROLE)
-            if (name != null) {
-                info.className = name
-            }
-
-            getViewData<String>(KRCssConst.ACCESSIBILITY_INFO)?.apply {
-                val flags = (this as String).split(" ")
-                info.isClickable = flags[0] == "1"
-                info.isLongClickable = flags[1] == "1"
-            }
-
-            getViewData<String>(KRCssConst.TEST_TAG)?.apply {
-                info.viewIdResourceName = this
-            }
-
-            // Expose plain text for canvas-drawn views (e.g. KRRichTextView) only when the
-            // framework injected debugName (debugUIInspector). Without it, keep legacy a11y.
-            val a11yText = getViewData<String>(KRCssConst.PLAIN_TEXT_FOR_A11Y)
-            if (!a11yText.isNullOrEmpty() && hasDebugName()) {
-                info.text = a11yText
-            }
-
-            if (hasEventListener(KRCSSGestureListener.TYPE_CLICK)) {
-                info.isClickable = true
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
-            }
-
-            if (hasEventListener(KRCSSGestureListener.TYPE_LONG_PRESS)) {
-                info.isLongClickable = true
-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
-            }
+            applyKuiklyAccessibilityExtras(info)
         }
 
         override fun sendAccessibilityEventUnchecked(host: View, event: AccessibilityEvent) {
@@ -908,6 +891,83 @@ private fun View.initAccessibilityDelegate() {
 
     }
     putViewData(KRCssConst.HAD_INIT_ACCESSIBILITY_DELEGATE, true)
+}
+
+/**
+ * Applies the Kuikly-owned accessibility extras (role/className, hidden-role
+ * projection, accessibilityInfo mask, testTag viewId, plain text, gesture
+ * actions) to a node the host has already populated. Single source: the
+ * attached Kuikly accessibility delegate calls exactly this after its super
+ * populate, and behavior tests drive the same function directly.
+ */
+internal fun View.applyKuiklyAccessibilityExtras(info: AccessibilityNodeInfo) {
+    val name = getViewData<String>(KRCssConst.ACCESSIBILITY_ROLE)
+    if (name != null) {
+        info.className = name
+    }
+    if (name == ROLE_HIDDEN) {
+        configureHiddenAccessibilityNodeInfo(info)
+        return
+    }
+
+    getViewData<String>(KRCssConst.ACCESSIBILITY_INFO)?.apply {
+        val flags = (this as String).split(" ")
+        info.isClickable = flags[0] == "1"
+        info.isLongClickable = flags[1] == "1"
+    }
+
+    accessibilityTestTagProjection()?.apply {
+        info.viewIdResourceName = this
+    }
+
+    // Expose plain text for canvas-drawn views (e.g. KRRichTextView) only when the
+    // framework injected debugName (debugUIInspector). Without it, keep legacy a11y.
+    val a11yText = getViewData<String>(KRCssConst.PLAIN_TEXT_FOR_A11Y)
+    if (!a11yText.isNullOrEmpty() && hasDebugName()) {
+        info.text = a11yText
+    }
+
+    if (hasEventListener(KRCSSGestureListener.TYPE_CLICK)) {
+        info.isClickable = true
+        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
+    }
+
+    if (hasEventListener(KRCSSGestureListener.TYPE_LONG_PRESS)) {
+        info.isLongClickable = true
+        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
+    }
+}
+
+/**
+ * The production projection from the stored testTag prop to the value the
+ * accessibility delegate writes into AccessibilityNodeInfo.viewIdResourceName.
+ * Single source: applyKuiklyAccessibilityExtras applies exactly this value,
+ * and host tests certify it because Robolectric's ShadowAccessibilityNodeInfo
+ * does not implement viewIdResourceName storage; the final native-node
+ * readout is a device (uiautomator) gate.
+ */
+internal fun View.accessibilityTestTagProjection(): String? =
+    getViewData<String>(KRCssConst.TEST_TAG)
+
+internal fun configureHiddenAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+    info.isVisibleToUser = false
+    info.isFocusable = false
+    info.isFocused = false
+    info.isAccessibilityFocused = false
+    info.isClickable = false
+    info.isLongClickable = false
+    info.isEditable = false
+    info.isCheckable = false
+    info.isChecked = false
+    info.isSelected = false
+    info.text = null
+    info.contentDescription = null
+    info.removeAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    info.removeAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+    info.removeAction(AccessibilityNodeInfo.ACTION_CLICK)
+    info.removeAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+    info.removeAction(AccessibilityNodeInfo.ACTION_SET_SELECTION)
+    info.removeAction(AccessibilityNodeInfo.ACTION_SET_TEXT)
 }
 
 internal fun View.hasDebugName(): Boolean {

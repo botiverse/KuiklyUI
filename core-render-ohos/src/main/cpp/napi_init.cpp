@@ -23,6 +23,94 @@
 #include "libohos_render/utils/KRRenderLoger.h"
 #include "libohos_render/utils/NAPIUtil.h"
 #include "napi/native_api.h"
+#include "libohos_render/expand/modules/cache/KRMemoryCacheModule.h"
+
+static napi_value AvatarCacheRetireDecoded(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3] = {nullptr, nullptr, nullptr};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc < 1 || argc > 3) {
+        napi_throw_error(env, "-1000", "avatarCacheRetireDecoded requires bytes key and optional generation/authority");
+        return nullptr;
+    }
+    std::string native_bytes_key;
+    std::string commit_generation;
+    std::string caller_authority;
+    kuikly::util::GetNApiArgsStdString(env, args[0], native_bytes_key);
+    if (argc == 2) kuikly::util::GetNApiArgsStdString(env, args[1], commit_generation);
+    if (argc == 3) {
+        kuikly::util::GetNApiArgsStdString(env, args[1], commit_generation);
+        kuikly::util::GetNApiArgsStdString(env, args[2], caller_authority);
+    }
+    const bool removed = KRMemoryCacheModule::RemoveManagedImage(
+        native_bytes_key, commit_generation, caller_authority);
+    napi_value result;
+    napi_get_boolean(env, removed, &result);
+    return result;
+}
+
+static napi_value AvatarCachePromoteDecoded(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3] = {nullptr, nullptr, nullptr};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 3) {
+        napi_throw_error(env, "-1000", "avatarCachePromoteDecoded requires bytes key, generation and authority");
+        return nullptr;
+    }
+    std::string native_bytes_key;
+    std::string commit_generation;
+    std::string caller_authority;
+    kuikly::util::GetNApiArgsStdString(env, args[0], native_bytes_key);
+    kuikly::util::GetNApiArgsStdString(env, args[1], commit_generation);
+    kuikly::util::GetNApiArgsStdString(env, args[2], caller_authority);
+    const bool promoted = KRMemoryCacheModule::PromoteManagedImage(
+        native_bytes_key, commit_generation, caller_authority);
+    napi_value result;
+    napi_get_boolean(env, promoted, &result);
+    return result;
+}
+
+static napi_value AvatarCacheRetainDecoded(napi_env env, napi_callback_info info) {
+    size_t argc = 5;
+    napi_value args[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 5) {
+        napi_throw_error(env, "-1000", "avatarCacheRetainDecoded requires exact candidate and prior identities");
+        return nullptr;
+    }
+    std::string native_bytes_key;
+    std::string commit_generation;
+    std::string caller_authority;
+    std::string prior_generation;
+    std::string prior_caller_authority;
+    kuikly::util::GetNApiArgsStdString(env, args[0], native_bytes_key);
+    kuikly::util::GetNApiArgsStdString(env, args[1], commit_generation);
+    kuikly::util::GetNApiArgsStdString(env, args[2], caller_authority);
+    kuikly::util::GetNApiArgsStdString(env, args[3], prior_generation);
+    kuikly::util::GetNApiArgsStdString(env, args[4], prior_caller_authority);
+    const bool retained = KRMemoryCacheModule::RetainManagedImages(
+        native_bytes_key, commit_generation, caller_authority, prior_generation, prior_caller_authority);
+    napi_value result;
+    napi_get_boolean(env, retained, &result);
+    return result;
+}
+
+static napi_value AvatarCacheHasDecoded(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3] = {nullptr, nullptr, nullptr};
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc != 3) {
+        napi_throw_error(env, "-1000", "avatarCacheHasDecoded requires bytes key, generation and authority");
+        return nullptr;
+    }
+    std::string native_bytes_key;
+    std::string commit_generation;
+    std::string caller_authority;
+    kuikly::util::GetNApiArgsStdString(env, args[0], native_bytes_key);
+    kuikly::util::GetNApiArgsStdString(env, args[1], commit_generation);
+    kuikly::util::GetNApiArgsStdString(env, args[2], caller_authority);
+    const bool present = KRMemoryCacheModule::HasManagedImage(
+        native_bytes_key, commit_generation, caller_authority);
+    napi_value result;
+    napi_get_boolean(env, present, &result);
+    return result;
+}
 
 //  ArkTs层页面加载事件
 static napi_value OnLaunchStart(napi_env env, napi_callback_info info) {
@@ -232,6 +320,10 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"OnLaunchStart", nullptr, OnLaunchStart, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"createNativeRoot", nullptr, CreateNativeRoot, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"isBackPressConsumed", nullptr, isBackPressConsumed, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"avatarCacheRetireDecoded", nullptr, AvatarCacheRetireDecoded, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"avatarCachePromoteDecoded", nullptr, AvatarCachePromoteDecoded, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"avatarCacheRetainDecoded", nullptr, AvatarCacheRetainDecoded, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"avatarCacheHasDecoded", nullptr, AvatarCacheHasDecoded, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     KRMainThread::Export(env, exports);                   // 缓存主线程 uv_loop / async 句柄

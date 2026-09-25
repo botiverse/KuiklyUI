@@ -201,6 +201,8 @@ interface IStyleAttr {
  */
 enum class AccessibilityRole(val roleName: String) {
     NONE("none"),
+    /** Excludes this view and its descendants from the accessibility tree. */
+    HIDDEN("hidden"),
     /** 表示视图是一个按钮 */
     BUTTON("button"),
     /** 表示视图是一个搜索框 */

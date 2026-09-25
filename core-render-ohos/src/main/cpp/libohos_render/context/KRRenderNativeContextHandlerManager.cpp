@@ -15,8 +15,11 @@
 
 #include "libohos_render/context/KRRenderNativeContextHandlerManager.h"
 
+#include <cstdlib>
 #include "libohos_render/context/DefaultRenderNativeContextHandler.h"
+#include "libohos_render/manager/KRRenderManager.h"
 #include "libohos_render/scheduler/KRContextScheduler.h"
+#include "libohos_render/utils/KRRenderLoger.h"
 
 extern CallKotlin callKotlin_;
 
@@ -91,39 +94,45 @@ static inline std::shared_ptr<KRRenderValue> MakeFromCValue(const KRRenderCValue
 KRRenderCValue KRRenderNativeContextHandlerManager::DispatchCallNative(
     const std::string &instanceId, int methodId, const KRRenderCValue &arg0, const KRRenderCValue &arg1,
     const KRRenderCValue &arg2, const KRRenderCValue &arg3, const KRRenderCValue &arg4, const KRRenderCValue &arg5) {
-    auto handler = context_handler_map_.Get(instanceId);
-    // 优化：移除冗余的 KRRenderManager::GetInstance().GetRenderView(instanceId) 检查
-    // context_handler_map_ 中存在 handler 就意味着实例有效（注册/注销是配对的），
-    // 额外的 GetRenderView 每次都要获取 SpinLock + unordered_map 查找，纯属浪费。
-    if (!handler) {
-        // 注意：必须使用值初始化（{}）而非默认初始化。
-        // KRRenderCValue 是聚合类型，其 union value 的首成员为 int32_t 且无
-        // 初始化器，size 为 int32_t 无默认值；若写作 `KRRenderCValue null_cv;`
-        // 则 value / size 均为未初始化的栈上残留字节，随后 return 触发
-        // 结构体值拷贝会 memcpy 未初始化字节，越 napi C ABI 传给 Kotlin 侧
-        // 属于未定义行为（MSan/UBSan 必报）。此处 `{}` 会对整个聚合执行
-        // 值初始化，将 type 归零至 NULL_VALUE、union 首成员归零、size 归零。
-        return KRRenderCValue{};
-    }
-    // 优化：cv0（原 instanceId 槽位）已被 ICallNativeCallback::OnCallNative 的接口契约声明为
-    // “保留位”，实现方不得依赖其内容；此处直接传入 KRRenderValue::MakeNull() 静态单例，
-    // 避免每次调用都构造一个 std::string 并分配 shared_ptr。
-    // 如未来需要恢复 instanceId 传递，请先同步修改 IKRRenderNativeContextHandler.h 中
-    // ICallNativeCallback::OnCallNative 的契约注释，再改本处构造逻辑，避免形成静默约定。
+    // arg0 is a reserved slot. Keep the task #26 off-context marshal contract,
+    // but use the upstream null singleton and NULL fast path for every value.
     auto cv0 = KRRenderValue::MakeNull();
     auto cv1 = MakeFromCValue(arg1);
     auto cv2 = MakeFromCValue(arg2);
     auto cv3 = MakeFromCValue(arg3);
     auto cv4 = MakeFromCValue(arg4);
     auto cv5 = MakeFromCValue(arg5);
+    auto method = static_cast<KuiklyRenderNativeMethod>(methodId);
+    if (!KRContextScheduler::IsCurrentOnContextThread()) {
+        if (KRNativeMethodRequiresContextThread(method, cv5)) {
+            KR_LOG_ERROR << "Synchronous Kuikly native method " << methodId
+                         << " called off the context thread; aborting";
+            std::abort();
+        }
+        KRContextScheduler::ScheduleTask(0, [this, instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5]() mutable {
+            DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
+        });
+        return KRRenderCValue{};
+    }
 
-    auto return_value =
-        handler->OnCallNative(static_cast<KuiklyRenderNativeMethod>(methodId), cv0, cv1, cv2, cv3, cv4, cv5);
+    auto return_value = DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
     if (return_value == nullptr || return_value->isNull()) {
-        // 同上：值初始化，避免 union value / size 字段残留未初始化字节
-        // 经 napi C ABI 传出导致 UB。
+        // Value-initialize the aggregate so union value and size never leak
+        // uninitialized stack bytes across the napi C ABI.
         return KRRenderCValue{};
     }
     ScheduleDeallocRenderValues(return_value);
     return return_value->toCValue();
+}
+
+std::shared_ptr<KRRenderValue> KRRenderNativeContextHandlerManager::DispatchPreparedCallNative(
+    const std::string &instanceId, const KuiklyRenderNativeMethod &method, std::shared_ptr<KRRenderValue> &arg0,
+    std::shared_ptr<KRRenderValue> &arg1, std::shared_ptr<KRRenderValue> &arg2,
+    std::shared_ptr<KRRenderValue> &arg3, std::shared_ptr<KRRenderValue> &arg4,
+    std::shared_ptr<KRRenderValue> &arg5) {
+    auto handler = context_handler_map_.Get(instanceId);
+    if (!handler || nullptr == KRRenderManager::GetInstance().GetRenderView(instanceId)) {
+        return nullptr;
+    }
+    return handler->OnCallNative(method, arg0, arg1, arg2, arg3, arg4, arg5);
 }

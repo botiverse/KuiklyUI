@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import com.tencent.kuikly.compose.extension.MakeKuiklyComposeNode
+import com.tencent.kuikly.compose.extension.updatedNodeEvent
 import com.tencent.kuikly.compose.foundation.background
 import com.tencent.kuikly.compose.foundation.clickable
 import com.tencent.kuikly.compose.foundation.interaction.MutableInteractionSource
@@ -39,6 +40,7 @@ import com.tencent.kuikly.compose.ui.unit.Dp
 import com.tencent.kuikly.compose.ui.unit.dp
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
 import com.tencent.kuikly.core.views.DivView
+import com.tencent.kuikly.core.base.event.ClickParams
 import kotlinx.coroutines.launch
 
 /**
@@ -174,6 +176,8 @@ fun rememberMoveableDrawerState(
  * @param state The [MoveableDrawerState] to control this drawer. Create with [rememberMoveableDrawerState].
  * @param modifier Modifier for the drawer container.
  * @param scrimColor Color of the scrim overlay shown when the drawer is open.
+ * @param userScrollEnabled Whether pager gestures and pager scroll semantics are enabled. This
+ * does not affect programmatic [MoveableDrawerState.open] or [MoveableDrawerState.close] calls.
  * @param drawerContent Content of the drawer panel.
  * @param content Main content area.
  */
@@ -182,19 +186,25 @@ fun MoveableDrawer(
     state: MoveableDrawerState,
     modifier: Modifier = Modifier,
     scrimColor: Color = Color.Black.copy(alpha = 0.3f),
+    userScrollEnabled: Boolean = true,
     drawerContent: @Composable () -> Unit,
     content: @Composable () -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val closeDrawerEvent: (ClickParams) -> Unit = updatedNodeEvent { _: ClickParams ->
+        scope.launch { state.close() }
+    }
     val drawerProgress by remember {
         derivedStateOf { state.progress }
     }
+    val interactionPolicy = moveableDrawerInteractionPolicy(userScrollEnabled)
 
     Box(modifier.fillMaxSize()) {
         DrawerHorizontalPager(
             state = state.internalState,
             modifier = Modifier.fillMaxSize(),
             beyondViewportPageCount = 1,
+            userScrollEnabled = interactionPolicy.pagerUserScrollEnabled,
         ) { page ->
             when (page) {
                 0 -> {
@@ -209,6 +219,8 @@ fun MoveableDrawer(
                             factory = { DivView() },
                             modifier = Modifier.fillMaxSize(),
                             viewInit = {
+                                // node-event-freshness-allow: stable empty handler only consumes
+                                // the native touch path and captures no composition value.
                                 getViewEvent().click { }
                             },
                         )
@@ -237,9 +249,7 @@ fun MoveableDrawer(
                                         scope.launch { state.close() }
                                     },
                                 viewInit = {
-                                    getViewEvent().click {
-                                        scope.launch { state.close() }
-                                    }
+                                    getViewEvent().click(closeDrawerEvent)
                                 },
                             )
                         }
@@ -249,3 +259,14 @@ fun MoveableDrawer(
         }
     }
 }
+
+internal data class MoveableDrawerInteractionPolicy(
+    val pagerUserScrollEnabled: Boolean
+)
+
+internal fun moveableDrawerInteractionPolicy(
+    userScrollEnabled: Boolean
+): MoveableDrawerInteractionPolicy =
+    MoveableDrawerInteractionPolicy(
+        pagerUserScrollEnabled = userScrollEnabled
+    )

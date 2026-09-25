@@ -1,0 +1,113 @@
+name: Task127 KBA-010 Maven Mirror
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/task127-kba010-mirror.yml
+      - publish/predecessors/task127-kba010-manifest.tsv
+      - tools/raft-artifacts/mirror_maven_manifest.py
+      - tools/raft-artifacts/test_mirror_maven_manifest.py
+      - tools/raft-artifacts/task127-kba010-resolver/**
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact 40-character landed source SHA to verify and publish
+        required: true
+        type: string
+      publish:
+        description: Publish only missing exact bytes after validation
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: task127-kba010-${{ github.event.pull_request.head.sha || inputs.expected_sha || github.sha }}
+  cancel-in-progress: false
+
+env:
+  MANIFEST: publish/predecessors/task127-kba010-manifest.tsv
+  TARGET_SHA: ${{ github.event.pull_request.head.sha || inputs.expected_sha || github.sha }}
+  RESOLVER: tools/raft-artifacts/task127-kba010-resolver
+
+jobs:
+  source-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind the exact signed source
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          git diff --check HEAD^
+          test "$(git log -1 --format=%B | grep -Ec '^Signed-off-by: .+ <[^>]+>$')" -eq 1
+      - name: Verify both immutable manifest contracts and the fresh Raft plan
+        run: |
+          set -euo pipefail
+          python3 tools/raft-artifacts/test_mirror_maven_manifest.py
+          python3 tools/raft-artifacts/mirror_maven_manifest.py \
+            --manifest "$MANIFEST" \
+            --mode plan
+
+  tencent-authority-resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Resolve the frozen root and common jars from an empty cache
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          cache_dir="$(mktemp -d)"
+          trap 'rm -rf "$cache_dir"' EXIT
+          GRADLE_USER_HOME="$cache_dir" ./gradlew \
+            --no-daemon \
+            --refresh-dependencies \
+            -p "$RESOLVER" \
+            resolveTask127Authority
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs:
+      - source-contract
+      - tencent-authority-resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: raft-artifacts-production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind the exact landed source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/staging3 | cut -f1)" = "$TARGET_SHA"
+      - name: Publish with missing-only immutable Maven PUT semantics
+        env:
+          RAFT_ARTIFACTS_PUBLISH_TOKEN: ${{ secrets.RAFT_ARTIFACTS_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$RAFT_ARTIFACTS_PUBLISH_TOKEN"
+          python3 tools/raft-artifacts/mirror_maven_manifest.py \
+            --manifest "$MANIFEST" \
+            --mode publish

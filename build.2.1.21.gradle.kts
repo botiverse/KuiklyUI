@@ -7,12 +7,14 @@ plugins {
     id("com.google.devtools.ksp") version "2.1.21-2.0.1" apply false
 }
 
+val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
+    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
+
 buildscript {
     repositories {
         gradlePluginPortal()
         google()
         mavenCentral()
-        mavenLocal()
         maven {
             url = uri("https://mirrors.tencent.com/repository/maven-tencent/")
         }
@@ -28,7 +30,9 @@ allprojects {
     repositories {
         google()
         mavenCentral()
-        mavenLocal()
+        if (!raftPublicationMode) {
+            mavenLocal()
+        }
         maven {
             url = uri("https://mirrors.tencent.com/repository/maven-tencent/")
         }
@@ -42,4 +46,3 @@ allprojects {
         jvmTargetValidationMode.set(org.jetbrains.kotlin.gradle.dsl.jvm.JvmTargetValidationMode.WARNING)
     }
 }
-

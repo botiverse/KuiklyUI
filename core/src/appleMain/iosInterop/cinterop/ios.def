@@ -7,6 +7,9 @@ package = com.tencent.kuikly
 /// Schedule a task on the Kuikly context queue for the given pagerId.
 extern void com_tencent_kuikly_ScheduleContextTask(const char* pagerId, void (*onSchedule)(const char* pagerId));
 
+/// Schedule a task after both the Kuikly context queue and main run loop are idle.
+extern void com_tencent_kuikly_ScheduleContextIdleTask(const char* pagerId, void (*onSchedule)(const char* pagerId));
+
 /// Return true if the current thread is the context thread.
 extern bool com_tencent_kuikly_IsCurrentOnContextThread(const char* pagerId);
 

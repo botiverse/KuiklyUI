@@ -84,6 +84,16 @@ interface PointerInputModifierNode : DelegatableNode {
     fun sharePointerInputWithSiblings(): Boolean = false
 
     /**
+     * Return true when this node intentionally wants the host render root to
+     * capture native child dispatch for the current touch gesture.
+     *
+     * This is narrower than "a pointer input node was hit": ordinary click,
+     * scroll, and text-input modifiers must keep returning false so platform
+     * native children still receive their expected MotionEvents.
+     */
+    fun captureNativeDispatch(): Boolean = false
+
+    /**
      * Invoked when the density (pixels per inch for the screen) changes. This can impact the
      * location of pointer input events (x and y) and can affect things like touch slop detection.
      *
@@ -117,6 +127,26 @@ interface PointerInputModifierNode : DelegatableNode {
     fun onViewConfigurationChange() {
         onCancelPointerInput()
     }
+}
+
+/**
+ * Stance of a [PointerInputModifierNode] on whether the host render root should
+ * capture (withhold) native child dispatch for the current gesture. Internal:
+ * the public contract stays [PointerInputModifierNode.captureNativeDispatch];
+ * RELEASE is only expressible through the internal release marker node.
+ */
+internal enum class NativeDispatchPolicy {
+    /** No stance; defer to other nodes in the hit branch. */
+    INHERIT,
+
+    /** Withhold MotionEvents from native children under the compose root. */
+    CAPTURE,
+
+    /**
+     * Let native children receive MotionEvents even when a hit-path ancestor
+     * captures. Only overrides ancestors within the same hit branch.
+     */
+    RELEASE,
 }
 
 internal val PointerInputModifierNode.isAttached: Boolean

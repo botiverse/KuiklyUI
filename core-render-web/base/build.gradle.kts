@@ -48,6 +48,8 @@ kotlin {
                 output?.library = null // Don't export global objects, only export necessary entry functions
             }
         }
+        // Keep pure renderer contract tests independent of a locally installed browser.
+        nodejs()
         // Output executable JS rather than library
         binaries.executable()
         // Generate type definitions
@@ -59,6 +61,11 @@ kotlin {
             dependencies {
                 // Import js standard library
                 implementation(kotlin("stdlib-js"))
+            }
+        }
+        val jsTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
             }
         }
     }

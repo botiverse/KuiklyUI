@@ -45,3 +45,8 @@ interface RecompositionOutputStrategy {
      */
     fun onReset() {}
 }
+
+/** Internal extension for output strategies whose persisted data embeds tracker session identity. */
+internal interface RecompositionSessionOutputStrategy {
+    fun onSessionReset(sessionId: String, startTimestampMs: Long)
+}

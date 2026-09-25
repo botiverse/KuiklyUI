@@ -13,14 +13,13 @@
  * limitations under the License.
  */
 
-@file:OptIn(com.tencent.kuikly.compose.foundation.ExperimentalFoundationApi::class)
-
 package com.tencent.kuikly.compose.ui.scene
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composition
 import com.tencent.kuikly.compose.ui.InternalComposeUiApi
 import com.tencent.kuikly.compose.ui.graphics.Canvas
+import com.tencent.kuikly.compose.ui.input.key.KeyEvent
 import com.tencent.kuikly.compose.ui.input.pointer.PointerInputEvent
 import com.tencent.kuikly.compose.ui.node.RootNodeOwner
 import com.tencent.kuikly.compose.ui.platform.setContent
@@ -29,7 +28,6 @@ import com.tencent.kuikly.compose.ui.unit.Density
 import com.tencent.kuikly.compose.ui.unit.IntRect
 import com.tencent.kuikly.compose.ui.unit.IntSize
 import com.tencent.kuikly.compose.ui.unit.LayoutDirection
-import com.tencent.kuikly.compose.foundation.lazy.layout.PrefetchScheduler
 import com.tencent.kuikly.core.base.DeclarativeBaseView
 import kotlin.coroutines.CoroutineContext
 
@@ -43,7 +41,6 @@ internal fun KuiklyComposeScene(
     coroutineContext: CoroutineContext,
     composeSceneContext: ComposeSceneContext = ComposeSceneContext.Empty,
     invalidate: () -> Unit = {},
-    prefetchScheduler: PrefetchScheduler? = null,
     ): ComposeScene = KuiklyComposeSceneImpl(
         boundsInWindow = boundsInWindow,
         density = density,
@@ -52,7 +49,6 @@ internal fun KuiklyComposeScene(
         composeSceneContext = composeSceneContext,
         invalidate = invalidate,
         rootKView = rootKView,
-        prefetchScheduler = prefetchScheduler,
     )
 
 
@@ -65,12 +61,10 @@ private class KuiklyComposeSceneImpl @InternalComposeUiApi constructor(
     composeSceneContext: ComposeSceneContext,
     private val invalidate: () -> Unit,
     private val rootKView: DeclarativeBaseView<*, *>,
-    prefetchScheduler: PrefetchScheduler? = null,
 ) : BaseComposeScene(
     coroutineContext = coroutineContext,
     composeSceneContext = composeSceneContext,
-    invalidate = invalidate,
-    prefetchScheduler = prefetchScheduler,
+    invalidate = invalidate
 ) {
     private val mainOwner by lazy {
         RootNodeOwner(
@@ -138,6 +132,9 @@ private class KuiklyComposeSceneImpl @InternalComposeUiApi constructor(
     override fun processPointerInputEvent(event: PointerInputEvent) =
         mainOwner.onPointerInput(event)
 
+    override fun processKeyEvent(event: KeyEvent): Boolean =
+        mainOwner.focusOwner.dispatchKeyEvent(event)
+
     override fun measureAndLayout() {
         mainOwner.measureAndLayout()
     }
@@ -152,4 +149,3 @@ private class KuiklyComposeSceneImpl @InternalComposeUiApi constructor(
     private fun onOwnerRemoved(owner: RootNodeOwner) {
     }
 }
-

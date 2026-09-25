@@ -122,7 +122,9 @@ Class _Nullable KRClassFromString(NSString *aClassName) {
                      callback:(KuiklyRenderCallback _Nullable)callback {
     NSAssert([NSThread isMainThread], @"should call on main thread");
     id<KuiklyRenderViewExportProtocol> view = [self p_renderViewHandlerWithTag:tag];
-    [view hrv_callWithMethod:method params:params callback:callback];
+    if ([view respondsToSelector:@selector(hrv_callWithMethod:params:callback:)]) {
+        [view hrv_callWithMethod:method params:params callback:callback];
+    }
 }
 
 - (NSString* _Nullable)callModuleMethodWithModuleName:(NSString *)moduleName

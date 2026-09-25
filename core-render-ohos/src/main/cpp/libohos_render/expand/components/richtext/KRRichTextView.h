@@ -157,7 +157,7 @@ class KRRichTextView : public IKRRenderViewExport {
         return selection_rects_.selection_rects.empty() ? KRRect() : selection_rects_.selection_rects.back();
     }
     std::string GetTextContent() {
-        return std::dynamic_pointer_cast<KRRichTextShadow>(shadow_)->GetTextContent();
+        return std::dynamic_pointer_cast<KRRichTextShadow>(shadow_)->GetSemanticTextContent();
     }
     std::string GetSelectedContent(std::string &pre, std::string &post);
     bool IsTextView() override {
@@ -167,8 +167,10 @@ class KRRichTextView : public IKRRenderViewExport {
                          KRPoint ancestor_point2, int type) override;
 
  private:
+    bool has_explicit_accessibility_ = false;
     std::shared_ptr<KRParagraph> paragraph_;
     std::shared_ptr<IKRRenderShadowExport> shadow_;
+    bool use_styled_string_ = false;
     float last_draw_frame_width_ = -1.0;
     float line_break_margin_ = 0;
     KRParagraphSelectionInfo selection_rects_;

@@ -30,6 +30,7 @@ import com.tencent.kuikly.compose.BackHandler
 import com.tencent.kuikly.compose.KuiklyApplier
 import com.tencent.kuikly.compose.foundation.clickable
 import com.tencent.kuikly.compose.foundation.layout.Box
+import com.tencent.kuikly.compose.extension.updatedNodeEvent
 import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.InternalComposeUiApi
 import com.tencent.kuikly.compose.ui.Modifier
@@ -68,6 +69,7 @@ import com.tencent.kuikly.core.base.Attr.StyleConst
 import com.tencent.kuikly.core.base.event.Touch
 import com.tencent.kuikly.core.views.DivView
 import com.tencent.kuikly.core.views.ModalView
+import com.tencent.kuikly.core.views.ModalDismissReason
 import com.tencent.kuikly.core.views.willDismiss
 import kotlin.js.JsName
 import kotlin.math.min
@@ -306,6 +308,9 @@ private fun DialogLayout(
     // 插槽标识符
     var slotId = remember { 0 }
     val backPressedDispatcher= LocalOnBackPressedDispatcherOwner.current
+    val willDismissEvent: (ModalDismissReason) -> Unit = updatedNodeEvent { _: ModalDismissReason ->
+        backPressedDispatcher.onBackPressedDispatcher.dispatchOnBackEvent()
+    }
 
 
     DisposableEffect(Unit) {
@@ -316,9 +321,7 @@ private fun DialogLayout(
                     KNode(ModalView().also {
                         it.inWindow = currentProperties.inWindow
                     }) {
-                        getViewEvent().willDismiss {
-                            backPressedDispatcher.onBackPressedDispatcher.dispatchOnBackEvent()
-                        }
+                        getViewEvent().willDismiss(willDismissEvent)
                     }
                 },
                 update = {

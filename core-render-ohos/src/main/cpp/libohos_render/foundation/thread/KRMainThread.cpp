@@ -32,12 +32,19 @@ struct PendingTask {
     int delayMs;
 };
 
+struct IdleTaskContext {
+    std::function<void()> func;
+    uint64_t admittedGeneration;
+    uint8_t quietTurns;
+};
+
 // 主线程 uv_loop（来自 ArkTS 主线程的 napi_env）。
 // 该 loop 的生命周期由 ArkTS 运行时管理，KRMainThread 仅持有指针、不创建也不销毁。
 uv_loop_t *g_main_loop = nullptr;
 // 主线程线程 ID（即 Export 被调用所在的线程）。
 std::thread::id g_main_thread_id;
 std::atomic<bool> g_initialized{false};
+std::atomic<uint64_t> g_main_normal_generation{0};
 
 // 跨线程把任务投递到主线程的 async 句柄，必须在主线程（loop 线程）上 init。
 uv_async_t g_main_async{};
@@ -100,6 +107,101 @@ void StartTimerOnMainThread(std::function<void()> task, int delayMs) {
     }
 }
 
+void StartIdleOnMainThread(
+    std::function<void()> task,
+    uint64_t admittedGeneration,
+    uint8_t quietTurns = 0
+) {
+    auto *check = new uv_check_t();
+    auto *holder = new IdleTaskContext{std::move(task), admittedGeneration, quietTurns};
+    check->data = holder;
+    int ret = uv_check_init(g_main_loop, check);
+    if (ret != 0) {
+        KR_LOG_ERROR << "KRMainThread::StartIdleOnMainThread uv_check_init failed, ret=" << ret
+                     << "; fallback to immediate callback.";
+        if (holder->func) {
+            holder->func();
+        }
+        delete holder;
+        delete check;
+        return;
+    }
+    ret = uv_check_start(check, [](uv_check_t *handle) {
+        auto *ctx = static_cast<IdleTaskContext *>(handle->data);
+        uv_check_stop(handle);
+        bool hasPendingNormalTask = false;
+        {
+            std::lock_guard<std::mutex> lock(g_queue_mutex);
+            hasPendingNormalTask = !g_pending_queue.empty();
+        }
+        if (ctx != nullptr) {
+            const bool generationChanged =
+                g_main_normal_generation.load(std::memory_order_acquire) !=
+                ctx->admittedGeneration;
+            // uv_idle_t is not an idle signal: libuv invokes it on every loop
+            // iteration and it forces a zero poll timeout. A check handle runs
+            // after poll/pending callbacks without changing the poll timeout;
+            // uv_backend_timeout == 0 means the loop has immediate work for its
+            // next turn, including ArkTS handles registered on this same loop.
+            const bool loopMayWait = uv_backend_timeout(g_main_loop) != 0;
+            if (hasPendingNormalTask || generationChanged || !loopMayWait || ctx->quietTurns < 1) {
+                const uint8_t nextQuietTurns =
+                    (!hasPendingNormalTask && !generationChanged && loopMayWait)
+                        ? static_cast<uint8_t>(ctx->quietTurns + 1)
+                        : 0;
+                StartIdleOnMainThread(
+                    std::move(ctx->func),
+                    g_main_normal_generation.load(std::memory_order_acquire),
+                    nextQuietTurns
+                );
+                ctx->func = nullptr;
+            } else if (ctx->func) {
+                ctx->func();
+            }
+        }
+        uv_close(reinterpret_cast<uv_handle_t *>(handle), [](uv_handle_t *h) {
+            auto *checkHandle = reinterpret_cast<uv_check_t *>(h);
+            delete static_cast<IdleTaskContext *>(checkHandle->data);
+            delete checkHandle;
+        });
+    });
+    if (ret != 0) {
+        KR_LOG_ERROR << "KRMainThread::StartIdleOnMainThread uv_check_start failed, ret=" << ret
+                     << "; fallback to immediate callback.";
+        if (holder->func) {
+            holder->func();
+        }
+        uv_close(reinterpret_cast<uv_handle_t *>(check), [](uv_handle_t *h) {
+            auto *checkHandle = reinterpret_cast<uv_check_t *>(h);
+            delete static_cast<IdleTaskContext *>(checkHandle->data);
+            delete checkHandle;
+        });
+        return;
+    }
+    if (quietTurns > 0) {
+        // A check handle runs only after poll returns. When the loop is truly
+        // idle its backend timeout is infinite, so the second stability turn
+        // needs one bounded control-plane wake or it could starve forever.
+        // This async callback carries no app task and does not advance the
+        // foreground generation; it only makes the already-installed check
+        // observable on the next loop turn.
+        ret = uv_async_send(&g_main_async);
+        if (ret != 0) {
+            KR_LOG_ERROR << "KRMainThread::StartIdleOnMainThread control wake failed, ret=" << ret
+                         << "; fallback to immediate callback.";
+            uv_check_stop(check);
+            if (holder->func) {
+                holder->func();
+            }
+            uv_close(reinterpret_cast<uv_handle_t *>(check), [](uv_handle_t *h) {
+                auto *checkHandle = reinterpret_cast<uv_check_t *>(h);
+                delete static_cast<IdleTaskContext *>(checkHandle->data);
+                delete checkHandle;
+            });
+        }
+    }
+}
+
 // 主线程 uv_async 回调：把队列里所有任务取出，根据 delay 决定立即执行还是注册 uv_timer。
 // 注意：本函数在主线程（loop 线程）执行，因此 uv_timer_init / uv_timer_start 都是合规的。
 // 异常路径：user task 是业务提供的回调；不套 C++ catch，让异常直接冒到 K/N
@@ -126,6 +228,7 @@ void OnMainAsync(uv_async_t * /*handle*/) {
 
 // 把任务塞进队列并唤醒主线程 loop。
 void EnqueueAndNotify(std::function<void()> task, int delayMs) {
+    g_main_normal_generation.fetch_add(1, std::memory_order_release);
     auto pending = std::make_unique<PendingTask>();
     pending->func = std::move(task);
     pending->delayMs = delayMs;
@@ -182,6 +285,7 @@ void KRMainThread::RunOnMainThread(std::function<void()> task, int delayMillisec
     }
 
     if (IsCurrentMainThread()) {
+        g_main_normal_generation.fetch_add(1, std::memory_order_release);
         // 已经在主线程（loop 线程），可以直接安全地操作 uv 句柄。
         if (delayMilliseconds <= 0) {
             // 立即执行：保持与原实现一致的"同步直跑"语义。
@@ -219,6 +323,50 @@ void KRMainThread::RunOnMainThreadForNextLoop(std::function<void()> task) {
     }
     // 不论当前是否在主线程，都强制走 uv_async 投递，保证在"下一次 loop 回合"才执行。
     EnqueueAndNotify(std::move(task), 0);
+}
+
+void KRMainThread::RunOnMainThreadWhenIdle(std::function<void()> task) {
+    if (!task) {
+        return;
+    }
+    if (!g_initialized.load() || g_main_loop == nullptr) {
+        KR_LOG_ERROR << "KRMainThread::RunOnMainThreadWhenIdle before Export, fallback to inline run";
+        task();
+        return;
+    }
+    const uint64_t generation = g_main_normal_generation.load(std::memory_order_acquire);
+    if (IsCurrentMainThread()) {
+        StartIdleOnMainThread(std::move(task), generation);
+        return;
+    }
+    // Installing the idle handle is control-plane work, not foreground app
+    // work, so do not route through EnqueueAndNotify (which would invalidate
+    // its own admission). Reuse the main async queue with a wrapper whose
+    // captured generation is checked again by the idle callback.
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    auto sharedTask = std::make_shared<std::function<void()>>(std::move(task));
+    auto invokeOnce = [completed, sharedTask]() {
+        if (!completed->exchange(true, std::memory_order_acq_rel) && *sharedTask) {
+            (*sharedTask)();
+        }
+    };
+    auto pending = std::make_unique<PendingTask>();
+    pending->func = [completed, invokeOnce, generation]() mutable {
+        if (!completed->load(std::memory_order_acquire)) {
+            StartIdleOnMainThread(std::move(invokeOnce), generation);
+        }
+    };
+    pending->delayMs = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_queue_mutex);
+        g_pending_queue.push(std::move(pending));
+    }
+    const int ret = uv_async_send(&g_main_async);
+    if (ret != 0) {
+        KR_LOG_ERROR << "KRMainThread::RunOnMainThreadWhenIdle uv_async_send failed, ret=" << ret
+                     << "; fallback to immediate callback.";
+        invokeOnce();
+    }
 }
 
 bool KRMainThread::IsCurrentOnMainThread() {

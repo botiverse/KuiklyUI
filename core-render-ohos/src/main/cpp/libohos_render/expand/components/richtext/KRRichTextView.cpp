@@ -15,6 +15,8 @@
 
 #include "libohos_render/expand/components/richtext/KRRichTextView.h"
 
+#include <algorithm>
+#include <cmath>
 #include <codecvt>
 #include <locale>
 #include <multimedia/image_framework/image/pixelmap_native.h>
@@ -24,6 +26,7 @@
 #include <native_drawing/drawing_pixel_map.h>
 #include <native_drawing/drawing_point.h>
 #include <native_drawing/drawing_rect.h>
+#include <native_drawing/drawing_round_rect.h>
 #include <native_drawing/drawing_sampling_options.h>
 #include <native_drawing/drawing_shader_effect.h>
 #include "libohos_render/expand/components/base/KRCustomUserCallback.h"
@@ -33,6 +36,7 @@
 #include "libohos_render/foundation/thread/KRMainThread.h"
 #include "libohos_render/foundation/KRPoint.h"
 #include "libohos_render/export/IKRRenderViewExport.h"
+#include "libohos_render/utils/KRViewUtil.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +56,141 @@ extern size_t OH_Drawing_GetEndFromRange(OH_Drawing_Range* range) __attribute__(
 #ifdef __cplusplus
 }
 #endif
+
+namespace {
+
+struct KRSlockChromeFragment {
+    float left = 0;
+    float top = 0;
+    float right = 0;
+    float bottom = 0;
+};
+
+void KRDrawBrushRect(OH_Drawing_Canvas *canvas, float left, float top, float right, float bottom) {
+    if (!canvas || right <= left || bottom <= top) {
+        return;
+    }
+    OH_Drawing_Rect *rect = OH_Drawing_RectCreate(left, top, right, bottom);
+    OH_Drawing_CanvasDrawRect(canvas, rect);
+    OH_Drawing_RectDestroy(rect);
+}
+
+void KRDrawBrushRoundRect(OH_Drawing_Canvas *canvas, float left, float top, float right, float bottom,
+                          float radius) {
+    if (!canvas || right <= left || bottom <= top) {
+        return;
+    }
+    OH_Drawing_Rect *rect = OH_Drawing_RectCreate(left, top, right, bottom);
+    OH_Drawing_RoundRect *roundRect = OH_Drawing_RoundRectCreate(rect, radius, radius);
+    OH_Drawing_CanvasDrawRoundRect(canvas, roundRect);
+    OH_Drawing_RoundRectDestroy(roundRect);
+    OH_Drawing_RectDestroy(rect);
+}
+
+std::vector<KRSlockChromeFragment> KRCollectSlockChromeFragments(OH_Drawing_Typography *typography,
+                                                                const KRSlockChromeRun &run) {
+    std::vector<KRSlockChromeFragment> fragments;
+    if (!typography || run.end <= run.start) {
+        return fragments;
+    }
+    OH_Drawing_TextBox *boxes = OH_Drawing_TypographyGetRectsForRange(
+        typography, run.start, run.end, RECT_HEIGHT_STYLE_MAX, RECT_WIDTH_STYLE_TIGHT);
+    if (!boxes) {
+        return fragments;
+    }
+    const int count = OH_Drawing_GetSizeOfTextBox(boxes);
+    for (int i = 0; i < count; ++i) {
+        KRSlockChromeFragment next{
+            OH_Drawing_GetLeftFromTextBox(boxes, i),
+            OH_Drawing_GetTopFromTextBox(boxes, i),
+            OH_Drawing_GetRightFromTextBox(boxes, i),
+            OH_Drawing_GetBottomFromTextBox(boxes, i),
+        };
+        if (!fragments.empty()) {
+            auto &last = fragments.back();
+            const float lastCenter = (last.top + last.bottom) / 2.0f;
+            const float nextCenter = (next.top + next.bottom) / 2.0f;
+            if (std::fabs(lastCenter - nextCenter) <= 1.0f) {
+                last.left = std::min(last.left, next.left);
+                last.top = std::min(last.top, next.top);
+                last.right = std::max(last.right, next.right);
+                last.bottom = std::max(last.bottom, next.bottom);
+                continue;
+            }
+        }
+        fragments.push_back(next);
+    }
+    OH_Drawing_TypographyDestroyTextBox(boxes);
+    return fragments;
+}
+
+void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typography,
+                           const std::vector<KRSlockChromeRun> &runs, float drawOffsetY, bool drawFill) {
+    if (!canvas || !typography || runs.empty()) {
+        return;
+    }
+    OH_Drawing_Brush *brush = OH_Drawing_BrushCreate();
+    OH_Drawing_BrushSetAntiAlias(brush, drawFill);
+
+    for (const auto &run : runs) {
+        auto fragments = KRCollectSlockChromeFragments(typography, run);
+        if (fragments.empty()) {
+            continue;
+        }
+        // Native Drawing captures the brush state when it is attached to the
+        // canvas. Set the per-run color first; mutating an already attached
+        // brush leaves some HarmonyOS versions drawing the default black.
+        OH_Drawing_BrushSetColor(brush, drawFill ? run.fill_color : run.border_color);
+        OH_Drawing_CanvasAttachBrush(canvas, brush);
+        const float chipHeight = run.box_height_px;
+        const float borderWidth = run.border_width_px;
+        for (size_t i = 0; i < fragments.size(); ++i) {
+            const auto &fragment = fragments[i];
+            const bool isSpanStart = i == 0;
+            const bool isSpanEnd = i + 1 == fragments.size();
+            const float left = run.includes_reserved_edges
+                ? fragment.left + (isSpanStart ? run.margin_start_px : 0.0f)
+                : fragment.left - (isSpanStart ? run.padding_start_px + borderWidth : 0.0f);
+            const float right = run.includes_reserved_edges
+                ? fragment.right - (isSpanEnd ? run.margin_end_px : 0.0f)
+                : fragment.right + (isSpanEnd ? run.padding_end_px + borderWidth : 0.0f);
+            const float centerY = (fragment.top + fragment.bottom) / 2.0f - drawOffsetY;
+            const float top = centerY - chipHeight / 2.0f;
+            const float bottom = centerY + chipHeight / 2.0f;
+            if (drawFill && run.fill_color != 0) {
+                if (run.corner_radius_px > 0) {
+                    KRDrawBrushRoundRect(canvas, left, top, right, bottom, run.corner_radius_px);
+                } else {
+                    KRDrawBrushRect(canvas, left, top, right, bottom);
+                }
+                continue;
+            }
+            if (drawFill || borderWidth <= 0 || run.border_color == 0) {
+                continue;
+            }
+
+            const float borderLeft = std::floor(left);
+            const float borderTop = std::floor(top);
+            const float borderRight = std::ceil(right);
+            const float borderBottom = std::ceil(bottom);
+            KRDrawBrushRect(canvas, borderLeft, borderTop, borderRight, borderTop + borderWidth);
+            KRDrawBrushRect(canvas, borderLeft, borderBottom - borderWidth, borderRight, borderBottom);
+            // Internal line-wrap boundaries are not real span edges. Keep their
+            // fill continuous without drawing side borders that would cover glyphs.
+            if (isSpanStart) {
+                KRDrawBrushRect(canvas, borderLeft, borderTop, borderLeft + borderWidth, borderBottom);
+            }
+            if (isSpanEnd) {
+                KRDrawBrushRect(canvas, borderRight - borderWidth, borderTop, borderRight, borderBottom);
+            }
+        }
+        OH_Drawing_CanvasDetachBrush(canvas);
+    }
+
+    OH_Drawing_BrushDestroy(brush);
+}
+
+}  // namespace
 
 // UTF-8 to UTF-16
 static std::u16string utf8_to_utf16(const std::string& utf8_string) {
@@ -107,13 +246,18 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
     shadow_ = shadow;
 
     auto textShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow);
+    if (textShadow && !has_explicit_accessibility_) {
+        kuikly::util::UpdateNodeAccessibility(GetNode(), textShadow->GetSemanticTextContent());
+    }
     // 决策 6C：image span（由 PostProcessor("richtext") 拆段产生）只在 V1（老 typography）
     // OnForegroundDraw 路径下能被绘制——因为 V2 的 StyledString 是交给 ArkUI 节点直接
     // 渲染，SDK 当前没暴露插入图片绘制 hook 的入口。这个判定已收敛到
     // shadow->StyledStringEnabled()（含 image span 时返 false），本处只读一个结果。
     bool use_styled_string = textShadow && textShadow->StyledStringEnabled();
     bool has_image_span = textShadow && textShadow->HasImageSpans();
+    use_styled_string_ = use_styled_string;
     if(use_styled_string){
+        KREventDispatchCenter::GetInstance().UnregisterCustomEvent(shared_from_this());
         ArkUI_AttributeItem item;
         if(std::shared_ptr<KRParagraph> paragraph = std::dynamic_pointer_cast<KRRichTextShadow>(shadow)->GetParagraph()){
             item.object = paragraph->GetStyledString();
@@ -127,6 +271,8 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
             paragraph_ = paragraph;
         }
     }else {
+        kuikly::util::GetNodeApi()->resetAttribute(GetNode(), NODE_TEXT_CONTENT_WITH_STYLED_STRING);
+        paragraph_ = nullptr;
         KREventDispatchCenter::GetInstance().RegisterCustomEvent(shared_from_this(), ARKUI_NODE_CUSTOM_EVENT_ON_FOREGROUND_DRAW);
         kuikly::util::GetNodeApi()->markDirty(GetNode(), NODE_NEED_RENDER);
     }
@@ -149,6 +295,9 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
 
 void KRRichTextView::DidMoveToParentView() {
     IKRRenderViewExport::DidMoveToParentView();
+    if (use_styled_string_) {
+        return;
+    }
     auto self = shared_from_this();
     KREventDispatchCenter::GetInstance().RegisterCustomEvent(self, ARKUI_NODE_CUSTOM_EVENT_ON_FOREGROUND_DRAW);
 }
@@ -158,10 +307,15 @@ void KRRichTextView::DidRemoveFromParentView() {
     IKRRenderViewExport::DidRemoveFromParentView();
     shadow_ = nullptr;
     paragraph_ = nullptr;
+    use_styled_string_ = false;
+    has_explicit_accessibility_ = false;
     last_draw_frame_width_ = -1.0;
 }
 
 void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
+    if (use_styled_string_) {
+        return;
+    }
     if (shadow_ == nullptr || GetFrame().width == 0) {
         KR_LOG_ERROR << "OnForegroundDraw, shadow or frame not ready, shadow:" << shadow_.get()
                      << ", frame width:" << GetFrame().width;
@@ -218,6 +372,11 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
         }
     }
 
+    // Native Slock chip fill is painted after final typography layout but before
+    // selection and glyphs. The shadow reserved real inline advance at each true
+    // edge; this pass only paints inside that collision volume.
+    KRDrawSlockChipChrome(drawingHandle, textTypo, richTextShadow->SlockChromeRuns(), drawOffsetY, true);
+
     if (!selection_rects_.selection_rects.empty()) {
         double density = KRConfig::GetDpi();
         OH_Drawing_Brush *backgroundBrush = OH_Drawing_BrushCreate();
@@ -254,6 +413,7 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
             }
         }
         if(line_count > 0){
+            KRDrawSlockChipChrome(drawingHandle, textTypo, richTextShadow->SlockChromeRuns(), drawOffsetY, false);
             return;
         }
     }
@@ -333,6 +493,9 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
             OH_Drawing_TypographyDestroyTextBox(placeholder_rects);
         }
     }
+
+    // Border is deliberately last so the 1dp edge stays crisp above glyph AA.
+    KRDrawSlockChipChrome(drawingHandle, textTypo, richTextShadow->SlockChromeRuns(), drawOffsetY, false);
 }
 
 void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &prop_value,
@@ -367,6 +530,14 @@ void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &pr
         IKRRenderViewExport::ToSetProp(prop_key, prop_value, middleManCallback);
     } else if(prop_key == kPropNameLineBreakMargin) {
         line_break_margin_ = prop_value->toFloat();
+    } else if (prop_key == "accessibility") {
+        has_explicit_accessibility_ = !prop_value->toString().empty();
+        IKRRenderViewExport::ToSetProp(prop_key, prop_value, event_callback);
+        if (!has_explicit_accessibility_) {
+            if (auto richTextShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow_)) {
+                kuikly::util::UpdateNodeAccessibility(GetNode(), richTextShadow->GetSemanticTextContent());
+            }
+        }
     }else {
         IKRRenderViewExport::ToSetProp(prop_key, prop_value, event_callback);
     }
@@ -753,6 +924,9 @@ KRParagraphInfo KRRichTextView::GetParagraphInfo() {
 }
 
 std::string KRRichTextView::GetSelectedContent(std::string &pre, std::string &post) {
+    if (auto richTextShadow = std::dynamic_pointer_cast<KRRichTextShadow>(shadow_)) {
+        return richTextShadow->SemanticSelection(selection_rects_.start, selection_rects_.end, pre, post);
+    }
     std::u16string str16 = utf8_to_utf16(selection_rects_.text_content);
 
     if (selection_rects_.start > 0) {

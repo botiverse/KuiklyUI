@@ -18,6 +18,7 @@ package com.tencent.kuikly.compose.coroutines.internal
 
 import com.tencent.kuikly.com_tencent_kuikly_IsCurrentOnContextThread
 import com.tencent.kuikly.com_tencent_kuikly_ScheduleContextTask
+import com.tencent.kuikly.com_tencent_kuikly_ScheduleContextIdleTask
 import com.tencent.kuikly.core.manager.BridgeManager
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.CPointer
@@ -35,6 +36,13 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
     com_tencent_kuikly_ScheduleContextTask(pagerId, staticCFunction { pagerIdBytes: CPointer<ByteVar>? ->
         val idStr = pagerIdBytes?.toKString() ?: return@staticCFunction
         KuiklyContextScheduler.runTask(idStr)
+    })
+}
+
+internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
+    com_tencent_kuikly_ScheduleContextIdleTask(pagerId, staticCFunction { pagerIdBytes: CPointer<ByteVar>? ->
+        val idStr = pagerIdBytes?.toKString() ?: return@staticCFunction
+        KuiklyContextScheduler.runIdleTask(idStr)
     })
 }
 

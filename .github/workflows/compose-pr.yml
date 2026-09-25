@@ -1,0 +1,284 @@
+name: Compose PR Exact Matrix
+
+on:
+  pull_request:
+    branches:
+      - staging2
+      - staging3
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  identity-diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+
+      - name: Verify identity, DCO, diff and clean tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_head="$(git rev-parse HEAD)"
+          test "$actual_head" = "$EXPECTED_HEAD_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          # Single-commit exact: exactly one commit on top of the merge base,
+          # and the head's sole parent is that merge base.
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          test "$(git rev-list --count "${base_sha}..HEAD")" = "1"
+          test "$(git rev-parse HEAD^)" = "$(git merge-base HEAD "${base_sha}")"
+          author_email="$(git show -s --format=%ae HEAD)"
+          committer_email="$(git show -s --format=%ce HEAD)"
+          author_name="$(git show -s --format=%an HEAD)"
+          # Generic DCO gate (owner-agnostic): author == committer, and the commit
+          # carries a Signed-off-by trailer matching that identity.
+          test -n "$author_email"
+          test "$author_email" = "$committer_email"
+          git show -s --format=%B HEAD | grep -Fx \
+            "Signed-off-by: ${author_name} <${author_email}>"
+          {
+            echo "head=$actual_head"
+            echo "tree=$(git rev-parse HEAD^{tree})"
+            echo "parent=$(git rev-parse HEAD^)"
+            echo "base=${{ github.event.pull_request.base.sha }}"
+            echo "merge_base=$(git merge-base HEAD '${{ github.event.pull_request.base.sha }}')"
+            echo "author=$(git show -s --format='%an <%ae>' HEAD)"
+            echo "committer=$(git show -s --format='%cn <%ce>' HEAD)"
+            echo "patch_id=$(git show --pretty=format: HEAD | git patch-id --stable | awk '{print $1}')"
+          } | tee exact-manifest.txt
+          git diff --binary "${{ github.event.pull_request.base.sha }}...HEAD" > candidate.patch
+          sha256sum candidate.patch | tee candidate.patch.sha256
+
+      - name: Upload exact identity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: identity-diff-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            exact-manifest.txt
+            candidate.patch.sha256
+
+  common-core-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+      - name: Compile metadata and run production JVM fixtures
+        run: |
+          ./gradlew \
+            :core:compileCommonMainKotlinMetadata \
+            :compose:compileCommonMainKotlinMetadata \
+            :core:testDebugUnitTest \
+            :compose:testDebugUnitTest \
+            :core-render-android:testDebugUnitTest \
+            --no-build-cache --no-daemon
+      - name: Require successful JVM suites and report module counts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          for module in ("core", "compose", "core-render-android"):
+              reports = sorted(Path(module, "build", "test-results").glob("**/TEST-*.xml"))
+              tests = failures = errors = 0
+              for report in reports:
+                  suite = ET.parse(report).getroot()
+                  tests += int(suite.attrib.get("tests", "0"))
+                  failures += int(suite.attrib.get("failures", "0"))
+                  errors += int(suite.attrib.get("errors", "0"))
+              print(f"{module}: tests={tests} failures={failures} errors={errors}")
+              # The safe pre-transaction core tree has no JVM test sources, so
+              # :core:testDebugUnitTest is intentionally NO-SOURCE. Compose and
+              # Android renderer both have real suites and must stay nonzero.
+              if module != "core" and tests == 0:
+                  raise SystemExit(1)
+              if failures or errors:
+                  raise SystemExit(1)
+          PY
+      - name: Upload JVM evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: common-core-android-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            core/build/test-results
+            compose/build/test-results
+            core-render-android/build/test-results
+
+  ios-renderer:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+      - name: Generate CocoaPods dummy framework
+        run: ./gradlew :demo:generateDummyFramework --no-build-cache --no-daemon
+      - name: Install locked Pods
+        run: bundle exec pod install --project-directory=iosApp --deployment
+      - name: Compile Kotlin Native main and tests
+        run: |
+          ./gradlew \
+            :core:compileKotlinIosSimulatorArm64 \
+            :compose:compileKotlinIosSimulatorArm64 \
+            :compose:compileTestKotlinIosSimulatorArm64 \
+            --no-build-cache --no-daemon
+      - name: Run native text-input sequencing fixture
+        run: tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+      - name: Run gradient rich-text optional dispatch fixture
+        run: tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+      - name: Build production renderer with warnings as errors
+        run: |
+          mkdir -p build
+          set -o pipefail
+          xcodebuild \
+            -workspace iosApp/iosApp.xcworkspace \
+            -scheme OpenKuiklyIOSRender \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            -derivedDataPath build/ios-derived \
+            -resultBundlePath build/ios-renderer.xcresult \
+            build | tee build/ios-renderer.log
+      - name: Run rich-text generic method contract fixture
+        run: |
+          tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh \
+            . \
+            build/ios-derived \
+            build/rich-text-generic-method-fixture
+      - name: Upload iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-renderer-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            build/ios-renderer.log
+            build/ios-renderer.xcresult
+            build/rich-text-generic-method-fixture
+
+  ohos-native:
+    # KuiklyUI is a personal repository, so organization-scoped Blacksmith runners never pick up
+    # these jobs. Keep the existing pinned HarmonyOS container on the official hosted runner.
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
+    timeout-minutes: 60
+    env:
+      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
+      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - name: Trust the mounted workspace inside the job container
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "Kuikly CI"
+          git config --global user.email "kuikly-ci@users.noreply.github.com"
+      - name: Prepare OHOS native dependency metadata
+        working-directory: ohosApp
+        run: |
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          ohpm install --all
+          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+          hvigorw assembleHar \
+            --mode module \
+            -p module=render@default \
+            -p product=default \
+            -p buildMode=debug \
+            --analyze=normal \
+            --parallel \
+            --no-daemon
+      - name: Fresh arm64 production libkuikly compile and link
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          tools/ohos-renderer-tests/run-arm64-direct-link.sh "$GITHUB_WORKSPACE/build/ohos-evidence"
+      - name: Upload OHOS native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-native-${{ env.EXPECTED_HEAD_SHA }}
+          path: build/ohos-evidence
+
+  source-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - name: Reject stale native callbacks retained by Compose node initialization
+        run: python3 tools/check-compose-node-event-freshness.py --self-test
+      - name: Preserve active user motion when RecyclerView enters dragging
+        run: python3 tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
+      - name: Keep DrawModifierNode view-aware production dispatch
+        run: python3 tools/check-draw-modifier-view-dispatch.py --self-test
+      - name: Reject non-finite iOS scroll event values
+        run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
+      - name: Preserve profiler observer composition and thread ownership
+        run: python3 tools/check-profiler-observer-state-partition.py --self-test
+      - name: Preserve profiler file output across Pager and session lifecycle
+        run: python3 tools/check-profiler-file-output-lifecycle.py --self-test
+      - name: Keep OHOS contentInset leading offsets aligned with the margin model
+        run: core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
+      - name: Keep OHOS typed-avatar descriptors fail-closed
+        run: core-render-ohos/src/test/cpp/run_avatar_image_model_test.sh
+
+  exact-matrix:
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - identity-diff
+      - common-core-android
+      - ios-renderer
+      - ohos-native
+      - source-contracts
+    steps:
+      - name: Require every exact-bound gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          needs = json.loads(os.environ["RESULTS"])
+          failed = {name: value["result"] for name, value in needs.items() if value["result"] != "success"}
+          print(json.dumps(needs, indent=2, sort_keys=True))
+          if failed:
+              raise SystemExit(f"exact matrix failed: {failed}")
+          PY

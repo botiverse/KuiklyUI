@@ -54,6 +54,23 @@ enum class KuiklyRenderNativeMethod {
     KuiklyRenderNativeMethodCallTDFNativeMethod = 17      // "callTDFModuleMethod"
 };
 
+inline bool KRNativeMethodRequiresContextThread(const KuiklyRenderNativeMethod &method,
+                                                const std::shared_ptr<KRRenderValue> &arg5) {
+    if (method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallModuleMethod) {
+        auto sync_call = arg5 ? arg5->toInt() : 0;
+        return sync_call == 1 || sync_call == 3;
+    }
+    return method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCalculateRenderViewSize ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCreateShadow ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodRemoveShadow ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowProp ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowForView ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetTimeout ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallShadowMethod ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSyncFlushUI ||
+           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallTDFNativeMethod;
+}
+
 class IKRRenderNativeContextHandler;
 class KRRenderContextParams;
 

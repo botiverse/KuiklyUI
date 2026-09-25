@@ -17,10 +17,16 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
+#include <utility>
 
 #include "libohos_render/utils/KRJSONObject.h"
 
@@ -51,6 +57,65 @@ static KRAnyValue MakeResult(const std::string &key, const std::string &value) {
     return KRRenderValue::Make(result);
 }
 
+// One process-wide worker serializes file operations from every Pager. A stable operation id is
+// recorded before callback delivery; if a Pager is destroyed after its native commit, retrying the
+// same operation through a new Pager reaches this FIFO after the original and is acknowledged
+// without writing twice.
+class ProfilerFileWorker {
+ public:
+    using Task = std::function<void(std::unordered_set<std::string> &)>;
+
+    static ProfilerFileWorker &Instance() {
+        static ProfilerFileWorker worker;
+        return worker;
+    }
+
+    void Enqueue(Task task) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            tasks_.push_back(std::move(task));
+        }
+        condition_.notify_one();
+    }
+
+ private:
+    ProfilerFileWorker() : worker_([this]() { Run(); }) {}
+
+    ~ProfilerFileWorker() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        condition_.notify_one();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    void Run() {
+        while (true) {
+            Task task;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                condition_.wait(lock, [this]() { return stopping_ || !tasks_.empty(); });
+                if (stopping_ && tasks_.empty()) {
+                    return;
+                }
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            task(completedOperationIds_);
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<Task> tasks_;
+    std::unordered_set<std::string> completedOperationIds_;
+    bool stopping_ = false;
+    std::thread worker_;
+};
+
 // ---------------------------------------------------------------------------
 // 获取 profiler 写入目录（filesDir/KuiklyProfiler/）
 // ---------------------------------------------------------------------------
@@ -75,9 +140,12 @@ void KRFileModule::WriteFile(const KRAnyValue &params, const KRRenderCallback &c
     auto jsonObj = util::JSONObject::Parse(params->toString());
     const std::string filename = jsonObj->GetString("filename");
     const std::string content  = jsonObj->GetString("content");
+    const std::string operationId = jsonObj->GetString("operationId");
 
-    if (filename.empty() || content.empty()) {
-        if (callback) callback(MakeResult("error", "missing filename or content"));
+    // Empty content is a valid overwrite operation used to truncate the previous profiler report
+    // when a new session starts.
+    if (filename.empty()) {
+        if (callback) callback(MakeResult("error", "missing filename"));
         return;
     }
 
@@ -89,16 +157,29 @@ void KRFileModule::WriteFile(const KRAnyValue &params, const KRRenderCallback &c
 
     const std::string filePath = dir + "/" + filename;
 
-    std::thread([filePath, content, callback]() {
+    ProfilerFileWorker::Instance().Enqueue(
+        [filePath, content, operationId, callback](
+            std::unordered_set<std::string> &completedOperationIds) {
+        if (!operationId.empty() && completedOperationIds.count(operationId) > 0) {
+            if (callback) callback(MakeResult("path", filePath));
+            return;
+        }
         FILE *fp = fopen(filePath.c_str(), "w");
         if (!fp) {
             if (callback) callback(MakeResult("error", "fopen failed"));
             return;
         }
-        fwrite(content.c_str(), 1, content.size(), fp);
-        fclose(fp);
+        const size_t written = fwrite(content.c_str(), 1, content.size(), fp);
+        const int closeResult = fclose(fp);
+        if (written != content.size() || closeResult != 0) {
+            if (callback) callback(MakeResult("error", "file write failed"));
+            return;
+        }
+        if (!operationId.empty()) {
+            completedOperationIds.insert(operationId);
+        }
         if (callback) callback(MakeResult("path", filePath));
-    }).detach();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +189,7 @@ void KRFileModule::AppendFile(const KRAnyValue &params, const KRRenderCallback &
     auto jsonObj = util::JSONObject::Parse(params->toString());
     const std::string filename = jsonObj->GetString("filename");
     const std::string content  = jsonObj->GetString("content");
+    const std::string operationId = jsonObj->GetString("operationId");
 
     if (filename.empty() || content.empty()) {
         if (callback) callback(MakeResult("error", "missing filename or content"));
@@ -122,18 +204,31 @@ void KRFileModule::AppendFile(const KRAnyValue &params, const KRRenderCallback &
 
     const std::string filePath = dir + "/" + filename;
 
-    std::thread([filePath, content, callback]() {
+    ProfilerFileWorker::Instance().Enqueue(
+        [filePath, content, operationId, callback](
+            std::unordered_set<std::string> &completedOperationIds) {
+        if (!operationId.empty() && completedOperationIds.count(operationId) > 0) {
+            if (callback) callback(MakeResult("path", filePath));
+            return;
+        }
         FILE *fp = fopen(filePath.c_str(), "a");
         if (!fp) {
             if (callback) callback(MakeResult("error", "fopen failed"));
             return;
         }
         // 追加内容 + 换行，适合 JSONL 格式
-        fwrite(content.c_str(), 1, content.size(), fp);
-        fwrite("\n", 1, 1, fp);
-        fclose(fp);
+        const size_t contentWritten = fwrite(content.c_str(), 1, content.size(), fp);
+        const size_t newlineWritten = fwrite("\n", 1, 1, fp);
+        const int closeResult = fclose(fp);
+        if (contentWritten != content.size() || newlineWritten != 1 || closeResult != 0) {
+            if (callback) callback(MakeResult("error", "file append failed"));
+            return;
+        }
+        if (!operationId.empty()) {
+            completedOperationIds.insert(operationId);
+        }
         if (callback) callback(MakeResult("path", filePath));
-    }).detach();
+    });
 }
 
 // ---------------------------------------------------------------------------

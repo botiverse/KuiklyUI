@@ -41,8 +41,26 @@ void com_tencent_kuikly_ScheduleContextTask(const char* pagerId, void (*onSchedu
     [KuiklyRenderThreadManager performOnContextQueueWithBlock:block sync:NO];
 }
 
+void com_tencent_kuikly_ScheduleContextIdleTask(const char* pagerId, void (*onSchedule)(const char* pagerId)) {
+    if (!onSchedule) return;
+    const char *copied = NULL;
+    if (pagerId) {
+        size_t len = strlen(pagerId) + 1;
+        char *buf = (char *)malloc(len);
+        if (buf) {
+            memcpy(buf, pagerId, len);
+            copied = buf;
+        }
+    }
+
+    dispatch_block_t block = ^{
+        onSchedule(copied);
+        if (copied) free((void *)copied);
+    };
+    [KuiklyRenderThreadManager performOnContextQueueWhenIdleWithBlock:block];
+}
+
 bool com_tencent_kuikly_IsCurrentOnContextThread(const char* pagerId) {
     // pagerId currently unused; keep for API compatibility
     return [KuiklyRenderThreadManager isContextQueue];
 }
-

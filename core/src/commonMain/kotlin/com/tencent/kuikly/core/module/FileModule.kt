@@ -33,6 +33,7 @@ class FileModule : Module() {
 
         private const val PARAM_FILENAME = "filename"
         private const val PARAM_CONTENT = "content"
+        private const val PARAM_OPERATION_ID = "operationId"
         private const val KEY_PATH = "path"
         private const val KEY_ERROR = "error"
     }
@@ -45,9 +46,37 @@ class FileModule : Module() {
      * @param callback 完成回调，result["path"] 为写入路径，result["error"] 为错误信息
      */
     fun writeFile(filename: String, content: String, callback: CallbackFn? = null) {
+        writeFileInternal(filename, content, operationId = null, callback = callback)
+    }
+
+    /**
+     * Writes [content] with a process-unique idempotency key.
+     *
+     * Profiler output can outlive the Pager whose bridge accepted the native operation. A retry on
+     * another live Pager therefore reuses [operationId], allowing host renderers to acknowledge an
+     * already committed write without applying it twice.
+     */
+    fun writeFile(
+        filename: String,
+        content: String,
+        operationId: String,
+        callback: CallbackFn?
+    ) {
+        writeFileInternal(filename, content, operationId, callback)
+    }
+
+    private fun writeFileInternal(
+        filename: String,
+        content: String,
+        operationId: String?,
+        callback: CallbackFn?
+    ) {
         val param = JSONObject().apply {
             put(PARAM_FILENAME, filename)
             put(PARAM_CONTENT, content)
+            if (!operationId.isNullOrEmpty()) {
+                put(PARAM_OPERATION_ID, operationId)
+            }
         }
         asyncToNativeMethod(METHOD_WRITE_FILE, param, callback)
     }
@@ -61,9 +90,31 @@ class FileModule : Module() {
      * @param callback 完成回调，result["path"] 为写入路径，result["error"] 为错误信息
      */
     fun appendFile(filename: String, content: String, callback: CallbackFn? = null) {
+        appendFileInternal(filename, content, operationId = null, callback = callback)
+    }
+
+    /** Idempotent-key overload used by process-wide profiler file-operation recovery. */
+    fun appendFile(
+        filename: String,
+        content: String,
+        operationId: String,
+        callback: CallbackFn?
+    ) {
+        appendFileInternal(filename, content, operationId, callback)
+    }
+
+    private fun appendFileInternal(
+        filename: String,
+        content: String,
+        operationId: String?,
+        callback: CallbackFn?
+    ) {
         val param = JSONObject().apply {
             put(PARAM_FILENAME, filename)
             put(PARAM_CONTENT, content)
+            if (!operationId.isNullOrEmpty()) {
+                put(PARAM_OPERATION_ID, operationId)
+            }
         }
         asyncToNativeMethod(METHOD_APPEND_FILE, param, callback)
     }

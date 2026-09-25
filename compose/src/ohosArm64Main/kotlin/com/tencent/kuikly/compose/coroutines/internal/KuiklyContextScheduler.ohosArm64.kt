@@ -21,6 +21,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.staticCFunction
 import kotlinx.cinterop.toKString
 import ohos.com_tencent_kuikly_IsCurrentOnContextThread
+import ohos.com_tencent_kuikly_ScheduleContextIdleTask
 import ohos.com_tencent_kuikly_ScheduleContextTask
 
 internal actual fun platformInitScheduler() {
@@ -35,6 +36,14 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
     com_tencent_kuikly_ScheduleContextTask(pagerId, staticCFunction { pagerIdBytes: CPointer<ByteVar>? ->
         val idStr = pagerIdBytes?.toKString() ?: return@staticCFunction
         KuiklyContextScheduler.runTask(idStr)
+    })
+}
+
+@OptIn(ExperimentalForeignApi::class)
+internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
+    com_tencent_kuikly_ScheduleContextIdleTask(pagerId, staticCFunction { pagerIdBytes: CPointer<ByteVar>? ->
+        val idStr = pagerIdBytes?.toKString() ?: return@staticCFunction
+        KuiklyContextScheduler.runIdleTask(idStr)
     })
 }
 

@@ -146,9 +146,6 @@
     if ([_turboDisplayCacheData.turboDisplayNode isKindOfClass:[KRTurboDisplayNode class]]) {
         _lazyRendering = YES;                                               // 存在TB缓存，更新懒渲染标志
         _turboDisplayCacheData.extraCacheContent = _extraCacheContent;      // 业务自定义缓存，与TB缓存存储于同一对象
-
-
-
         // 【日志】缓存读取成功
         [KRLogModule logInfo:[NSString stringWithFormat:@"[TurboDisplay] turboDisplay file read successfully"]];
     } else {

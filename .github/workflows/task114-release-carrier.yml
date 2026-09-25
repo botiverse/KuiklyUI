@@ -1,0 +1,361 @@
+name: Task114 Release Carrier Exact Verifier
+
+on:
+  workflow_dispatch:
+    inputs:
+      carrier_pr_number:
+        description: Draft evidence-only carrier PR number
+        required: true
+        type: string
+      carrier_sha:
+        description: Full 40-character carrier commit SHA
+        required: true
+        type: string
+      expected_parent:
+        description: Full 40-character original release pin / carrier parent
+        required: true
+        type: string
+      expected_tree:
+        description: Full 40-character carrier tree
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: task114-release-carrier-${{ inputs.carrier_sha }}
+  cancel-in-progress: false
+
+env:
+  CARRIER_SHA: ${{ inputs.carrier_sha }}
+  EXPECTED_PARENT: ${{ inputs.expected_parent }}
+  EXPECTED_TREE: ${{ inputs.expected_tree }}
+  CARRIER_PR_NUMBER: ${{ inputs.carrier_pr_number }}
+  ALLOWED_PARENT: c7a021270847434a5f5b9aa3e94e44ce17726519
+  EXPECTED_PATCH_ID: 2d0a7bbfd80f40f61a6d68c4cd0abe47b7b2f4ab
+  EXPECTED_HANDLER_BLOB: d4b7e59766fc5da3128407401071c75a45815696
+  EXPECTED_PATH: core-render-ios/Handler/KuiklyRenderLayerHandler.mm
+
+jobs:
+  carrier-identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out trusted verifier
+        uses: actions/checkout@v4
+        with:
+          path: verifier
+          persist-credentials: false
+      - name: Check out exact carrier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.carrier_sha }}
+          path: carrier
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify Draft PR and exact carrier identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$CARRIER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_PARENT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]
+          test "$EXPECTED_PARENT" = "$ALLOWED_PARENT"
+          [[ "$CARRIER_PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+
+          pr_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${CARRIER_PR_NUMBER}")"
+          jq -e \
+            --arg head "$CARRIER_SHA" \
+            '.state == "open" and .draft == true and .head.sha == $head and .base.ref == "staging2"' \
+            <<<"$pr_json" >/dev/null
+
+          cd carrier
+          test "$(git rev-parse HEAD)" = "$CARRIER_SHA"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test "$(git rev-list --count "${EXPECTED_PARENT}..HEAD")" = "1"
+          test -z "$(git status --porcelain)"
+          git diff --check "${EXPECTED_PARENT}...HEAD"
+
+          mapfile -t changed_paths < <(git diff --name-only "${EXPECTED_PARENT}...HEAD")
+          test "${#changed_paths[@]}" = "1"
+          test "${changed_paths[0]}" = "$EXPECTED_PATH"
+          test "$(git diff --numstat "${EXPECTED_PARENT}...HEAD")" = $'3\t1\t'"$EXPECTED_PATH"
+
+          author_email="$(git show -s --format=%ae HEAD)"
+          committer_email="$(git show -s --format=%ce HEAD)"
+          author_name="$(git show -s --format=%an HEAD)"
+          test -n "$author_email"
+          test "$author_email" = "$committer_email"
+          git show -s --format=%B HEAD | grep -Fx \
+            "Signed-off-by: ${author_name} <${author_email}>"
+
+          patch_id="$(git show --pretty=format: HEAD | git patch-id --stable | awk '{print $1}')"
+          handler_blob="$(git rev-parse "HEAD:${EXPECTED_PATH}")"
+          test "$patch_id" = "$EXPECTED_PATCH_ID"
+          test "$handler_blob" = "$EXPECTED_HANDLER_BLOB"
+
+          mkdir -p ../evidence/identity
+          {
+            echo "verifier_sha=${GITHUB_SHA}"
+            echo "carrier_pr=${CARRIER_PR_NUMBER}"
+            echo "carrier_sha=$CARRIER_SHA"
+            echo "carrier_parent=$EXPECTED_PARENT"
+            echo "carrier_tree=$EXPECTED_TREE"
+            echo "patch_id=$patch_id"
+            echo "handler_blob=$handler_blob"
+            echo "changed_path=$EXPECTED_PATH"
+            echo "numstat=3/1"
+            echo "draft=true"
+            echo "merge_policy=DO_NOT_MERGE"
+          } | tee ../evidence/identity/exact-manifest.txt
+          git diff --binary "${EXPECTED_PARENT}...HEAD" > ../evidence/identity/carrier.patch
+          sha256sum ../evidence/identity/carrier.patch |
+            tee ../evidence/identity/carrier.patch.sha256
+      - name: Upload identity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task114-carrier-identity-${{ inputs.carrier_sha }}
+          path: evidence/identity
+
+  common-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.carrier_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$CARRIER_SHA"
+      - name: Compile common metadata and run Android renderer tests
+        run: |
+          ./gradlew \
+            :core:compileCommonMainKotlinMetadata \
+            :compose:compileCommonMainKotlinMetadata \
+            :core-render-android:testDebugUnitTest \
+            --no-build-cache --no-daemon
+      - name: Require nonzero clean Android renderer suite
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          reports = sorted(Path("core-render-android/build/test-results").glob("**/TEST-*.xml"))
+          tests = failures = errors = 0
+          for report in reports:
+              suite = ET.parse(report).getroot()
+              tests += int(suite.attrib.get("tests", "0"))
+              failures += int(suite.attrib.get("failures", "0"))
+              errors += int(suite.attrib.get("errors", "0"))
+          print(f"android tests={tests} failures={failures} errors={errors}")
+          if tests == 0 or failures or errors:
+              raise SystemExit(1)
+          PY
+          mkdir -p build/task114-common-android
+          {
+            echo "verifier_sha=${GITHUB_SHA}"
+            echo "carrier_sha=$CARRIER_SHA"
+            echo "carrier_parent=$EXPECTED_PARENT"
+            echo "carrier_tree=$EXPECTED_TREE"
+            echo "common_android=PASS"
+          } | tee build/task114-common-android/receipt.txt
+      - name: Upload common and Android evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task114-carrier-common-android-${{ inputs.carrier_sha }}
+          path: |
+            build/task114-common-android
+            core-render-android/build/test-results
+
+  ios-carrier:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Check out trusted verifier
+        uses: actions/checkout@v4
+        with:
+          path: verifier
+          persist-credentials: false
+      - name: Check out exact carrier
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.carrier_sha }}
+          path: carrier
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: ruby/setup-ruby@v1
+        with:
+          working-directory: carrier
+          ruby-version: "3.3"
+          bundler-cache: true
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+      - name: Verify trusted and target identities
+        run: |
+          set -euo pipefail
+          test "$(git -C verifier rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C carrier rev-parse HEAD)" = "$CARRIER_SHA"
+          test "$(git -C carrier rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git -C carrier rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+      - name: Generate CocoaPods dummy framework
+        working-directory: carrier
+        run: ./gradlew :demo:generateDummyFramework --no-build-cache --no-daemon
+      - name: Install locked Pods
+        working-directory: carrier
+        run: bundle exec pod install --project-directory=iosApp --deployment
+      - name: Compile carrier Kotlin Native main and tests
+        working-directory: carrier
+        run: |
+          ./gradlew \
+            :core:compileKotlinIosSimulatorArm64 \
+            :compose:compileKotlinIosSimulatorArm64 \
+            :compose:compileTestKotlinIosSimulatorArm64 \
+            --no-build-cache --no-daemon
+      - name: Build carrier production renderer with warnings as errors
+        working-directory: carrier
+        run: |
+          mkdir -p build/task114-ios
+          set -o pipefail
+          xcodebuild \
+            -workspace iosApp/iosApp.xcworkspace \
+            -scheme OpenKuiklyIOSRender \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            -derivedDataPath build/task114-ios/derived \
+            -resultBundlePath build/task114-ios/renderer.xcresult \
+            build | tee build/task114-ios/renderer.log
+      - name: Run trusted real-handler carrier fixture
+        run: |
+          verifier/tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh \
+            carrier \
+            carrier/build/task114-ios/derived \
+            carrier/build/task114-ios/handler-fixture
+          {
+            echo "verifier_sha=${GITHUB_SHA}"
+            echo "carrier_sha=$CARRIER_SHA"
+            echo "carrier_parent=$EXPECTED_PARENT"
+            echo "carrier_tree=$EXPECTED_TREE"
+            echo "ios_werror=PASS"
+            echo "real_handler_fixture=PASS"
+            echo "gradient_fixture=NOT_APPLICABLE_STRICT_OLD_PIN_CARRIER"
+          } | tee carrier/build/task114-ios/receipt.txt
+      - name: Upload iOS carrier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task114-carrier-ios-${{ inputs.carrier_sha }}
+          path: carrier/build/task114-ios
+
+  ohos-carrier:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
+    timeout-minutes: 60
+    env:
+      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
+      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.carrier_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact checkout and trust workspace
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "$CARRIER_SHA"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          git config --global user.name "Kuikly CI"
+          git config --global user.email "kuikly-ci@users.noreply.github.com"
+      - name: Prepare OHOS native dependency metadata
+        working-directory: ohosApp
+        run: |
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          ohpm install --all
+          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+          hvigorw assembleHar \
+            --mode module \
+            -p module=render@default \
+            -p product=default \
+            -p buildMode=debug \
+            --analyze=normal \
+            --parallel \
+            --no-daemon
+      - name: Fresh arm64 production libkuikly compile and link
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          tools/ohos-renderer-tests/run-arm64-direct-link.sh "$GITHUB_WORKSPACE/build/task114-ohos"
+          {
+            echo "verifier_sha=${GITHUB_SHA}"
+            echo "carrier_sha=$CARRIER_SHA"
+            echo "carrier_parent=$EXPECTED_PARENT"
+            echo "carrier_tree=$EXPECTED_TREE"
+            echo "ohos=PASS"
+          } | tee "$GITHUB_WORKSPACE/build/task114-ohos/receipt.txt"
+      - name: Upload OHOS carrier evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task114-carrier-ohos-${{ inputs.carrier_sha }}
+          path: build/task114-ohos
+
+  carrier-exact-matrix:
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - carrier-identity
+      - common-android
+      - ios-carrier
+      - ohos-carrier
+    steps:
+      - name: Require every carrier gate
+        run: |
+          test "${{ needs.carrier-identity.result }}" = "success"
+          test "${{ needs.common-android.result }}" = "success"
+          test "${{ needs.ios-carrier.result }}" = "success"
+          test "${{ needs.ohos-carrier.result }}" = "success"
+      - name: Write aggregate receipt
+        run: |
+          mkdir -p evidence
+          {
+            echo "verifier_sha=${GITHUB_SHA}"
+            echo "carrier_pr=$CARRIER_PR_NUMBER"
+            echo "carrier_sha=$CARRIER_SHA"
+            echo "carrier_parent=$EXPECTED_PARENT"
+            echo "carrier_tree=$EXPECTED_TREE"
+            echo "identity=${{ needs.carrier-identity.result }}"
+            echo "common_android=${{ needs.common-android.result }}"
+            echo "ios_carrier=${{ needs.ios-carrier.result }}"
+            echo "ohos_carrier=${{ needs.ohos-carrier.result }}"
+            echo "gradient_fixture=NOT_APPLICABLE_STRICT_OLD_PIN_CARRIER"
+            echo "aggregate=PASS"
+          } | tee evidence/task114-carrier-aggregate.txt
+      - name: Upload aggregate receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: task114-carrier-aggregate-${{ inputs.carrier_sha }}
+          path: evidence/task114-carrier-aggregate.txt

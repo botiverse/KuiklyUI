@@ -1568,16 +1568,15 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
  */
 - (void)layoutSublayers {
     [super layoutSublayers];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     
     // 0. macOS: 确保边框在最顶层（NSScrollView/NSTextView 内部 sublayer 可能覆盖边框）
 #if TARGET_OS_OSX
     if (self.superlayer && [[self.superlayer sublayers] lastObject] != self) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
         CALayer *superlayer = self.superlayer;
         [self removeFromSuperlayer];
         [superlayer addSublayer:self];
-        [CATransaction commit];
     }
 #endif
     
@@ -1589,6 +1588,7 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
     // 2. 尺寸未变化时跳过重绘（性能优化）或者重绘标志位为false
     // 仅在 clipPath 变化时为 YES）
     if (CGSizeEqualToSize(self.bounds.size, _lastSize) && !_needsRedraw) {
+        [CATransaction commit];
         return ;
     }
     _lastSize = self.bounds.size;
@@ -1654,6 +1654,7 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
     #else
     self.path = path.CGPath;
     #endif
+    [CATransaction commit];
 }
 
 @end

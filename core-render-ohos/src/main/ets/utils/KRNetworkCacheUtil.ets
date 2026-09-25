@@ -19,6 +19,7 @@ import { BusinessError, request } from '@kit.BasicServicesKit';
 
 import fs from '@ohos.file.fs';
 import { KRRenderLog } from '../adapter/KRRenderLog';
+import { KRAvatarCacheManager } from './KRAvatarCacheManager';
 
 export class  KRNetworkCacheUtil {
   // 保存正在进行的下载任务
@@ -29,6 +30,9 @@ export class  KRNetworkCacheUtil {
    * @param callback
    */
   static fetchFileByDownloadOrCache(context: common.UIAbilityContext, url: string, callback: KuiklyRenderCallback) {
+    if (KRAvatarCacheManager.fetchFile(context, url, callback)) {
+      return;
+    }
     let cacheFilePath = KRNetworkCacheUtil.generateCacheFilePathByUrl(context, url)
     if (cacheFilePath.length) {
       if (!(KRNetworkCacheUtil.downloadTasks.has(url))) {

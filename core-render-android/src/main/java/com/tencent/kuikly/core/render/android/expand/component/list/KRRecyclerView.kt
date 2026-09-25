@@ -502,6 +502,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
 
     override fun call(method: String, params: String?, callback: KuiklyRenderCallback?): Any? {
         return when (method) {
+            METHOD_SET_HAS_PULL_TO_REFRESH -> null
             METHOD_CONTENT_OFFSET -> setContentOffset(params)
             METHOD_CONTENT_INSET_WHEN_END_DRAG -> contentInsetWhenEndDrag(params)
             METHOD_CONTENT_INSET -> contentInset(params)
@@ -1498,6 +1499,7 @@ class KRRecyclerView : RecyclerView, IKuiklyRenderViewExport, NestedScrollingChi
         private const val METHOD_CONTENT_INSET = "contentInset" // 设置内容边距
         private const val METHOD_ABORT_CONTENT_OFFSET_ANIMATE = "abortContentOffsetAnimate" // 停止滚动动画
         private const val METHOD_PREPARE_FOR_COMPOSE_REUSE = "prepareForComposeReuse" // Compose DSL 复用前重置瞬态
+        private const val METHOD_SET_HAS_PULL_TO_REFRESH = "setHasPullToRefresh"
 
         private const val NESTED_SCROLL = "nestedScroll"
 

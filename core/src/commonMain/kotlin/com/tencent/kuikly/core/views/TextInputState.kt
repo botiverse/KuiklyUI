@@ -29,7 +29,7 @@ data class TextInputState(
     val selectionEnd: Int = selectionStart,
     val compositionStart: Int = NO_COMPOSITION,
     val compositionEnd: Int = NO_COMPOSITION,
-    val length: Int? = null
+    val length: Int? = null,
 ) {
     fun toJSONObject(): JSONObject {
         return JSONObject().apply {
@@ -92,7 +92,7 @@ data class TextInputState(
                 selectionEnd = selectionEnd,
                 compositionStart = compositionStart,
                 compositionEnd = compositionEnd,
-                length = length
+                length = length,
             )
         }
     }

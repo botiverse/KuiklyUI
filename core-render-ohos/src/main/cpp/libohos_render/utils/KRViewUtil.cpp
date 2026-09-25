@@ -1190,10 +1190,10 @@ void SetArkUIPadding(ArkUI_NodeHandle handle, float start, float top, float end,
     GetNodeApi()->setAttribute(handle, NODE_PADDING, &item);
 }
 
-void UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status) {
+bool UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status) {
     ArkUI_NumberValue value[] = {{.i32 = status}};
     ArkUI_AttributeItem item = {value, sizeof(value) / sizeof(ArkUI_NumberValue)};
-    GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item);
+    return GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item) == ARKUI_ERROR_CODE_NO_ERROR;
 }
 
 void UpdateInputNodeFocusable(ArkUI_NodeHandle node, int32_t enable) {

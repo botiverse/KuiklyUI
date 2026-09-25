@@ -8,6 +8,10 @@ plugins {
     signing
 }
 
+apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
+val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
+    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
+
 group = MavenConfig.GROUP
 version = Version.getCoreVersion()
 
@@ -81,31 +85,11 @@ kotlin {
 
         commonTest.dependencies {
             implementation(kotlin("test"))
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
         }
 
-        val runtimeLegacyTest by creating {
-            dependsOn(commonTest.get())
-        }
-        val androidUnitTest by getting {
-            dependsOn(runtimeLegacyTest)
-        }
-
-        // Normal 2.1.21 artifacts stay on Compose runtime 1.7.3 and disable prefetch.
-        val runtimeLegacyMain by creating {
-            dependsOn(commonMain.get())
-        }
-
-        // Keep the default Native/Apple hierarchy in the runtimeLegacy branch so
-        // ios targets compile the actuals from nativeMain and appleMain.
-        val nativeMain by creating {
-            dependsOn(runtimeLegacyMain)
-        }
-        val appleMain by creating {
-            dependsOn(nativeMain)
-        }
-
+        // Android 特有源集中添加 ProfileInstaller 依赖
         val androidMain by getting {
-            dependsOn(runtimeLegacyMain)
             dependencies {
                 compileOnly(project(":core-render-android"))
                 implementation("androidx.profileinstaller:profileinstaller:1.3.1")
@@ -113,16 +97,10 @@ kotlin {
             }
         }
 
-        val jsMain by getting {
-            dependsOn(runtimeLegacyMain)
-        }
-
-        // Wire Apple targets through appleMain so nativeMain actuals are included.
-        listOf(
-            "iosX64Main", "iosArm64Main", "iosSimulatorArm64Main",
-            "macosX64Main", "macosArm64Main",
-        ).forEach { ssName ->
-            findByName(ssName)?.dependsOn(appleMain)
+        val androidUnitTest by getting {
+            dependencies {
+                implementation("org.robolectric:robolectric:4.12.2")
+            }
         }
     }
 }
@@ -134,18 +112,20 @@ publishing {
 //    }
 
     repositories {
-        val username = MavenConfig.getUsername(project)
-        val password = MavenConfig.getPassword(project)
-        if (username.isNotEmpty() && password.isNotEmpty()) {
-            maven {
-                credentials {
-                    setUsername(username)
-                    setPassword(password)
+        if (!raftPublicationMode) {
+            val username = MavenConfig.getUsername(project)
+            val password = MavenConfig.getPassword(project)
+            if (username.isNotEmpty() && password.isNotEmpty()) {
+                maven {
+                    credentials {
+                        setUsername(username)
+                        setPassword(password)
+                    }
+                    url = uri(MavenConfig.getRepoUrl(version as String))
                 }
-                url = uri(MavenConfig.getRepoUrl(version as String))
+            } else {
+                mavenLocal()
             }
-        } else {
-            mavenLocal()
         }
 
         publications.withType<MavenPublication>().configureEach {

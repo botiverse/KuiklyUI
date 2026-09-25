@@ -27,6 +27,7 @@ import com.tencent.kuikly.compose.foundation.pager.PagerState
 import com.tencent.kuikly.compose.foundation.pager.ScrollViewOffsetAlignmentCancellation
 import com.tencent.kuikly.compose.foundation.pager.calculateNewMaxScrollOffset
 import com.tencent.kuikly.compose.foundation.pager.mainAxisViewportSize
+import com.tencent.kuikly.compose.gestures.DeferredScrollOffsetAlignmentCoordinator
 import com.tencent.kuikly.compose.scroller.ScrollableStateConstants.DEFAULT_CONTENT_SIZE
 import com.tencent.kuikly.compose.ui.unit.Dp
 import com.tencent.kuikly.compose.ui.unit.LayoutDirection
@@ -209,11 +210,44 @@ private const val PULL_TO_REFRESH_ITEM_KEY = "pull_to_refresh"
  * Whether Compose is at top for scroll-sync correction.
  * Only differs from [isAtTop] when PTR [KuiklyScrollInfo.pullToRefreshTopInsetPx] > 0.
  */
-private fun ScrollableState.isComposeAtTopForScrollSync(): Boolean {
+internal fun ScrollableState.isComposeAtTopForScrollSync(): Boolean {
     if (this is LazyListState && kuiklyInfo.pullToRefreshTopInsetPx > 0) {
         return firstVisibleItemIndex == 0 && firstVisibleItemScrollOffset == 0
     }
     return isAtTop()
+}
+
+internal enum class InitialLazyListNativeViewportAction {
+    Wait,
+    Prepare,
+    Complete,
+}
+
+/**
+ * Decides whether the first non-empty LazyList placement must establish the native scroll
+ * coordinate space before its children are placed.
+ *
+ * A non-top initial LazyList measure is already the intended Compose viewport. Deferring the
+ * matching native offset through [tryExpandStartSizeNoScroll] lets ScrollView expose offset-zero
+ * pixels first and only converge later. The initial placement is the one safe boundary where the
+ * native offset can still be queued for the platform's first layout, while ordinary scrolling
+ * keeps the existing deferred alignment policy.
+ */
+internal fun initialLazyListNativeViewportAction(
+    pending: Boolean,
+    hasItems: Boolean,
+    isComposeAtTop: Boolean,
+    contentOffset: Int,
+    composeOffset: Int,
+    isDragging: Boolean,
+    hasScrollView: Boolean,
+): InitialLazyListNativeViewportAction = when {
+    !pending -> InitialLazyListNativeViewportAction.Complete
+    !hasItems || !hasScrollView -> InitialLazyListNativeViewportAction.Wait
+    isDragging -> InitialLazyListNativeViewportAction.Complete
+    isComposeAtTop -> InitialLazyListNativeViewportAction.Complete
+    contentOffset != 0 || composeOffset != 0 -> InitialLazyListNativeViewportAction.Complete
+    else -> InitialLazyListNativeViewportAction.Prepare
 }
 
 /**
@@ -278,9 +312,20 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
     if (kuiklyInfo.skipExpandStartSize) return
     if (this is PagerState) return
 
+    val atTopSync = isComposeAtTopForScrollSync()
+    val needsTopExpand = offset <= 0 && !atTopSync && kuiklyInfo.offsetDirty
+    val needsScrollViewPullBack = offset > 0 && atTopSync
+    if (!needsTopExpand && !needsScrollViewPullBack) {
+        return
+    }
+
+    if (isScrolling && kuiklyInfo.scrollView?.isDragging != true) {
+        return
+    }
+
     val density = kuiklyInfo.getDensity()
     // scrollview 到顶了，但是compose没到顶
-    if (offset <= 0 && !isComposeAtTopForScrollSync() && kuiklyInfo.offsetDirty) {
+    if (needsTopExpand) {
         var delta = calculateBackExpandSize(offset)
         val minDelta = (ScrollableStateConstants.DEFAULT_CONTENT_SIZE * density).toInt()
         delta = max(delta ?: minDelta, minDelta)
@@ -309,42 +354,116 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
 
 internal fun ScrollableState.tryExpandStartSizeNoScroll(forceExpand: Boolean = false) {
     if (this is PagerState || this is DrawerInternalPagerState) return
+    val scrollInProgress = { this@tryExpandStartSizeNoScroll.isScrollInProgress }
     kuiklyInfo.run {
-        appleScrollViewOffsetJob?.cancel(ScrollViewOffsetAlignmentCancellation)
-        appleScrollViewOffsetJob = scope?.launch {
-            delay(150)
-            val minDelta = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
-            val epsilon = 0.5 * getDensity()  // 使用 0.5dp 作为误差值
-            val reachBtm = contentOffset + viewportSize - currentContentSize >= -epsilon
+        scheduleDeferredScrollOffsetAlignment(
+            coordinator = deferredScrollOffsetAlignmentCoordinator,
+            forceExpand = forceExpand,
+            isScrollInProgress = scrollInProgress,
+            cancelPendingAlignment = { it.cancel(ScrollViewOffsetAlignmentCancellation) },
+            launchAlignment = { alignment -> scope?.launch { alignment() } },
+            awaitAlignmentWindow = { delay(150) },
+            applyAlignment = applyAlignment@{ isCurrent ->
+                val minDelta = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
+                val epsilon = 0.5 * getDensity()  // 使用 0.5dp 作为误差值
+                val reachBtm = contentOffset + viewportSize - currentContentSize >= -epsilon
 
-            if (contentOffset <= 0 && !isComposeAtTopForScrollSync() && (forceExpand || scrollView?.isDragging != true)) {
-                // 整体把offset 加一下
-                var delta = calculateBackExpandSize(contentOffset)
-                delta = max(delta ?: minDelta, minDelta)
-                val maxDelta = currentContentSize - viewportSize - contentOffset
-                if (delta > maxDelta) {
-                    // 不够直接扩容offset，先扩容contentSize
-                    currentContentSize += (delta - maxDelta + minDelta)
+                if (contentOffset <= 0 && !isComposeAtTopForScrollSync() && (forceExpand || scrollView?.isDragging != true)) {
+                    // 整体把offset 加一下
+                    var delta = calculateBackExpandSize(contentOffset)
+                    delta = max(delta ?: minDelta, minDelta)
+                    val maxDelta = currentContentSize - viewportSize - contentOffset
+                    if (delta > maxDelta) {
+                        // 不够直接扩容offset，先扩容contentSize
+                        currentContentSize += (delta - maxDelta + minDelta)
+                        updateContentSizeToRender()
+                    }
+                    if (pageData?.isOhOs == true) {
+                        if (!shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
+                                forceExpand = forceExpand,
+                                isScrollInProgress = scrollInProgress,
+                                isCurrent = isCurrent,
+                                awaitRefreshWindow = {
+                                    // 鸿蒙扩容后不会立刻刷新，也没有刷新 API，华为建议添加 delay。
+                                    delay(25)
+                                }
+                            )
+                        ) {
+                            return@applyAlignment
+                        }
+                    }
+                    applyScrollViewOffsetDelta(delta)
+                    offsetDirty = true
+                } else if (contentOffset > 0 && isComposeAtTopForScrollSync()) {
+                    // compose 到顶了，但是scrollview没到顶
+                    applyScrollViewOffsetDelta(-contentOffset)
+                    offsetDirty = false
+                } else if (isAtTop() && realContentSize == null && lastItemVisible() && scrollView?.isDragging != true) {
+                    // 更新当前的contentSize大小
+                    currentContentSize = calculateContentSize()
+                    updateContentSizeToRender()
+                } else if (canScrollForward && reachBtm) {
+                    // 底部无法滑动了，扩容
+                    currentContentSize += minDelta
                     updateContentSizeToRender()
                 }
-                if (pageData?.isOhOs == true) {
-                    delay(25)   // 鸿蒙扩容后，不会立刻刷新，也没有刷新api，华为建议添加一个delay来处理
+            }
+        )
+    }
+}
+
+internal fun <T> scheduleDeferredScrollOffsetAlignment(
+    coordinator: DeferredScrollOffsetAlignmentCoordinator<T>,
+    forceExpand: Boolean,
+    isScrollInProgress: () -> Boolean,
+    cancelPendingAlignment: (T) -> Unit,
+    launchAlignment: (suspend () -> Unit) -> T?,
+    awaitAlignmentWindow: suspend () -> Unit,
+    applyAlignment: suspend (isCurrent: () -> Boolean) -> Unit
+) {
+    coordinator.replacePendingAlignment(
+        cancelPendingAlignment = cancelPendingAlignment,
+        launchAlignment = { request ->
+            launchAlignment {
+                if (
+                    shouldApplyDeferredScrollOffsetAlignmentAfterWindow(
+                        forceExpand = forceExpand,
+                        isScrollInProgress = isScrollInProgress,
+                        awaitAlignmentWindow = awaitAlignmentWindow
+                    ) && coordinator.isCurrent(request)
+                ) {
+                    applyAlignment { coordinator.isCurrent(request) }
                 }
-                applyScrollViewOffsetDelta(delta)
-                offsetDirty = true
-            } else if (contentOffset > 0 && isComposeAtTopForScrollSync()) {
-                // compose 到顶了，但是scrollview没到顶
-                applyScrollViewOffsetDelta(-contentOffset)
-                offsetDirty = false
-            } else if (isAtTop() && realContentSize == null && lastItemVisible() && scrollView?.isDragging != true) {
-                // 更新当前的contentSize大小
-                currentContentSize = calculateContentSize()
-                updateContentSizeToRender()
-            } else if (canScrollForward && reachBtm) {
-                // 底部无法滑动了，扩容
-                currentContentSize += minDelta
-                updateContentSizeToRender()
             }
         }
-    }
+    )
+}
+
+internal suspend fun shouldApplyDeferredScrollOffsetAlignmentAfterWindow(
+    forceExpand: Boolean,
+    isScrollInProgress: () -> Boolean,
+    awaitAlignmentWindow: suspend () -> Unit
+): Boolean {
+    awaitAlignmentWindow()
+    // Native dragging is already false during settling, while Compose still owns an active
+    // scroll. Scroll end clears that state and schedules alignment again.
+    return shouldApplyDeferredScrollOffsetAlignment(isScrollInProgress(), forceExpand)
+}
+
+internal fun shouldApplyDeferredScrollOffsetAlignment(
+    isScrollInProgress: Boolean,
+    forceExpand: Boolean
+): Boolean = forceExpand || !isScrollInProgress
+
+internal suspend fun shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
+    forceExpand: Boolean,
+    isScrollInProgress: () -> Boolean,
+    isCurrent: () -> Boolean,
+    awaitRefreshWindow: suspend () -> Unit
+): Boolean {
+    awaitRefreshWindow()
+    return isCurrent() && shouldApplyDeferredScrollOffsetAlignment(
+        isScrollInProgress = isScrollInProgress(),
+        forceExpand = forceExpand
+    )
 }

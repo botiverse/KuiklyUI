@@ -47,10 +47,14 @@ extern NSString *const KuiklyIndexAttributeName;
 @property (nonatomic, assign) NSUInteger spanIndex;
 @property (nonatomic, strong) UIFont *font;
 @property (nonatomic, strong) UIColor *color;
+@property (nonatomic, strong) UIColor *backgroundColor;
 @property (nonatomic, assign) BOOL hasGradient;
 @property (nonatomic, copy) NSString *cssGradient;
 @property (nonatomic, assign) CGFloat letterSpacing;
 @property (nonatomic, assign) KRTextDecorationLineType textDecoration;
+@property (nonatomic, strong) UIColor *textDecorationColor;
+@property (nonatomic, strong) NSNumber *textDecorationThickness;
+@property (nonatomic, strong) NSNumber *textDecorationOffset;
 @property (nonatomic, assign) NSTextAlignment textAlign;
 @property (nonatomic, strong) NSNumber *lineSpacing;
 @property (nonatomic, strong) NSNumber *lineHeight;
@@ -60,6 +64,11 @@ extern NSString *const KuiklyIndexAttributeName;
 @property (nonatomic, assign) CGFloat strokeWidth;
 @property (nonatomic, strong) NSShadow *shadow;
 @property (nonatomic, strong) NSArray<NSAttributedString *> *richAttrArray;
+// Slock rich-text chip chrome kind (task #439): chrome-kind wire string when this
+// span is an inline-code / tag chip, else nil. Consumed by KRLayoutManager.
+@property (nonatomic, copy, nullable) NSString *slockChrome;
+// Generic semantic-free inline box decoration carried by the existing TextSpan.
+@property (nonatomic, strong, nullable) NSDictionary<NSString *, id> *inlineBoxStyle;
 
 @end
 
