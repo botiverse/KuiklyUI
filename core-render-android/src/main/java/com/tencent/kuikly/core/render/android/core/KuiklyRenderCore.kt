@@ -48,8 +48,16 @@ import com.tencent.kuikly.core.render.android.layer.IKuiklyRenderLayerHandler
 import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreContextScheduler
 import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreTask
 import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreUIScheduler
+import com.tencent.kuikly.core.render.android.scheduler.TouchSyncGuard
 import com.tencent.tdf.module.TDFBaseModule
 import org.json.JSONObject
+
+/**
+ * Per-dispatch timeout for synchronous touch events. Kept at the historical
+ * 1000ms for step one of the bounded-stall hardening; any tightening is a
+ * separate decision driven by production downgrade telemetry.
+ */
+private const val SYNC_TOUCH_TIMEOUT_MS = 1000L
 
 class KuiklyRenderCore(
     private var contextHandler: IKuiklyRenderContextHandler? = null
@@ -69,6 +77,7 @@ class KuiklyRenderCore(
      * KTV UI线程调度器
      */
     private var uiScheduler: KuiklyRenderCoreUIScheduler? = null
+    private val touchSyncGuard = TouchSyncGuard()
 
     /**
      * KTV调用Native方法的回调map
@@ -173,6 +182,8 @@ class KuiklyRenderCore(
             contextHandler?.destroy()
             destroyCallKotlinTracer.end()
         }
+        // Drop any pending coalesced move dispatches this page registered.
+        KuiklyRenderCoreContextScheduler.evictReplaceableTasksByPrefix("$instanceId:")
         uiScheduler?.destroy()
         destroyTracer.end()
     }
@@ -387,6 +398,13 @@ class KuiklyRenderCore(
         )
     }
 
+    private fun fireViewEventOnContext(tag: Int, eventNameArg: Any?, result: Any?) {
+        contextHandler?.call(
+            KuiklyRenderContextMethod.KuiklyRenderContextMethodFireViewEvent,
+            listOf(instanceId, tag, eventNameArg, result)
+        )
+    }
+
     private fun setViewProp(method: KuiklyRenderNativeMethod, args: List<Any?>): Any? {
         var propValue = args.fourthArg<Any>()
         if (isEvent(args)) {
@@ -399,20 +417,57 @@ class KuiklyRenderCore(
                     if (shouldSync && uiScheduler?.isPerformingMainQueueTask == true) {
                         shouldSync = false
                     }
-                    performOnContextQueue(sync = shouldSync) {
-                        contextHandler?.call(
-                            KuiklyRenderContextMethod.KuiklyRenderContextMethodFireViewEvent,
-                            listOf(instanceId, tag, args.thirdArg(), result)
-                        )
-                        if (shouldSync) {
-                            uiScheduler?.performSyncMainQueueTasksBlockIfNeed(true)
-                            uiScheduler?.performOnMainQueueWithTask(sync = false) {
-                                uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
+                    val eventName = args.thirdArg<Any?>() as? String ?: ""
+                    if (shouldSync) {
+                        // Bounded-stall guard: a gesture whose sync dispatches have
+                        // exhausted its wait budget delivers remaining MOVEs async.
+                        // POINTER_DOWN/UP (>=2 touches) must not reset the gesture.
+                        val pointerCount = ((result as? Map<*, *>)?.get("touches") as? List<*>)?.size ?: 1
+                        shouldSync = touchSyncGuard.shouldDispatchSync(instanceId, tag, eventName, pointerCount)
+                    }
+                    val moveCoalesceToken = if (eventName == TouchSyncGuard.TOUCH_MOVE && syncCall) {
+                        touchSyncGuard.coalesceToken(instanceId, tag)
+                    } else {
+                        null
+                    }
+                    when {
+                        shouldSync -> {
+                            val syncResult = KuiklyRenderCoreContextScheduler.runTaskSyncUnsafelyWithResult(
+                                replaceToken = moveCoalesceToken,
+                                timeout = SYNC_TOUCH_TIMEOUT_MS,
+                            ) {
+                                fireViewEventOnContext(tag, args.thirdArg(), result)
+                                uiScheduler?.performSyncMainQueueTasksBlockIfNeed(true)
+                                uiScheduler?.performOnMainQueueWithTask(sync = false) {
+                                    uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
+                                }
+                            }
+                            uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
+                            touchSyncGuard.onSyncDispatchCompleted(
+                                instanceId, tag, eventName,
+                                timedOut = !syncResult.completedInTime,
+                                waitMs = syncResult.waitMs,
+                            )?.also { degrade ->
+                                KuiklyRenderLog.e(
+                                    "KuiklyRenderCore",
+                                    "touch_sync_degraded instanceId=${degrade.instanceId} " +
+                                        "tag=${degrade.tag} trigger=${degrade.triggerEventName} " +
+                                        "accumulatedWaitMs=${degrade.accumulatedWaitMs}",
+                                )
                             }
                         }
-                    }
-                    if (shouldSync) {
-                        uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
+                        moveCoalesceToken != null -> {
+                            // Degraded (or main-queue-downgraded) sync MOVE: deliver
+                            // asynchronously, latest position wins.
+                            KuiklyRenderCoreContextScheduler.scheduleReplaceableTask(moveCoalesceToken) {
+                                fireViewEventOnContext(tag, args.thirdArg(), result)
+                            }
+                        }
+                        else -> {
+                            performOnContextQueue {
+                                fireViewEventOnContext(tag, args.thirdArg(), result)
+                            }
+                        }
                     }
                 }
             }
