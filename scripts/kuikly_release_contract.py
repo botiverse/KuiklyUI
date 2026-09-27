@@ -567,6 +567,54 @@ def verify_landed_source(root: Path, source_sha: str, staging3_sha: str) -> None
     )
 
 
+HOTFIX_VERSION_FILES = frozenset({
+    "KUIKLY_RELEASE_SET",
+    "core-render-ohos/oh-package.json5",
+})
+
+
+def verify_hotfix_source(root: Path, source_sha: str, staging3_sha: str) -> None:
+    """Require a release/* hotfix checkout to be a published-tag base plus only
+    cherry-picks of commits already landed in staging3, or version-only bumps."""
+    require(SHA40.fullmatch(source_sha) is not None, "source SHA is not a 40-hex commit")
+    require(SHA40.fullmatch(staging3_sha) is not None, "staging3 SHA is not a 40-hex commit")
+    require(run_git(root, "rev-parse", "HEAD") == source_sha, "source checkout does not match requested SHA")
+    require(run_git(root, "status", "--porcelain") == "", "source worktree is dirty")
+    run_git(root, "cat-file", "-e", f"{source_sha}^{{commit}}")
+    run_git(root, "cat-file", "-e", f"{staging3_sha}^{{commit}}")
+
+    base = run_git(root, "merge-base", source_sha, staging3_sha)
+    process = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base, staging3_sha],
+        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    require(process.returncode == 0, f"hotfix base {base} is not on the staging3 line")
+    tag = subprocess.run(
+        ["git", "describe", "--exact-match", "--tags", "--match", "2.*-raft.*", base],
+        cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    require(
+        tag.returncode == 0,
+        f"hotfix base {base} is not exactly a published raft tag commit",
+    )
+
+    cherry = run_git(root, "cherry", staging3_sha, source_sha, base).splitlines()
+    require(len(cherry) > 0, f"hotfix branch has no commits on top of {base}")
+    for line in cherry:
+        marker, _, commit = line.partition(" ")
+        require(marker in {"-", "+"}, f"unexpected git cherry marker in {line!r}")
+        if marker == "-":
+            continue  # patch-equivalent to a commit already landed in staging3
+        files = run_git(
+            root, "diff-tree", "--no-commit-id", "--name-only", "-r", commit,
+        ).splitlines()
+        require(
+            len(files) > 0 and set(files) <= HOTFIX_VERSION_FILES,
+            f"hotfix commit {commit} is neither landed in staging3 nor a "
+            f"version-only bump (touches: {', '.join(sorted(files)) or 'none'})",
+        )
+
+
 def merge_toolchain_receipts(receipt_paths: Sequence[Path]) -> dict[str, Any]:
     """Merge the five independent producer receipts without losing identity."""
     require(len(receipt_paths) == len(EXPECTED_PRODUCERS), "toolchain merge requires exactly five producer receipts")
@@ -1920,6 +1968,18 @@ def command_write_checksums(args: argparse.Namespace) -> None:
     print(f"Kuikly versioned checksum companions ready: created={written}")
 
 
+def command_verify_hotfix_source(args: argparse.Namespace) -> None:
+    verify_hotfix_source(
+        Path(args.source_root).resolve(),
+        args.source_sha,
+        args.staging3_sha,
+    )
+    print(
+        f"Kuikly hotfix source verified: source={args.source_sha} "
+        f"staging3={args.staging3_sha}"
+    )
+
+
 def command_verify_landed_source(args: argparse.Namespace) -> None:
     verify_landed_source(
         Path(args.source_root).resolve(),
@@ -1968,6 +2028,12 @@ def parser() -> argparse.ArgumentParser:
     landed_command.add_argument("--source-sha", required=True)
     landed_command.add_argument("--staging3-sha", required=True)
     landed_command.set_defaults(function=command_verify_landed_source)
+
+    hotfix_command = commands.add_parser("verify-hotfix-source")
+    hotfix_command.add_argument("--source-root", required=True)
+    hotfix_command.add_argument("--source-sha", required=True)
+    hotfix_command.add_argument("--staging3-sha", required=True)
+    hotfix_command.set_defaults(function=command_verify_hotfix_source)
 
     ios_command = commands.add_parser("package-ios")
     ios_command.add_argument("--source-root", required=True)
