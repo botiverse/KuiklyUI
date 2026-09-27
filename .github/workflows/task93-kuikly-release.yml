@@ -498,7 +498,12 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_SOURCE_TREE"
           test "$(git rev-parse "${PUBLICATION_TAG_REF}^{commit}")" = "$SOURCE_SHA"
-          test "$GITHUB_REF" = "refs/heads/staging3"
+          if [[ "$GITHUB_REF" == refs/heads/release/* ]]; then
+            HOTFIX_PUBLISH=1
+          else
+            HOTFIX_PUBLISH=0
+            test "$GITHUB_REF" = "refs/heads/staging3"
+          fi
           live_staging3="$(
             git ls-remote --exit-code "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/staging3 \
               | awk 'NR == 1 { print $1 }'
@@ -513,10 +518,17 @@ jobs:
           test "$(git -C "$control_plane" rev-parse HEAD)" = "$CONTROL_PLANE_SHA"
           PYTHONDONTWRITEBYTECODE=1 python3 "$control_plane/scripts/test_kuikly_release_contract.py" \
             PublisherTests.test_checksum_listing_is_optional_but_exact_get_is_required
-          PYTHONDONTWRITEBYTECODE=1 python3 scripts/kuikly_release_contract.py verify-landed-source \
-            --source-root "$GITHUB_WORKSPACE" \
-            --source-sha "$SOURCE_SHA" \
-            --staging3-sha "$live_staging3"
+          if test "$HOTFIX_PUBLISH" = "1"; then
+            PYTHONDONTWRITEBYTECODE=1 python3 scripts/kuikly_release_contract.py verify-hotfix-source \
+              --source-root "$GITHUB_WORKSPACE" \
+              --source-sha "$SOURCE_SHA" \
+              --staging3-sha "$live_staging3"
+          else
+            PYTHONDONTWRITEBYTECODE=1 python3 scripts/kuikly_release_contract.py verify-landed-source \
+              --source-root "$GITHUB_WORKSPACE" \
+              --source-sha "$SOURCE_SHA" \
+              --staging3-sha "$live_staging3"
+          fi
           echo "post-verify workspace status (diagnostic):"
           publish_status="$(git -c core.untrackedCache=false status --porcelain --untracked-files=all)"
           printf '%s\n' "$publish_status"

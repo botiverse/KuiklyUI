@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import copy
 import hashlib
 import io
@@ -497,6 +498,91 @@ class ContractTests(unittest.TestCase):
             ).stdout.strip()
             with self.assertRaisesRegex(contract.ContractError, "is not landed in staging3"):
                 contract.verify_landed_source(root, unlanded_sha, staging3_sha)
+
+    def _hotfix_fixture(self, root: Path) -> tuple[str, str]:
+        commit = [
+            "git", "-c", "user.name=Task93 Fixture",
+            "-c", "user.email=task93@example.invalid",
+            "commit", "-qm",
+        ]
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        (root / "code.py").write_text("v1\n", encoding="utf-8")
+        (root / "KUIKLY_RELEASE_SET").write_text("2.24.0-raft.9\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(commit + ["base"], cwd=root, check=True)
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        subprocess.run(["git", "tag", "2.24.0-raft.9"], cwd=root, check=True)
+        return base_sha, " ".join(commit)
+
+    def _commit_file(self, root: Path, commit: list[str], name: str, text: str, msg: str) -> str:
+        (root / name).write_text(text, encoding="utf-8")
+        subprocess.run(["git", "add", name], cwd=root, check=True)
+        subprocess.run(commit + [msg], cwd=root, check=True)
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+    def test_hotfix_source_accepts_landed_cherry_pick_plus_version_bump(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            commit = [
+                "git", "-c", "user.name=Task93 Fixture",
+                "-c", "user.email=task93@example.invalid",
+                "commit", "-qm",
+            ]
+            base_sha, _ = self._hotfix_fixture(root)
+            staging3_sha = self._commit_file(root, commit, "fix.patch", "fix\n", "fix on staging3")
+            subprocess.run(["git", "checkout", "-qb", "release", "2.24.0-raft.9"], cwd=root, check=True)
+            env = dict(os.environ)
+            # Distinct committer date: a same-second cherry-pick of a commit whose
+            # parent is the tag base would be byte-identical to the staging3
+            # commit, collapsing the fixture's divergence.
+            env["GIT_COMMITTER_DATE"] = "2001-02-03T04:05:06Z"
+            subprocess.run(
+                ["git", "-c", "user.name=Task93 Fixture",
+                 "-c", "user.email=task93@example.invalid",
+                 "cherry-pick", "--no-edit", staging3_sha],
+                cwd=root, check=True, capture_output=True, text=True, env=env,
+            )
+            hotfix_sha = self._commit_file(
+                root, commit, "KUIKLY_RELEASE_SET", "2.24.0-raft.9.1\n", "version bump")
+            contract.verify_hotfix_source(root, hotfix_sha, staging3_sha)
+
+    def test_hotfix_source_rejects_unlanded_product_change(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            commit = [
+                "git", "-c", "user.name=Task93 Fixture",
+                "-c", "user.email=task93@example.invalid",
+                "commit", "-qm",
+            ]
+            self._hotfix_fixture(root)
+            staging3_sha = self._commit_file(root, commit, "code.py", "v2\n", "staging3 work")
+            subprocess.run(["git", "checkout", "-qb", "release", "2.24.0-raft.9"], cwd=root, check=True)
+            hotfix_sha = self._commit_file(root, commit, "code.py", "rogue\n", "unlanded change")
+            with self.assertRaisesRegex(contract.ContractError, "neither landed in staging3"):
+                contract.verify_hotfix_source(root, hotfix_sha, staging3_sha)
+
+    def test_hotfix_source_rejects_untagged_base(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            commit = [
+                "git", "-c", "user.name=Task93 Fixture",
+                "-c", "user.email=task93@example.invalid",
+                "commit", "-qm",
+            ]
+            self._hotfix_fixture(root)
+            staging3_sha = self._commit_file(root, commit, "code.py", "v2\n", "staging3 work")
+            untagged = self._commit_file(root, commit, "code.py", "v3\n", "post-tag mainline")
+            subprocess.run(["git", "checkout", "-qb", "release", untagged], cwd=root, check=True)
+            hotfix_sha = self._commit_file(
+                root, commit, "KUIKLY_RELEASE_SET", "2.24.0-raft.9.1\n", "version bump")
+            with self.assertRaisesRegex(contract.ContractError, "not exactly a published raft tag"):
+                contract.verify_hotfix_source(root, hotfix_sha, staging3_sha)
 
     def test_exact_37_seed_closure(self) -> None:
         self.assertEqual(37, len(contract.SEEDS))
