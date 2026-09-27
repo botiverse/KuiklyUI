@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import copy
 import hashlib
 import io
@@ -583,6 +584,79 @@ class ContractTests(unittest.TestCase):
                 root, commit, "KUIKLY_RELEASE_SET", "2.24.0-raft.9.1\n", "version bump")
             with self.assertRaisesRegex(contract.ContractError, "not exactly a published raft tag"):
                 contract.verify_hotfix_source(root, hotfix_sha, staging3_sha)
+
+    def test_release_set_env_override_selects_source_checkout_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            override = Path(raw) / "KUIKLY_RELEASE_SET"
+            override.write_text("2.24.0-raft.6.1\n", encoding="utf-8")
+            env = dict(os.environ)
+            env["KUIKLY_RELEASE_SET_FILE"] = str(override)
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, %r); "
+                 "import kuikly_release_contract as c; print(c.RELEASE)" % str(
+                     Path(__file__).resolve().parent)],
+                check=True, capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.stdout.strip(), "2.24.0-raft.6.1")
+
+    def test_release_set_resolves_from_source_root_without_env(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "source"
+            source.mkdir()
+            (source / "KUIKLY_RELEASE_SET").write_text("2.24.0-raft.6.1\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.pop("KUIKLY_RELEASE_SET_FILE", None)
+            env.pop("GITHUB_WORKSPACE", None)
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, %r); "
+                 "import kuikly_release_contract as c; "
+                 "from pathlib import Path; "
+                 "print(c.reconfigure_release_set(Path(%r)))" % (
+                     str(Path(__file__).resolve().parent), str(source))],
+                check=True, capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.stdout.strip(), "2.24.0-raft.6.1")
+
+    def test_release_set_falls_back_to_github_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw) / "ws"
+            workspace.mkdir()
+            (workspace / "KUIKLY_RELEASE_SET").write_text("2.24.0-raft.9.2\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.pop("KUIKLY_RELEASE_SET_FILE", None)
+            env["GITHUB_WORKSPACE"] = str(workspace)
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, %r); "
+                 "import kuikly_release_contract as c; "
+                 "print(c.reconfigure_release_set(None))" % str(
+                     Path(__file__).resolve().parent)],
+                check=True, capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.stdout.strip(), "2.24.0-raft.9.2")
+
+    def test_maven_publish_rebinds_release_and_manifest_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw) / "ws"
+            workspace.mkdir()
+            (workspace / "KUIKLY_RELEASE_SET").write_text("2.24.0-raft.6.1\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.pop("KUIKLY_RELEASE_SET_FILE", None)
+            env["GITHUB_WORKSPACE"] = str(workspace)
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, %r); "
+                 "import kuikly_maven_publish as m; "
+                 "m._reconfigure_release_set(); "
+                 "print(m.RELEASE); print(m.MANIFEST_PATH)" % str(
+                     Path(__file__).resolve().parent)],
+                check=True, capture_output=True, text=True, env=env,
+            )
+            lines = result.stdout.strip().splitlines()
+            self.assertEqual(lines[0], "2.24.0-raft.6.1")
+            self.assertIn("2.24.0-raft.6.1", lines[1])
 
     def test_exact_37_seed_closure(self) -> None:
         self.assertEqual(37, len(contract.SEEDS))

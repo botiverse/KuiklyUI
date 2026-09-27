@@ -46,8 +46,48 @@ SOURCE_SCM_CONNECTION = f"scm:git:https://github.com/{REPOSITORY}.git"
 SOURCE_SCM_DEVELOPER_CONNECTION = f"scm:git:ssh://git@github.com/{REPOSITORY}.git"
 GROUP = "com.tencent.kuikly-open"
 GROUP_PATH = "com/tencent/kuikly-open"
-_RELEASE_SET_FILE = Path(__file__).resolve().parent.parent / "KUIKLY_RELEASE_SET"
-RELEASE = _RELEASE_SET_FILE.read_text(encoding="utf-8").strip()
+def _script_adjacent_release_set_file() -> Path:
+    return Path(__file__).resolve().parent.parent / "KUIKLY_RELEASE_SET"
+
+
+def _resolve_release_set_file(source_hint: "Path | None") -> Path:
+    """The release set identifies the SOURCE being published, not the checkout
+    hosting this script (the publish job runs it from the staging3 control
+    plane while the source may be a release/* hotfix branch). Resolution order:
+    explicit KUIKLY_RELEASE_SET_FILE env, the command's --source-root, the
+    GITHUB_WORKSPACE checkout, then the legacy script-adjacent file."""
+    env_file = os.environ.get("KUIKLY_RELEASE_SET_FILE")
+    if env_file:
+        return Path(env_file)
+    if source_hint is not None:
+        candidate = source_hint / "KUIKLY_RELEASE_SET"
+        if candidate.is_file():
+            return candidate
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    if workspace:
+        candidate = Path(workspace) / "KUIKLY_RELEASE_SET"
+        if candidate.is_file():
+            return candidate
+    return _script_adjacent_release_set_file()
+
+
+def reconfigure_release_set(source_hint: "Path | None" = None) -> str:
+    """(Re)bind RELEASE and every constant derived from it. Call after CLI
+    parsing, once the source location is known; import-time default below keeps
+    script-adjacent semantics for callers that never reconfigure."""
+    global RELEASE, NORMAL_VERSION, OHOS_VERSION, MANIFEST_VERSION, MANIFEST_PATH
+    RELEASE = _resolve_release_set_file(source_hint).read_text(encoding="utf-8").strip()
+    NORMAL_VERSION = f"{RELEASE}-2.1.21"
+    OHOS_VERSION = f"{RELEASE}-2.0.21-ohos"
+    MANIFEST_VERSION = RELEASE
+    MANIFEST_PATH = (
+        f"{GROUP_PATH}/{MANIFEST_ARTIFACT}/{MANIFEST_VERSION}/"
+        f"{MANIFEST_ARTIFACT}-{MANIFEST_VERSION}.json"
+    )
+    return RELEASE
+
+
+RELEASE = _resolve_release_set_file(None).read_text(encoding="utf-8").strip()
 NORMAL_VERSION = f"{RELEASE}-2.1.21"
 OHOS_VERSION = f"{RELEASE}-2.0.21-ohos"
 MANIFEST_ARTIFACT = "kuikly-release-manifest"
@@ -2056,6 +2096,8 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
+        source_hint = getattr(args, "source_root", None)
+        reconfigure_release_set(Path(source_hint).resolve() if source_hint else None)
         args.function(args)
         return 0
     except ContractError as error:

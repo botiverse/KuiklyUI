@@ -24,17 +24,33 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Sequence
 
+import kuikly_release_contract as _contract
 from kuikly_release_contract import (
     GROUP,
-    MANIFEST_PATH,
     PUBLIC_MAVEN_ORIGIN,
-    RELEASE,
     canonical_set_digest,
     checksum_descriptor,
     json_bytes,
     sha256_bytes,
     validate_manifest,
 )
+
+
+# Import-time defaults preserve pre-refactor behavior for direct callers that
+# never go through main(); main() rebinds via _reconfigure_release_set().
+RELEASE = _contract.RELEASE
+MANIFEST_PATH = _contract.MANIFEST_PATH
+
+
+def _reconfigure_release_set() -> None:
+    """Bind RELEASE/MANIFEST_PATH to the SOURCE being published, not to the
+    checkout hosting this script (publish runs it from the staging3 control
+    plane while the source may be a release/* hotfix branch)."""
+    global RELEASE, MANIFEST_PATH
+    _contract.reconfigure_release_set(None)
+    RELEASE = _contract.RELEASE
+    MANIFEST_PATH = _contract.MANIFEST_PATH
+
 
 
 CONTROL_ORIGIN = "https://artifacts.botiverse.dev"
@@ -473,6 +489,7 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
+        _reconfigure_release_set()
         args.handler(args)
         return 0
     except (PublishError, OSError, ValueError, KeyError, TypeError) as error:
