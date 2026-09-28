@@ -76,6 +76,9 @@ def reconfigure_release_set(source_hint: "Path | None" = None) -> str:
     parsing, once the source location is known; import-time default below keeps
     script-adjacent semantics for callers that never reconfigure."""
     global RELEASE, NORMAL_VERSION, OHOS_VERSION, MANIFEST_VERSION, MANIFEST_PATH
+    global SEED_BY_GAV, CINTEROP_KLIB_SCHEMA, KOTLIN_RESOURCE_SCHEMA
+    global REQUIRED_KIND_OVERRIDES, EXPECTED_OWNER_POM_EDGES
+    global EXPECTED_CINTEROP_KLIB_PATHS, EXPECTED_KOTLIN_RESOURCE_PATHS
     RELEASE = _resolve_release_set_file(source_hint).read_text(encoding="utf-8").strip()
     NORMAL_VERSION = f"{RELEASE}-2.1.21"
     OHOS_VERSION = f"{RELEASE}-2.0.21-ohos"
@@ -84,6 +87,15 @@ def reconfigure_release_set(source_hint: "Path | None" = None) -> str:
         f"{GROUP_PATH}/{MANIFEST_ARTIFACT}/{MANIFEST_VERSION}/"
         f"{MANIFEST_ARTIFACT}-{MANIFEST_VERSION}.json"
     )
+    # Seed.version derives from NORMAL_VERSION/OHOS_VERSION dynamically, but the
+    # import-time structures keyed by it are snapshots — rebuild them all.
+    SEED_BY_GAV = {(GROUP, item.artifact, item.version): item for item in SEEDS}
+    CINTEROP_KLIB_SCHEMA = _build_cinterop_klib_schema()
+    KOTLIN_RESOURCE_SCHEMA = _build_kotlin_resource_schema()
+    REQUIRED_KIND_OVERRIDES = _build_required_kind_overrides()
+    EXPECTED_OWNER_POM_EDGES = _build_expected_owner_pom_edges()
+    EXPECTED_CINTEROP_KLIB_PATHS = _build_expected_cinterop_klib_paths()
+    EXPECTED_KOTLIN_RESOURCE_PATHS = _build_expected_kotlin_resource_paths()
     return RELEASE
 
 
@@ -204,19 +216,24 @@ require(len(SEED_BY_GAV) == len(SEEDS), "internal seed closure contains duplicat
 # owning native metadata-member modules.  Keep the schema explicit: an
 # arbitrary ``-cinterop-*.klib`` filename must not become an admitted carrier
 # merely because it has a familiar suffix.
-CINTEROP_KLIB_SCHEMA: dict[tuple[str, str, str], str] = {
-    (GROUP, "core-iosarm64", NORMAL_VERSION): "kuikly",
-    (GROUP, "core-iossimulatorarm64", NORMAL_VERSION): "kuikly",
-    (GROUP, "core-iosx64", NORMAL_VERSION): "kuikly",
-    (GROUP, "core-macosarm64", NORMAL_VERSION): "kuikly",
-    (GROUP, "core-macosx64", NORMAL_VERSION): "kuikly",
-    (GROUP, "core-ohosarm64", OHOS_VERSION): "ohos",
-}
-require(len(CINTEROP_KLIB_SCHEMA) == 6, "internal cinterop KLIB schema is not six carriers")
-require(
-    set(CINTEROP_KLIB_SCHEMA).issubset(SEED_BY_GAV),
-    "internal cinterop KLIB schema names a non-seed owner",
-)
+def _build_cinterop_klib_schema() -> dict[tuple[str, str, str], str]:
+    schema = {
+        (GROUP, "core-iosarm64", NORMAL_VERSION): "kuikly",
+        (GROUP, "core-iossimulatorarm64", NORMAL_VERSION): "kuikly",
+        (GROUP, "core-iosx64", NORMAL_VERSION): "kuikly",
+        (GROUP, "core-macosarm64", NORMAL_VERSION): "kuikly",
+        (GROUP, "core-macosx64", NORMAL_VERSION): "kuikly",
+        (GROUP, "core-ohosarm64", OHOS_VERSION): "ohos",
+    }
+    require(len(schema) == 6, "internal cinterop KLIB schema is not six carriers")
+    require(
+        set(schema).issubset(SEED_BY_GAV),
+        "internal cinterop KLIB schema names a non-seed owner",
+    )
+    return schema
+
+
+CINTEROP_KLIB_SCHEMA = _build_cinterop_klib_schema()
 
 
 def cinterop_klib_filename(seed_item: Seed) -> str | None:
@@ -233,31 +250,41 @@ def cinterop_klib_path(seed_item: Seed) -> str | None:
     return f"{GROUP_PATH}/{seed_item.artifact}/{seed_item.version}/{filename}"
 
 
-EXPECTED_CINTEROP_KLIB_PATHS = frozenset(
-    path
-    for seed_item in SEEDS
-    for path in (cinterop_klib_path(seed_item),)
-    if path is not None
-)
-require(len(EXPECTED_CINTEROP_KLIB_PATHS) == 6, "internal cinterop KLIB path schema is not six carriers")
+def _build_expected_cinterop_klib_paths() -> frozenset[str]:
+    paths = frozenset(
+        path
+        for seed_item in SEEDS
+        for path in (cinterop_klib_path(seed_item),)
+        if path is not None
+    )
+    require(len(paths) == 6, "internal cinterop KLIB path schema is not six carriers")
+    return paths
+
+
+EXPECTED_CINTEROP_KLIB_PATHS = _build_expected_cinterop_klib_paths()
 
 # Compose target publications carry one Gradle-declared Kotlin resources ZIP
 # at these exact seven GAVs.  This is another physical-file schema, not a
 # wildcard acceptance rule for filenames containing the word "resources".
-KOTLIN_RESOURCE_SCHEMA: frozenset[tuple[str, str, str]] = frozenset({
-    (GROUP, "compose-iosarm64", NORMAL_VERSION),
-    (GROUP, "compose-iossimulatorarm64", NORMAL_VERSION),
-    (GROUP, "compose-iosx64", NORMAL_VERSION),
-    (GROUP, "compose-js", NORMAL_VERSION),
-    (GROUP, "compose-macosarm64", NORMAL_VERSION),
-    (GROUP, "compose-macosx64", NORMAL_VERSION),
-    (GROUP, "compose-ohosarm64", OHOS_VERSION),
-})
-require(len(KOTLIN_RESOURCE_SCHEMA) == 7, "internal Kotlin resource schema is not seven carriers")
-require(
-    set(KOTLIN_RESOURCE_SCHEMA).issubset(SEED_BY_GAV),
-    "internal Kotlin resource schema names a non-seed owner",
-)
+def _build_kotlin_resource_schema() -> frozenset[tuple[str, str, str]]:
+    schema = frozenset({
+        (GROUP, "compose-iosarm64", NORMAL_VERSION),
+        (GROUP, "compose-iossimulatorarm64", NORMAL_VERSION),
+        (GROUP, "compose-iosx64", NORMAL_VERSION),
+        (GROUP, "compose-js", NORMAL_VERSION),
+        (GROUP, "compose-macosarm64", NORMAL_VERSION),
+        (GROUP, "compose-macosx64", NORMAL_VERSION),
+        (GROUP, "compose-ohosarm64", OHOS_VERSION),
+    })
+    require(len(schema) == 7, "internal Kotlin resource schema is not seven carriers")
+    require(
+        set(schema).issubset(SEED_BY_GAV),
+        "internal Kotlin resource schema names a non-seed owner",
+    )
+    return schema
+
+
+KOTLIN_RESOURCE_SCHEMA = _build_kotlin_resource_schema()
 
 
 def kotlin_resource_filename(seed_item: Seed) -> str | None:
@@ -273,13 +300,18 @@ def kotlin_resource_path(seed_item: Seed) -> str | None:
     return f"{GROUP_PATH}/{seed_item.artifact}/{seed_item.version}/{filename}"
 
 
-EXPECTED_KOTLIN_RESOURCE_PATHS = frozenset(
-    path
-    for seed_item in SEEDS
-    for path in (kotlin_resource_path(seed_item),)
-    if path is not None
-)
-require(len(EXPECTED_KOTLIN_RESOURCE_PATHS) == 7, "internal Kotlin resource path schema is not seven carriers")
+def _build_expected_kotlin_resource_paths() -> frozenset[str]:
+    paths = frozenset(
+        path
+        for seed_item in SEEDS
+        for path in (kotlin_resource_path(seed_item),)
+        if path is not None
+    )
+    require(len(paths) == 7, "internal Kotlin resource path schema is not seven carriers")
+    return paths
+
+
+EXPECTED_KOTLIN_RESOURCE_PATHS = _build_expected_kotlin_resource_paths()
 
 
 def owner_root(seed_item: Seed) -> Seed | None:
@@ -338,25 +370,30 @@ REQUIRED_KINDS: dict[str, frozenset[str]] = {
 # These producer-specific publication shapes are deliberately narrower than
 # their broad platform family.  Do not require carriers that the reviewed
 # Gradle publications do not emit, and do not synthesize replacement bytes.
-REQUIRED_KIND_OVERRIDES: dict[tuple[str, str, str], frozenset[str]] = {
-    (GROUP, "core-render-android", NORMAL_VERSION): frozenset({
-        "pom", "gradle-module", "aar",
-    }),
-    (GROUP, "core-ohosarm64", OHOS_VERSION): frozenset({
-        "pom", "gradle-module", "klib", "sources",
-    }),
-    (GROUP, "core-annotations-ohosarm64", OHOS_VERSION): frozenset({
-        "pom", "gradle-module", "klib", "sources",
-    }),
-    (GROUP, "compose-ohosarm64", OHOS_VERSION): frozenset({
-        "pom", "gradle-module", "klib", "sources",
-    }),
-}
-require(len(REQUIRED_KIND_OVERRIDES) == 4, "internal physical shape override is not four GAVs")
-require(
-    set(REQUIRED_KIND_OVERRIDES).issubset(SEED_BY_GAV),
-    "internal physical shape override names a non-seed GAV",
-)
+def _build_required_kind_overrides() -> dict[tuple[str, str, str], frozenset[str]]:
+    overrides = {
+        (GROUP, "core-render-android", NORMAL_VERSION): frozenset({
+            "pom", "gradle-module", "aar",
+        }),
+        (GROUP, "core-ohosarm64", OHOS_VERSION): frozenset({
+            "pom", "gradle-module", "klib", "sources",
+        }),
+        (GROUP, "core-annotations-ohosarm64", OHOS_VERSION): frozenset({
+            "pom", "gradle-module", "klib", "sources",
+        }),
+        (GROUP, "compose-ohosarm64", OHOS_VERSION): frozenset({
+            "pom", "gradle-module", "klib", "sources",
+        }),
+    }
+    require(len(overrides) == 4, "internal physical shape override is not four GAVs")
+    require(
+        set(overrides).issubset(SEED_BY_GAV),
+        "internal physical shape override names a non-seed GAV",
+    )
+    return overrides
+
+
+REQUIRED_KIND_OVERRIDES = _build_required_kind_overrides()
 
 
 def required_kinds(seed_item: Seed) -> frozenset[str]:
@@ -368,9 +405,10 @@ def required_kinds(seed_item: Seed) -> frozenset[str]:
 # Exact owner-group dependency graph emitted by the reviewed Gradle producer.
 # This is intentionally an edge closure, not merely a target allow-list: a
 # missing dependency is just as release-significant as an unexpected one.
-EXPECTED_OWNER_POM_EDGES: frozenset[
+def _build_expected_owner_pom_edges() -> frozenset[
     tuple[tuple[str, str, str], tuple[str, str, str]]
-] = frozenset({
+]:
+    edges = frozenset({
     ((GROUP, "compose", NORMAL_VERSION), (GROUP, "core", NORMAL_VERSION)),
     ((GROUP, "compose", NORMAL_VERSION), (GROUP, "core-annotations", NORMAL_VERSION)),
     ((GROUP, "compose-android", NORMAL_VERSION), (GROUP, "core-android", NORMAL_VERSION)),
@@ -390,7 +428,15 @@ EXPECTED_OWNER_POM_EDGES: frozenset[
     ((GROUP, "compose-macosx64", NORMAL_VERSION), (GROUP, "core-annotations-macosx64", NORMAL_VERSION)),
     ((GROUP, "compose-ohosarm64", OHOS_VERSION), (GROUP, "core-ohosarm64", OHOS_VERSION)),
     ((GROUP, "core-ksp", OHOS_VERSION), (GROUP, "core-annotations-jvm", OHOS_VERSION)),
-})
+    })
+    require(len(edges) == 19, "internal owner POM graph is not 19 edges")
+    for expected_source, expected_target in edges:
+        require(expected_source in SEED_BY_GAV, f"owner POM graph source is not a release seed: {':'.join(expected_source)}")
+        require(expected_target in SEED_BY_GAV, f"owner POM graph target is not a release seed: {':'.join(expected_target)}")
+    return edges
+
+
+EXPECTED_OWNER_POM_EDGES = _build_expected_owner_pom_edges()
 
 
 def expected_pom_dependency_type(target: tuple[str, str, str]) -> str | None:
@@ -399,10 +445,6 @@ def expected_pom_dependency_type(target: tuple[str, str, str]) -> str | None:
     return "aar" if "aar" in required_kinds(target_seed) else None
 
 
-require(len(EXPECTED_OWNER_POM_EDGES) == 19, "internal owner POM graph is not 19 edges")
-for expected_source, expected_target in EXPECTED_OWNER_POM_EDGES:
-    require(expected_source in SEED_BY_GAV, f"owner POM graph source is not a release seed: {':'.join(expected_source)}")
-    require(expected_target in SEED_BY_GAV, f"owner POM graph target is not a release seed: {':'.join(expected_target)}")
 require(
     sum(expected_pom_dependency_type(target) == "aar" for _, target in EXPECTED_OWNER_POM_EDGES) == 2,
     "internal owner POM graph must contain exactly two AAR edges",
