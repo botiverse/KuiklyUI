@@ -356,6 +356,22 @@ class MavenStateHttp(PublicStateHttp):
         return super().request(origin, path, method, **kwargs)
 
 
+def subprocess_manifest_pipeline_after_reconfigure() -> None:
+    """Entry point run in a clean subprocess: import resolves RELEASE from the
+    script-adjacent file (staging3's), then reconfigure to a DIFFERENT source
+    version and drive the full assemble+validate pipeline. Fails before the
+    rebind fix with 'unclassified primary carrier' (tables keyed by the stale
+    version) — see Codex's reproduction on 07f127a."""
+    source = Path(os.environ["HOTFIX_SOURCE_ROOT"])
+    rebound = contract.reconfigure_release_set(source)
+    assert rebound == "2.24.0-raft.9.1", rebound
+    with tempfile.TemporaryDirectory() as raw:
+        manifest, staging, bundle = assemble_fixture(Path(raw))
+    contract.validate_manifest(manifest, require_publishable=True)
+    assert manifest["releaseSet"] == "2.24.0-raft.9.1", manifest["releaseSet"]
+    print("pipeline-ok", rebound)
+
+
 class ContractTests(unittest.TestCase):
     def test_maven_owner_boundary_preserves_external_nonzero(self) -> None:
         external_log = """[INFO] BUILD FAILURE
@@ -657,6 +673,21 @@ class ContractTests(unittest.TestCase):
             lines = result.stdout.strip().splitlines()
             self.assertEqual(lines[0], "2.24.0-raft.6.1")
             self.assertIn("2.24.0-raft.6.1", lines[1])
+
+    def test_full_manifest_pipeline_after_release_set_reconfigure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "source"
+            source.mkdir()
+            (source / "KUIKLY_RELEASE_SET").write_text("2.24.0-raft.9.1\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.pop("KUIKLY_RELEASE_SET_FILE", None)
+            env.pop("GITHUB_WORKSPACE", None)
+            env["HOTFIX_SOURCE_ROOT"] = str(source)
+            result = subprocess.run(
+                [sys.executable, __file__, "--run-reconfigure-pipeline"],
+                check=True, capture_output=True, text=True, env=env,
+            )
+            self.assertIn("pipeline-ok 2.24.0-raft.9.1", result.stdout)
 
     def test_exact_37_seed_closure(self) -> None:
         self.assertEqual(37, len(contract.SEEDS))
@@ -1952,4 +1983,7 @@ class PublisherTests(unittest.TestCase):
             self.assertEqual("complete", json.loads(execution_path.read_text())["state"])
 
 if __name__ == "__main__":
+    if "--run-reconfigure-pipeline" in sys.argv:
+        subprocess_manifest_pipeline_after_reconfigure()
+        raise SystemExit(0)
     unittest.main(verbosity=2)
