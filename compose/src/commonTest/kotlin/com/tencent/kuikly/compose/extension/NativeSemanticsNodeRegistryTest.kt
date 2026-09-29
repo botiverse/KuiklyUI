@@ -15,12 +15,109 @@
 
 package com.tencent.kuikly.compose.extension
 
+import com.tencent.kuikly.compose.ui.semantics.Role
+import com.tencent.kuikly.core.base.attr.AccessibilityRole
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class NativeSemanticsNodeRegistryTest {
+    private data class ProjectionNode(
+        val name: String,
+        val hidden: Boolean = false,
+        val parent: ProjectionNode? = null
+    )
+
+    private data class LayoutProjectionNode(
+        val hidden: Boolean = false,
+        val parent: LayoutProjectionNode? = null
+    )
+
+    private data class SemanticProjectionNode(
+        val name: String,
+        val layoutNode: LayoutProjectionNode,
+        val semanticParent: SemanticProjectionNode? = null
+    )
+
+    @Test
+    fun invisibleNodeExcludesItsNativeSubtree() {
+        assertEquals(
+            AccessibilityRole.HIDDEN,
+            resolveNativeAccessibilityRole(isInvisibleToUser = true, hasAccessibilityText = false, role = null)
+        )
+    }
+
+    @Test
+    fun visibleEmptyContainerRestoresDescendantTraversal() {
+        assertEquals(
+            AccessibilityRole.NONE,
+            resolveNativeAccessibilityRole(isInvisibleToUser = false, hasAccessibilityText = false, role = null)
+        )
+    }
+
+    @Test
+    fun visibleButtonKeepsItsNativeRole() {
+        assertEquals(
+            AccessibilityRole.BUTTON,
+            resolveNativeAccessibilityRole(isInvisibleToUser = false, hasAccessibilityText = true, role = Role.Button)
+        )
+    }
+
+    @Test
+    fun hiddenAncestorProjectsToEveryFlattenedNativeDescendant() {
+        val hiddenRoot = ProjectionNode(name = "content", hidden = true)
+        val navigation = ProjectionNode(name = "navigation", parent = hiddenRoot)
+        val search = ProjectionNode(name = "search", parent = navigation)
+        val drawer = ProjectionNode(name = "drawer")
+
+        val hiddenNodes = effectivelyHiddenNodes(
+            nodes = listOf(hiddenRoot, navigation, search, drawer),
+            isHidden = ProjectionNode::hidden,
+            parentOf = ProjectionNode::parent
+        )
+
+        assertEquals(setOf(hiddenRoot, navigation, search), hiddenNodes)
+    }
+
+    @Test
+    fun clearingHiddenAncestorRestoresTheProjectedSubtree() {
+        val visibleRoot = ProjectionNode(name = "content")
+        val search = ProjectionNode(name = "search", parent = visibleRoot)
+
+        val hiddenNodes = effectivelyHiddenNodes(
+            nodes = listOf(visibleRoot, search),
+            isHidden = ProjectionNode::hidden,
+            parentOf = ProjectionNode::parent
+        )
+
+        assertTrue(hiddenNodes.isEmpty())
+    }
+
+    @Test
+    fun layoutAncestryProjectsHiddenAcrossDisconnectedSemanticBranches() {
+        val hiddenLayoutRoot = LayoutProjectionNode(hidden = true)
+        val contentLayout = LayoutProjectionNode(parent = hiddenLayoutRoot)
+        val searchLayout = LayoutProjectionNode(parent = contentLayout)
+        val drawerLayout = LayoutProjectionNode()
+        val hiddenRoot = SemanticProjectionNode(name = "content", layoutNode = hiddenLayoutRoot)
+        val search = SemanticProjectionNode(
+            name = "search",
+            layoutNode = searchLayout,
+            semanticParent = null
+        )
+        val drawer = SemanticProjectionNode(name = "drawer", layoutNode = drawerLayout)
+
+        val hiddenNodes = effectivelyHiddenNodes(
+            nodes = listOf(hiddenRoot, search, drawer),
+            firstAncestor = SemanticProjectionNode::layoutNode,
+            isHidden = LayoutProjectionNode::hidden,
+            parentOf = LayoutProjectionNode::parent
+        )
+
+        assertEquals(setOf(hiddenRoot, search), hiddenNodes)
+    }
+
     @Test
     fun reconcileReturnsOnlyNodesRemovedFromCurrentGeneration() {
         val registry = NativeSemanticsNodeRegistry<Any>()
