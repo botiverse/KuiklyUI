@@ -1,0 +1,12 @@
+{
+  "repos": [
+    {
+      "name": "kuikly",
+      "patch_dir": "patches/kuikly",
+      "src_dir": "src",
+      "upstream": "https://github.com/Tencent-TDS/KuiklyUI.git",
+      "ref": "refs/tags/2.28.0",
+      "commit": "c9c1c743c85734422a74b7c0be44d37402fe2d08"
+    }
+  ]
+}

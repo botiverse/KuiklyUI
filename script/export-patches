@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Export the commits on top of the upstream pin in <src-dir> back into
+# patches/kuikly/ and rewrite .patches in commit order.
+# Usage: script/export-patches [<src-dir>]
+source "$(dirname "$0")/lib.sh"
+src="${1:-$ROOT/$(cfg src_dir)}"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+git -C "$src" format-patch -q --no-signature --zero-commit --full-index --no-numbered \
+  --no-stat --keep-subject --filename-max-length=100 -o "$tmp" "$UPSTREAM_COMMIT..HEAD"
+find "$PATCH_DIR" -maxdepth 1 -name '*.patch' -delete
+: > "$PATCH_DIR/.patches"
+for f in "$tmp"/*.patch; do
+  name="$(basename "$f")"; name="${name#[0-9][0-9][0-9][0-9]-}"
+  name="$(printf '%s' "$name" | tr 'A-Z' 'a-z' | sed 's/-/_/g')"
+  if [[ -e "$PATCH_DIR/$name" ]]; then
+    echo "error: duplicate patch name $name; reword one commit subject" >&2; exit 1
+  fi
+  mv "$f" "$PATCH_DIR/$name"
+  echo "$name" >> "$PATCH_DIR/.patches"
+done
+echo "exported $(wc -l < "$PATCH_DIR/.patches") patches to $PATCH_DIR"

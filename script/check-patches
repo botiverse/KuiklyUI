@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# CI gate: the queue applies cleanly on the pinned upstream commit, and
+# re-exporting it reproduces patches/ byte-for-byte (no hand-edited drift).
+source "$(dirname "$0")/lib.sh"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+cp -r "$ROOT/script" "$ROOT/patches" "$work/"
+"$work/script/sync" "$work/src"
+"$work/script/export-patches" "$work/src" >/dev/null
+if ! diff -r "$ROOT/patches" "$work/patches" >/dev/null; then
+  diff -r "$ROOT/patches" "$work/patches" | head -40 >&2
+  echo "error: patches/ is not in canonical export form; run script/sync && script/export-patches" >&2
+  exit 1
+fi
+echo "OK: patches apply cleanly and are in canonical export form"
