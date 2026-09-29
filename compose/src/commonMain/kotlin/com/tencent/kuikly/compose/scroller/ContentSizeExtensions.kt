@@ -291,9 +291,20 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
     if (kuiklyInfo.skipExpandStartSize) return
     if (this is PagerState) return
 
+    val atTopSync = isComposeAtTopForScrollSync()
+    val needsTopExpand = offset <= 0 && !atTopSync && kuiklyInfo.offsetDirty
+    val needsScrollViewPullBack = offset > 0 && atTopSync
+    if (!needsTopExpand && !needsScrollViewPullBack) {
+        return
+    }
+
+    if (isScrolling && kuiklyInfo.scrollView?.isDragging != true) {
+        return
+    }
+
     val density = kuiklyInfo.getDensity()
     // scrollview 到顶了，但是compose没到顶
-    if (offset <= 0 && !isComposeAtTopForScrollSync() && kuiklyInfo.offsetDirty) {
+    if (needsTopExpand) {
         var delta = calculateBackExpandSize(offset)
         val minDelta = (ScrollableStateConstants.DEFAULT_CONTENT_SIZE * density).toInt()
         delta = max(delta ?: minDelta, minDelta)
