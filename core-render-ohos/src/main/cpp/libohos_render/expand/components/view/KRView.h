@@ -69,6 +69,9 @@ class KRView : public IKRRenderViewExport {
     bool HasTouchEvent();
     void UpdateHitTestMode(bool shouldUseTarget);
     void EnsureSuperTouchType();
+    // superTouch disable/reset 的统一清理：清 consumer、两枚 capture 状态、
+    // parent handler 引用与 SELF 类型缓存，避免 stale SELF/consumer 残留或空解引用。
+    void ResetSuperTouchState();
 
     bool HandleTextSelectionMethods(const std::string &method, const KRAnyValue &params, const KRRenderCallback &cb);
     void HandleCreateSelection(const KRAnyValue &params);
@@ -113,6 +116,8 @@ class KRView : public IKRRenderViewExport {
     std::weak_ptr<SuperTouchHandler> parent_super_touch_handler_;
     SuperTouchType super_touch_type_ = UNKNOWN;
     bool stop_propagation_ = false;
+    bool native_dispatch_capture_requested_ = false;
+    bool native_dispatch_captured_gesture_ = false;
 
     SelectableOption selectable_option_ = SelectableOption::ENABLE;
 
