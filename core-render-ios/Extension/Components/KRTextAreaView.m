@@ -361,6 +361,16 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
 - (void)setCss_keyboardType:(NSString *)css_keyboardType {
     _css_keyboardType = css_keyboardType;
     self.keyboardType = [KRConvertUtil hr_keyBoardType:css_keyboardType];
+#if !TARGET_OS_OSX
+    BOOL isPassword = [css_keyboardType isEqualToString:@"password"];
+    BOOL isEmail = [css_keyboardType isEqualToString:@"email"];
+    self.secureTextEntry = isPassword;
+    if (isEmail || isPassword) {
+        self.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        self.autocorrectionType = UITextAutocorrectionTypeNo;
+        self.spellCheckingType = UITextSpellCheckingTypeNo;
+    }
+#endif
 }
 
 - (void)setCss_returnKeyType:(NSString *)css_returnKeyType {

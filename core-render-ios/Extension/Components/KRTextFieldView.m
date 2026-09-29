@@ -248,7 +248,18 @@ NSString *const KRVFontWeightKey = @"fontWeight";
 
 - (void)setCss_keyboardType:(NSString *)css_keyboardType {
     self.keyboardType = [KRConvertUtil hr_keyBoardType:css_keyboardType];
-    [self setSecureTextEntry:[css_keyboardType isEqualToString:@"password"]];
+    BOOL isPassword = [css_keyboardType isEqualToString:@"password"];
+    BOOL isEmail = [css_keyboardType isEqualToString:@"email"];
+    [self setSecureTextEntry:isPassword];
+#if !TARGET_OS_OSX
+    if (isEmail || isPassword) {
+        self.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        self.autocorrectionType = UITextAutocorrectionTypeNo;
+        self.spellCheckingType = UITextSpellCheckingTypeNo;
+    }
+#else
+    (void)isEmail;
+#endif
 }
 
 - (void)setCss_returnKeyType:(NSString *)css_returnKeyType {
