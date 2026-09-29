@@ -76,7 +76,11 @@ internal class KuiklyCanvas : Canvas {
             if (value is CanvasView) {
                 context = CanvasContext(value.renderView!!, value.pagerId, value.nativeRef)
                 densityValue = value.getPager().pagerDensity()
-                value.renderView?.callMethod("reset", "")
+                // 已注册 drawCallback 的 CanvasView 由自身 draw 流程管理 reset 与重填；
+                // 此处补发裸 reset 而无后续指令，会把其已下发的绘制指令清掉（白屏回归）。
+                if (value.drawCallback == null) {
+                    value.renderView?.callMethod("reset", "")
+                }
                 strokeCap = StrokeCap.Butt
             } else {
                 context = null
