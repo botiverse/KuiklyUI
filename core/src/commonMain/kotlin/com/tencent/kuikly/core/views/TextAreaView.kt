@@ -352,6 +352,11 @@ open class TextAreaAttr : Attr() {
         return this
     }
 
+    fun fontFamily(fontFamily: String): TextAreaAttr {
+        TextConst.FONT_FAMILY with fontFamily
+        return this
+    }
+
     fun textAlignCenter(): TextAreaAttr {
         TextConst.TEXT_ALIGN with "center"
         return this
