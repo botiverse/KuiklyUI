@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import com.tencent.kuikly.compose.extension.MakeKuiklyComposeNode
+import com.tencent.kuikly.compose.extension.updatedNodeEvent
 import com.tencent.kuikly.compose.foundation.background
 import com.tencent.kuikly.compose.foundation.clickable
 import com.tencent.kuikly.compose.foundation.interaction.MutableInteractionSource
@@ -39,6 +40,7 @@ import com.tencent.kuikly.compose.ui.unit.Dp
 import com.tencent.kuikly.compose.ui.unit.dp
 import com.tencent.kuikly.compose.scroller.kuiklyInfo
 import com.tencent.kuikly.core.views.DivView
+import com.tencent.kuikly.core.base.event.ClickParams
 import kotlinx.coroutines.launch
 
 /**
@@ -186,6 +188,9 @@ fun MoveableDrawer(
     content: @Composable () -> Unit
 ) {
     val scope = rememberCoroutineScope()
+    val closeDrawerEvent: (ClickParams) -> Unit = updatedNodeEvent { _: ClickParams ->
+        scope.launch { state.close() }
+    }
     val drawerProgress by remember {
         derivedStateOf { state.progress }
     }
@@ -209,6 +214,8 @@ fun MoveableDrawer(
                             factory = { DivView() },
                             modifier = Modifier.fillMaxSize(),
                             viewInit = {
+                                // node-event-freshness-allow: stable empty handler only consumes
+                                // the native touch path and captures no composition value.
                                 getViewEvent().click { }
                             },
                         )
@@ -237,9 +244,7 @@ fun MoveableDrawer(
                                         scope.launch { state.close() }
                                     },
                                 viewInit = {
-                                    getViewEvent().click {
-                                        scope.launch { state.close() }
-                                    }
+                                    getViewEvent().click(closeDrawerEvent)
                                 },
                             )
                         }
