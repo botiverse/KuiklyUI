@@ -68,7 +68,7 @@ script/lint-patches && script/check-patches
   - `dco`
   - `patch-queue` (lint + `script/check-patches` + materialized identity)
   - `release-contract` (contract tests on the materialized source)
-  - `common-core-android` (JVM + Web suites)
+  - `common-core-android` (JVM suites)
   - `ios-renderer` (fixtures + warnings-as-errors renderer build)
   - `ohos-native` (arm64 link)
   - `source-contracts` (`src/tools/check-*.py` + OHOS host fixtures, all shipped by patches)
@@ -97,4 +97,4 @@ script/lint-patches && script/check-patches
 - High-churn areas need a locked test with every change:
   - Android line-height centering (`HRLineHeightSpan*Test`);
   - Compose lazy scroll echo/offset (`KuiklyScrollInfo`, `SubcomposeLayout`);
-  - layout-size report rounding (the four `LayoutSizeFormatter`s and `tools/check-layout-size-report-rounding.py`).
+  - layout-size report rounding (the Android, iOS and OHOS `LayoutSizeFormatter`s and `tools/check-layout-size-report-rounding.py`).
