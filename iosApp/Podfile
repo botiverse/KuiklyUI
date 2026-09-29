@@ -1,5 +1,4 @@
-
-#use_frameworks!
+use_frameworks! :linkage => :static if ENV['KUIKLY_RELEASE_FRAMEWORK_BUILD'] == '1'
 source 'https://cdn.cocoapods.org/'
 
 target 'iosApp' do
