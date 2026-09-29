@@ -129,6 +129,26 @@ interface PointerInputModifierNode : DelegatableNode {
     }
 }
 
+/**
+ * Stance of a [PointerInputModifierNode] on whether the host render root should
+ * capture (withhold) native child dispatch for the current gesture. Internal:
+ * the public contract stays [PointerInputModifierNode.captureNativeDispatch];
+ * RELEASE is only expressible through the internal release marker node.
+ */
+internal enum class NativeDispatchPolicy {
+    /** No stance; defer to other nodes in the hit branch. */
+    INHERIT,
+
+    /** Withhold MotionEvents from native children under the compose root. */
+    CAPTURE,
+
+    /**
+     * Let native children receive MotionEvents even when a hit-path ancestor
+     * captures. Only overrides ancestors within the same hit branch.
+     */
+    RELEASE,
+}
+
 internal val PointerInputModifierNode.isAttached: Boolean
     get() = node.isAttached
 

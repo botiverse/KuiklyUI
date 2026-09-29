@@ -35,6 +35,7 @@
 #include "libohos_render/expand/components/modal/KRModalView.h"
 #include "libohos_render/expand/components/richtext/KRRichTextShadow.h"
 #include "libohos_render/expand/components/richtext/KRRichTextView.h"
+#include "libohos_render/expand/components/richtext/KRSelectableTextView.h"
 #include "libohos_render/expand/components/richtext/gradient_richtext/KRGradientRichTextShadow.h"
 #include "libohos_render/expand/components/richtext/gradient_richtext/KRGradientRichTextView.h"
 #include "libohos_render/expand/components/scroller/KRScrollerView.h"
@@ -57,6 +58,9 @@ static void ComponentsRegisterEntry() {
                                              [] { return std::make_shared<KRImageViewWrapper>(); });
 
     IKRRenderViewExport::RegisterViewCreator("KRRichTextView", [] { return std::make_shared<KRRichTextView>(); });
+
+    IKRRenderViewExport::RegisterViewCreator("KRSelectableTextView",
+                                             [] { return std::make_shared<KRSelectableTextView>(); });
 
     IKRRenderShadowExport::RegisterShadowCreator("KRRichTextView",
                                                  [] { return std::make_shared<KRGradientRichTextShadow>(); });
