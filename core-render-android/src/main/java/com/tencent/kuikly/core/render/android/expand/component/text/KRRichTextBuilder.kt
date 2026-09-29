@@ -57,6 +57,12 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 
+internal const val INLINE_BOX_LAYOUT_JOINER = '\u2060'
+private const val INLINE_BOX_LAYOUT_EDGE = '\uFFFC'
+
+internal fun CharSequence.isInlineBoxGroupAtLineStart(): Boolean =
+    isEmpty() || this[lastIndex] == '\n'
+
 /**
  * 富文本构造器
  */
@@ -84,30 +90,22 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 spannedBuilder.isEmpty() || spannedBuilder[spannedBuilder.lastIndex] == '\n'
             val spanValue = spanValues.optJSONObject(index) ?: JSONObject()
             val spanProps = parseSpanProps(spanValue, textProps, isStart)
-            val spans = createSpans(spanProps, index, layoutSizeGetter)
-            if (spans.isNotEmpty()) {
-                if (spanProps is TextSpanProps && spanProps.adjustNewline) {
-                    // 对齐iOS、鸿蒙端表现，非空行的换行符不撑开行高
-                    spannedBuilder.append(
-                        "\n",
-                        AbsoluteSizeSpan(1),
-                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-                    )
-                }
-                spannedBuilder.append(buildSpannedString {
-                    // 记录 Span 对应的文字范围
-                    spanTextRanges.add(
-                        SpanTextRange(
-                            index,
-                            spannedBuilder.length,
-                            spannedBuilder.length + spanProps.text.length
-                        )
-                    )
-                    inSpans(spans) {
-                        append(spanProps.text)
-                    }
-                })
-
+            if (spanProps is InlineBoxGroupSpanProps) {
+                spannedBuilder.appendInlineBoxGroup(
+                    groupProps = spanProps,
+                    index = index,
+                    defaultTextProps = textProps,
+                    spanTextRanges = spanTextRanges,
+                    layoutSizeGetter = layoutSizeGetter,
+                )
+            } else {
+                spannedBuilder.appendSpan(
+                    spanProps = spanProps,
+                    index = index,
+                    childIndex = null,
+                    spanTextRanges = spanTextRanges,
+                    layoutSizeGetter = layoutSizeGetter,
+                )
             }
         }
         if (textProps.richTextHeadIndent != 0) {
@@ -129,6 +127,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         defaultTextProps: KRTextProps,
         isStart: Boolean
     ): SpanProps {
+        if (spanValue.has(InlineBoxGroupSpanProps.PROP_KEY_CHILDREN)) {
+            return InlineBoxGroupSpanProps(spanValue, defaultTextProps, kuiklyContext)
+        }
         if (isPlaceHolderSpan(spanValue)) {
             return PlaceholderSpanProps(spanValue, kuiklyContext)
         }
@@ -196,7 +197,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
 
         // 修饰相关
         textSpans.add(ForegroundColorSpan(spanProps.color))
-        if (spanProps.backgroundColor != Color.TRANSPARENT) {
+        if (spanProps.backgroundColor != Color.TRANSPARENT &&
+            spanProps.inlineBoxStyle == null
+        ) {
             textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
         }
         if (spanProps.textDecoration.isNotEmpty()) {
@@ -220,6 +223,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         }
         if (spanProps.backgroundImage.isNotEmpty()) {
             textSpans.add(LinearGradientForegroundSpan(spanProps.backgroundImage, layoutSizeGetter))
+        }
+        spanProps.inlineBoxStyle?.let { style ->
+            textSpans.add(KRInlineBoxSpan(style))
         }
 
         spanProps.textShadow?.let {
@@ -245,7 +251,146 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         return textSpans
     }
 
+    private fun SpannableStringBuilder.appendSpan(
+        spanProps: SpanProps,
+        index: Int,
+        childIndex: Int?,
+        spanTextRanges: MutableList<SpanTextRange>,
+        layoutSizeGetter: () -> SizeF,
+    ) {
+        val spans = createSpans(spanProps, index, layoutSizeGetter)
+        if (spans.isEmpty()) return
+        if (spanProps is TextSpanProps && spanProps.adjustNewline) {
+            append("\n", AbsoluteSizeSpan(1), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        val spanStart = length
+        val spanText = spanProps.text
+        val spanEnd = spanStart + spanText.length
+        spanTextRanges.add(SpanTextRange(index, childIndex, spanStart, spanEnd))
+        append(buildSpannedString {
+            inSpans(spans) { append(spanText) }
+        })
+        if (spanProps is TextSpanProps && spanProps.inlineBoxStyle != null) {
+            applyInlineBoxAtomicTextSpan(spanStart, spanEnd, spanProps.inlineBoxStyle)
+        }
+    }
+
+    private fun SpannableStringBuilder.appendInlineBoxGroup(
+        groupProps: InlineBoxGroupSpanProps,
+        index: Int,
+        defaultTextProps: KRTextProps,
+        spanTextRanges: MutableList<SpanTextRange>,
+        layoutSizeGetter: () -> SizeF,
+    ) {
+        val children = buildList {
+            for (childIndex in 0 until groupProps.children.length()) {
+                val childValue = groupProps.children.optJSONObject(childIndex) ?: continue
+                val childProps = parseSpanProps(
+                    childValue,
+                    defaultTextProps,
+                    // buildList adds a List receiver here. Using its isEmpty()/lastIndex
+                    // against the SpannableStringBuilder crashes when the group already has a
+                    // child but the rich-text builder is still empty (charAt(0) on length 0).
+                    isStart = this@appendInlineBoxGroup.isInlineBoxGroupAtLineStart(),
+                )
+                if (childProps.text.isNotEmpty()) add(childIndex to childProps)
+            }
+        }
+        val atomicChild = children.singleOrNull()
+        if (
+            shouldAppendInlineBoxGroupAtomically(
+                childCount = children.size,
+                onlyChildIsText = atomicChild?.second is TextSpanProps,
+                onlyChildAdjustsNewline = (atomicChild?.second as? TextSpanProps)?.adjustNewline == true,
+            )
+        ) {
+            val (childIndex, childProps) = checkNotNull(atomicChild)
+            val groupStart = length
+            appendSpan(
+                spanProps = childProps,
+                index = index,
+                childIndex = childIndex,
+                spanTextRanges = spanTextRanges,
+                layoutSizeGetter = layoutSizeGetter,
+            )
+            val groupEnd = length
+            if (groupEnd > groupStart) {
+                // A one-run inline box is an inline-block. Keeping it as one
+                // ReplacementSpan makes Android move the whole token to the next
+                // line instead of splitting the invisible group edges away from
+                // its text and painting chrome over adjacent content.
+                applyInlineBoxAtomicTextSpan(groupStart, groupEnd, groupProps.style)
+                setSpan(
+                    KRInlineBoxSpan(groupProps.style),
+                    groupStart,
+                    groupEnd,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+                setSpan(
+                    KRInlineBoxSemanticSpan(groupProps.semanticText),
+                    groupStart,
+                    groupEnd,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+                spanTextRanges.add(SpanTextRange(index, null, groupStart, groupEnd))
+            }
+            return
+        }
+        val groupStart = length
+        append(
+            INLINE_BOX_LAYOUT_EDGE.toString(),
+            KRInlineBoxEdgeAdvanceSpan(
+                advance = groupProps.style.leadingAdvance,
+                paddingTop = groupProps.style.paddingTop,
+                paddingBottom = groupProps.style.paddingBottom,
+            ),
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+        )
+        children.forEachIndexed { position, (childIndex, childProps) ->
+            append(INLINE_BOX_LAYOUT_JOINER)
+            appendSpan(
+                spanProps = childProps,
+                index = index,
+                childIndex = childIndex,
+                spanTextRanges = spanTextRanges,
+                layoutSizeGetter = layoutSizeGetter,
+            )
+        }
+        append(INLINE_BOX_LAYOUT_JOINER)
+        append(
+            INLINE_BOX_LAYOUT_EDGE.toString(),
+            KRInlineBoxEdgeAdvanceSpan(
+                advance = groupProps.style.trailingAdvance,
+                paddingTop = groupProps.style.paddingTop,
+                paddingBottom = groupProps.style.paddingBottom,
+            ),
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+        )
+        val groupEnd = length
+        if (groupEnd > groupStart) {
+            setSpan(
+                KRInlineBoxSpan(groupProps.style),
+                groupStart,
+                groupEnd,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            setSpan(
+                KRInlineBoxSemanticSpan(groupProps.semanticText),
+                groupStart,
+                groupEnd,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            spanTextRanges.add(SpanTextRange(index, null, groupStart, groupEnd))
+        }
+    }
+
 }
+
+internal fun shouldAppendInlineBoxGroupAtomically(
+    childCount: Int,
+    onlyChildIsText: Boolean,
+    onlyChildAdjustsNewline: Boolean,
+): Boolean = childCount == 1 && onlyChildIsText && !onlyChildAdjustsNewline
 
 abstract class SpanProps(spanValue: JSONObject) {
     protected val _text: String = spanValue.optString(KRTextProps.PROP_KEY_TEXT, "")
@@ -273,6 +418,7 @@ class TextSpanProps(
     val lineHeight: Float
     val backgroundImage: String
     val backgroundColor: Int
+    val inlineBoxStyle: KRInlineBoxSpanStyle?
     var textShadow: BoxShadow? = null
     var useDpFontSizeDim = false
 
@@ -338,6 +484,7 @@ class TextSpanProps(
                 .takeIf { it.isNotEmpty() }
                 ?.toColor()
                 ?: Color.TRANSPARENT
+        inlineBoxStyle = KRInlineBoxSpanStyle.from(spanValue, kuiklyContext)
         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
         textShadow = BoxShadow(textShadowStr, kuiklyContext)
         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
@@ -365,9 +512,120 @@ class PlaceholderSpanProps(spanValue: JSONObject, private val kuiklyContext: IKu
 /**
  * 用于记录 DSL Span 对应的 Text Range
  */
-data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
+data class SpanTextRange(
+    val index: Int,
+    val childIndex: Int?,
+    val start: Int,
+    val end: Int,
+) {
     override fun toString(): String {
         return "{$index, $start, $end}"
+    }
+}
+
+class InlineBoxGroupSpanProps(
+    spanValue: JSONObject,
+    defaultProps: KRTextProps,
+    kuiklyContext: IKuiklyRenderContext?,
+) : SpanProps(spanValue) {
+    companion object {
+        const val PROP_KEY_CHILDREN = "inlineBoxChildren"
+        private const val PROP_KEY_SEMANTIC_TEXT = "inlineBoxSemanticText"
+    }
+
+    val children = spanValue.optJSONArray(PROP_KEY_CHILDREN) ?: org.json.JSONArray()
+    val semanticText = spanValue.optString(PROP_KEY_SEMANTIC_TEXT, "")
+    val style = checkNotNull(KRInlineBoxSpanStyle.from(spanValue, kuiklyContext))
+}
+
+data class KRInlineBoxSpanStyle(
+    val backgroundColor: Int?,
+    val borderColor: Int?,
+    val borderWidth: Float,
+    val paddingStart: Float,
+    val paddingEnd: Float,
+    val paddingTop: Float,
+    val paddingBottom: Float,
+    val marginStart: Float,
+    val marginEnd: Float,
+    val cornerRadius: Float,
+) {
+    val leadingAdvance: Float
+        get() = marginStart + borderWidth + paddingStart
+
+    val trailingAdvance: Float
+        get() = paddingEnd + borderWidth + marginEnd
+
+    companion object {
+        fun from(value: JSONObject, context: IKuiklyRenderContext?): KRInlineBoxSpanStyle? {
+            val hasStyle = value.has(TextConst.INLINE_BOX_BACKGROUND_COLOR) ||
+                value.has(TextConst.INLINE_BOX_BORDER_COLOR) ||
+                value.has(TextConst.INLINE_BOX_BORDER_WIDTH) ||
+                value.has(TextConst.INLINE_BOX_PADDING_START) ||
+                value.has(TextConst.INLINE_BOX_PADDING_END) ||
+                value.has(TextConst.INLINE_BOX_PADDING_TOP) ||
+                value.has(TextConst.INLINE_BOX_PADDING_BOTTOM) ||
+                value.has(TextConst.INLINE_BOX_MARGIN_START) ||
+                value.has(TextConst.INLINE_BOX_MARGIN_END) ||
+                value.has(TextConst.INLINE_BOX_CORNER_RADIUS)
+            if (!hasStyle) return null
+            fun color(key: String): Int? = value.optString(key).takeIf { it.isNotEmpty() }?.toColor()
+            fun dimension(key: String): Float {
+                val logicalPx = value.optDouble(key, 0.0).toFloat()
+                return if (logicalPx == 0f) 0f else context.toPxF(logicalPx)
+            }
+            return KRInlineBoxSpanStyle(
+                backgroundColor = color(TextConst.INLINE_BOX_BACKGROUND_COLOR),
+                borderColor = color(TextConst.INLINE_BOX_BORDER_COLOR),
+                borderWidth = dimension(TextConst.INLINE_BOX_BORDER_WIDTH),
+                paddingStart = dimension(TextConst.INLINE_BOX_PADDING_START),
+                paddingEnd = dimension(TextConst.INLINE_BOX_PADDING_END),
+                paddingTop = dimension(TextConst.INLINE_BOX_PADDING_TOP),
+                paddingBottom = dimension(TextConst.INLINE_BOX_PADDING_BOTTOM),
+                marginStart = dimension(TextConst.INLINE_BOX_MARGIN_START),
+                marginEnd = dimension(TextConst.INLINE_BOX_MARGIN_END),
+                cornerRadius = dimension(TextConst.INLINE_BOX_CORNER_RADIUS),
+            )
+        }
+    }
+}
+
+class KRInlineBoxSpan(val style: KRInlineBoxSpanStyle)
+class KRInlineBoxSemanticSpan(val text: String)
+
+private class KRInlineBoxEdgeAdvanceSpan(
+    private val advance: Float,
+    private val paddingTop: Float = 0f,
+    private val paddingBottom: Float = 0f,
+) : ReplacementSpan() {
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?,
+    ): Int {
+        fm?.let {
+            it.ascent -= ceil(paddingTop).toInt()
+            it.top -= ceil(paddingTop).toInt()
+            it.descent += ceil(paddingBottom).toInt()
+            it.bottom += ceil(paddingBottom).toInt()
+        }
+        return ceil(advance).toInt()
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint,
+    ) {
+        Unit
     }
 }
 
@@ -404,6 +662,98 @@ internal class KRSkipInkCustomUnderlineSpan(
             textPaint.underlineThickness = 0f
         }
     }
+}
+
+private fun SpannableStringBuilder.applyInlineBoxAtomicTextSpan(
+    start: Int,
+    end: Int,
+    style: KRInlineBoxSpanStyle,
+) {
+    if (start < end) {
+        setSpan(
+            KRInlineBoxAtomicTextSpan(style),
+            start,
+            end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
+}
+
+internal class KRInlineBoxAtomicTextSpan(
+    private val style: KRInlineBoxSpanStyle,
+) : ReplacementSpan() {
+    internal var measuredWidth: Int = 0
+        private set
+
+    override fun getSize(
+        paint: Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: Paint.FontMetricsInt?
+    ): Int {
+        if (text == null || start >= end) {
+            measuredWidth = 0
+            return 0
+        }
+        fm?.let {
+            it.ascent -= ceil(style.paddingTop).toInt()
+            it.top -= ceil(style.paddingTop).toInt()
+            it.descent += ceil(style.paddingBottom).toInt()
+            it.bottom += ceil(style.paddingBottom).toInt()
+        }
+        val edgeStart = style.marginStart + style.borderWidth + style.paddingStart
+        val edgeEnd = style.paddingEnd + style.borderWidth + style.marginEnd
+        measuredWidth =
+            ceil((paint.measureText(text, start, end) + edgeStart + edgeEnd).toDouble()).toInt()
+        return measuredWidth
+    }
+
+    override fun draw(
+        canvas: Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: Paint
+    ) {
+        if (text != null && start < end) {
+            val textX = x + style.marginStart + style.borderWidth + style.paddingStart
+            canvas.drawText(text, start, end, textX, y.toFloat(), paint)
+        }
+    }
+}
+
+internal data class KRInlineBoxAtomicHitRange(
+    val line: Int,
+    val left: Float,
+    val right: Float,
+    val spanIndex: Int,
+)
+
+internal fun resolveKRInlineBoxAtomicHit(
+    touchedLine: Int,
+    touchX: Float,
+    ranges: List<KRInlineBoxAtomicHitRange>,
+): Int? =
+    ranges.firstOrNull { range ->
+        range.line == touchedLine &&
+            touchX >= minOf(range.left, range.right) &&
+            touchX <= maxOf(range.left, range.right)
+    }?.spanIndex
+
+internal fun resolveKRInlineBoxBoundaryHit(
+    touchedLine: Int,
+    touchX: Float,
+    ranges: List<KRInlineBoxAtomicHitRange>,
+    fallbackSpanIndices: List<Int>,
+): Int? {
+    resolveKRInlineBoxAtomicHit(touchedLine, touchX, ranges)?.let { return it }
+    val atomicOwnerIndices = ranges.mapTo(mutableSetOf(), KRInlineBoxAtomicHitRange::spanIndex)
+    return fallbackSpanIndices.firstOrNull { it !in atomicOwnerIndices }
 }
 
 /**
