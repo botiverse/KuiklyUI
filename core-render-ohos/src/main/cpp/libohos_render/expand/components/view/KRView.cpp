@@ -58,6 +58,7 @@ constexpr char kPropNameTouchMove[] = "touchMove";
 constexpr char kPropNameTouchUp[] = "touchUp";
 constexpr char kPropNameTouchCancel[] = "touchCancel";
 constexpr char kPropNamePreventTouch[] = "preventTouch";
+constexpr char kPropNameNativeDispatchCapture[] = "nativeDispatchCapture";
 constexpr char kPropNameSuperTouch[] = "superTouch";
 constexpr char kPropNameHitTestModeOhos[] = "hit-test-ohos";
 constexpr char kPropNameStopPropagation[] = "stop-propagation-ohos";
@@ -118,15 +119,21 @@ bool KRView::SetProp(const std::string &prop_key, const KRAnyValue &prop_value,
             super_touch_handler_->PreventTouch(prop_value->toBool());
         }
         didHand = true;
+    } else if (kuikly::util::isEqual(prop_key, kPropNameNativeDispatchCapture)) {
+        native_dispatch_capture_requested_ = prop_value->toBool();
+        didHand = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameSuperTouch)) {
         if (prop_value->toBool()) {
             if (!super_touch_handler_) {
                 super_touch_handler_ = std::make_shared<SuperTouchHandler>();
+                // enable transition：让下一个 action 把 type 重算为 SELF。
+                // 否则缓存的 NONE/PARENT 会让 SELF 分支永不进入，capture 静默失效。
+                // 仅在新建 handler 的 transition 重置，避免扰动进行中的 gesture。
+                parent_super_touch_handler_.reset();
+                super_touch_type_ = UNKNOWN;
             }
         } else {
-            if (super_touch_handler_) {
-                super_touch_handler_ = nullptr;
-            }
+            ResetSuperTouchState();
         }
         didHand = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameHitTestModeOhos)) {
@@ -410,8 +417,15 @@ bool KRView::ResetProp(const std::string &prop_key) {
     } else if (kuikly::util::isEqual(prop_key, kPropNamePreventTouch)) {
         // reset handled by kPropNameSuperTouch, do nothing here
         didHande = true;
+    } else if (kuikly::util::isEqual(prop_key, kPropNameNativeDispatchCapture)) {
+        native_dispatch_capture_requested_ = false;
+        native_dispatch_captured_gesture_ = false;
+        if (super_touch_handler_) {
+            super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+        }
+        didHande = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameSuperTouch)) {
-        super_touch_handler_ = nullptr;
+        ResetSuperTouchState();
         didHande = true;
     } else if (kuikly::util::isEqual(prop_key, kPropNameHitTestModeOhos)) {
         target_hit_test_mode = ARKUI_HIT_TEST_MODE_DEFAULT;
@@ -441,6 +455,17 @@ bool KRView::ResetProp(const std::string &prop_key) {
     return didHande;
 }
 
+void KRView::ResetSuperTouchState() {
+    if (super_touch_handler_) {
+        super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+        super_touch_handler_ = nullptr;
+    }
+    native_dispatch_capture_requested_ = false;
+    native_dispatch_captured_gesture_ = false;
+    parent_super_touch_handler_.reset();
+    super_touch_type_ = UNKNOWN;
+}
+
 void KRView::ProcessTouchEvent(ArkUI_NodeEvent *event) {
     auto input_event = kuikly::util::GetArkUIInputEvent(event);
     TryFireSuperTouchCancelEvent(input_event);
@@ -463,17 +488,35 @@ void KRView::ProcessTouchEvent(ArkUI_NodeEvent *event) {
         handled = TryFireOnTouchCancelEvent(input_event);
     }
     if (super_touch_type_ == SELF) {
+        if (action == UI_TOUCH_EVENT_ACTION_DOWN) {
+            native_dispatch_captured_gesture_ = native_dispatch_capture_requested_;
+            native_dispatch_capture_requested_ = false;
+            if (native_dispatch_captured_gesture_ && super_touch_handler_) {
+                super_touch_handler_->SetNativeTouchConsumer(shared_from_this());
+            }
+        }
+        // 必须先消费/清掉 child 写入的 action marker；capture 命中也不能跳过清理，
+        // 否则 stale marker 会在下一 gesture 的同 action 被误吞。
         bool should_stop = handled;
         if (super_touch_handler_->GetStopPropagation(action)) {
             should_stop = true;
             super_touch_handler_->SetStopPropagation(action, false);
         }
-        // 当前节点处理事件后也可调用 StopPropagation 停止冒泡，而非交给父容器再去停止冒泡，规避父view再次多余触发一次事件
+        if (native_dispatch_captured_gesture_) {
+            if (action == UI_TOUCH_EVENT_ACTION_UP || action == UI_TOUCH_EVENT_ACTION_CANCEL) {
+                native_dispatch_captured_gesture_ = false;
+                super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+            }
+            kuikly::util::StopPropagation(event);
+            return;
+        }
+        // capture miss / inactive capture 的唯一 fall-through 点（upstream #1508
+        // handled-first 语义：handled 或 child marker 任一即停，不再依赖 stop_propagation_）。
         if (should_stop) {
             kuikly::util::StopPropagation(event);
         }
     } else if (handled) {
-        // 去掉基于 stop_propagation_ 来决定要不要取消冒泡，而是基于当前的touch 是否被消费来决定要不要冒泡
+        // upstream #1508：基于 touch 是否被消费决定是否冒泡，而不是 stop_propagation_。
         if (super_touch_type_ == PARENT) {
             auto parent_super_touch_handler = parent_super_touch_handler_.lock();
             if (parent_super_touch_handler) {
@@ -635,6 +678,11 @@ void KRView::UpdateHitTestMode(bool shouldUseTarget) {
 
 void KRView::WillRemoveFromParentView() {
     IKRRenderViewExport::WillRemoveFromParentView();
+    if (super_touch_handler_) {
+        super_touch_handler_->ClearNativeTouchConsumer(shared_from_this());
+    }
+    native_dispatch_capture_requested_ = false;
+    native_dispatch_captured_gesture_ = false;
     parent_super_touch_handler_.reset();
     super_touch_type_ = UNKNOWN;
 }
