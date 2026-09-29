@@ -479,15 +479,16 @@ abstract class DrawerInternalPagerState internal constructor(
 
         val finalTargetOffset = targetOffset
 
-        markSnapAnimationStarted(finalTargetOffset.toInt())
-
-        kuiklyInfo.run {
-            val targetOffsetDp = if (isVertical()) {
-                Offset(scrollView?.curOffsetX ?: 0f, max(0f, targetOffset / getDensity() - 0.01f))
-            } else {
-                Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView?.curOffsetY ?: 0f)
+        kuiklyInfo.withCurrentScrollViewBinding { scrollView ->
+            markSnapAnimationStarted(finalTargetOffset.toInt())
+            kuiklyInfo.run {
+                val targetOffsetDp = if (isVertical()) {
+                    Offset(scrollView.curOffsetX, max(0f, targetOffset / getDensity() - 0.01f))
+                } else {
+                    Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView.curOffsetY)
+                }
+                scrollView.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
             }
-            scrollView?.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
         }
     }
 
