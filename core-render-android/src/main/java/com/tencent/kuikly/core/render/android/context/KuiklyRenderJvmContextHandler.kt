@@ -17,8 +17,10 @@ package com.tencent.kuikly.core.render.android.context
 
 import com.tencent.kuikly.core.IKuiklyCoreEntry
 import com.tencent.kuikly.core.manager.BridgeManager
+import com.tencent.kuikly.core.nvi.NativeBridge
 import com.tencent.kuikly.core.render.android.css.ktx.isMainThread
 import com.tencent.kuikly.core.render.android.exception.ErrorReason
+import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreContextScheduler
 
 /**
  * 渲染流程在JVM环境执行的处理器
@@ -74,17 +76,24 @@ class KuiklyRenderJvmContextHandler : KuiklyRenderCommonContextHandler(), IKuikl
         arg5: Any?
     ): Any? {
         assert(!isMainThread())
+        val method = KuiklyRenderNativeMethod.fromInt(methodId)
+        val args = listOf(arg0, arg1, arg2, arg3, arg4, arg5)
+        return dispatchKuiklyNativeCall(
+            isContextThread = NativeBridge.isContextThread,
+            requiresContextThread = kuiklyNativeMethodRequiresContextThread(method, args),
+            scheduleOnContextThread = { task ->
+                KuiklyRenderCoreContextScheduler.scheduleTask(0) { task() }
+            },
+            call = { invokeNativeCallback(method, args) }
+        )
+    }
+
+    private fun invokeNativeCallback(
+        method: KuiklyRenderNativeMethod,
+        args: List<Any?>
+    ): Any? {
         try {
-            val result = callNativeCallback?.invoke(
-                KuiklyRenderNativeMethod.fromInt(methodId), listOf(
-                    arg0,
-                    arg1,
-                    arg2,
-                    arg3,
-                    arg4,
-                    arg5
-                )
-            )
+            val result = callNativeCallback?.invoke(method, args)
             return result?.toKotlinObject()
         } catch (t: Throwable) {
             // 这里catch的异常类型是故意设置成Throwable的，因为callKotlinMethod运行的是KTV业务代码
