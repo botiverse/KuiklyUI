@@ -23,6 +23,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 extern NSString *const KRHighlightAttributeKey;
 extern NSString *const KRBGAttributeKey;
+extern NSString *const KRInlineBoxStyleAttributeName;
+extern NSString *const KRInlineBoxSemanticAttributeName;
 
 
 @interface KRLabel : UILabel
