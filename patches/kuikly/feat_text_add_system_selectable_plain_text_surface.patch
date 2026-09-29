@@ -3,7 +3,7 @@ From: BiSheng <raft-mobile-bisheng@mail.build>
 Date: Tue, 29 Sep 2026 06:10:55 +0000
 Subject: feat(text): add system-selectable plain text surface
 
-Add SelectableText (Compose) and SelectableTextView (core DSL) backed by
+Add SelectableText (Compose) and SelectableTextView (core view) backed by
 native KRSelectableTextView on Android, iOS and OHOS, giving the system
 selection menu on read-only text. It measures through a lazy-layout-safe
 measure policy, takes touches via a native-dispatch RELEASE policy so the
@@ -1264,10 +1264,10 @@ index 60f5217e92caba3c2ec40dc689a831b3ed486f1b..353fdb95b710a05bb5acb75d6597577a
              })
 diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextView.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextView.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e422689695cd51ba8
+index 0000000000000000000000000000000000000000..7930001c5fe8f8495d8c8a099f00e5e5508f26a0
 --- /dev/null
 +++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextView.kt
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,174 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -1296,8 +1296,6 @@ index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e42268969
 +import com.tencent.kuikly.core.render.android.const.KRCssConst
 +import com.tencent.kuikly.core.render.android.css.ktx.spToPxI
 +import com.tencent.kuikly.core.render.android.css.ktx.toColor
-+import com.tencent.kuikly.core.render.android.css.ktx.toPxF
-+import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 +import com.tencent.kuikly.core.render.android.expand.component.text.FontWeightSpan
 +import com.tencent.kuikly.core.render.android.expand.component.text.HRLineHeightSpan
 +import com.tencent.kuikly.core.render.android.export.IKuiklyRenderViewExport
@@ -1314,7 +1312,6 @@ index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e42268969
 +
 +    private var rawText: String = ""
 +    private var lineHeightPx: Int? = null
-+    private var useDpFontSizeDim = false
 +    private var rawFontSize: Float? = null
 +    private var rawLineHeight: Float? = null
 +
@@ -1361,12 +1358,6 @@ index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e42268969
 +                applyTextAlign(propValue as String)
 +                true
 +            }
-+            PROP_USE_DP_FONT_SIZE_DIM -> {
-+                useDpFontSizeDim = (propValue as Int) == 1
-+                applyFontSize()
-+                applyLineHeight()
-+                true
-+            }
 +            // View capability: this surface's clickable/long-clickable a11y
 +            // truth comes from the system TextView selection semantics. The
 +            // compose semantics bridge derives its boolean mask from compose
@@ -1398,23 +1389,12 @@ index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e42268969
 +
 +    private fun applyFontSize() {
 +        val fontSize = rawFontSize ?: return
-+        setTextSize(
-+            TypedValue.COMPLEX_UNIT_PX,
-+            if (useDpFontSizeDim) {
-+                kuiklyRenderContext.toPxF(fontSize)
-+            } else {
-+                kuiklyRenderContext.spToPxI(fontSize).toFloat()
-+            }
-+        )
++        setTextSize(TypedValue.COMPLEX_UNIT_PX, kuiklyRenderContext.spToPxI(fontSize).toFloat())
 +    }
 +
 +    private fun applyLineHeight() {
 +        val lineHeight = rawLineHeight ?: return
-+        lineHeightPx = if (useDpFontSizeDim) {
-+            kuiklyRenderContext.toPxI(lineHeight)
-+        } else {
-+            kuiklyRenderContext.spToPxI(lineHeight)
-+        }
++        lineHeightPx = kuiklyRenderContext.spToPxI(lineHeight)
 +        applyText()
 +    }
 +
@@ -1451,7 +1431,6 @@ index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e42268969
 +        internal const val PROP_COLOR = "color"
 +        internal const val PROP_LINE_HEIGHT = "lineHeight"
 +        internal const val PROP_TEXT_ALIGN = "textAlign"
-+        internal const val PROP_USE_DP_FONT_SIZE_DIM = "useDpFontSizeDim"
 +
 +        internal val HANDLED_PROPS = setOf(
 +            PROP_TEXT,
@@ -1459,17 +1438,16 @@ index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e42268969
 +            PROP_FONT_WEIGHT,
 +            PROP_COLOR,
 +            PROP_LINE_HEIGHT,
-+            PROP_TEXT_ALIGN,
-+            PROP_USE_DP_FONT_SIZE_DIM
++            PROP_TEXT_ALIGN
 +        )
 +    }
 +}
 diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextViewTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextViewTest.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..c32e2dbffbad716e66bc72e2bd4ce547039a4b61
+index 0000000000000000000000000000000000000000..a2d9a9e33ab322d65b9af7ad0920c1fcd1a7b459
 --- /dev/null
 +++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextViewTest.kt
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,243 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -1707,8 +1685,7 @@ index 0000000000000000000000000000000000000000..c32e2dbffbad716e66bc72e2bd4ce547
 +                "fontWeight",
 +                "color",
 +                "lineHeight",
-+                "textAlign",
-+                "useDpFontSizeDim"
++                "textAlign"
 +            ),
 +            KRSelectableTextView.HANDLED_PROPS
 +        )
@@ -2293,10 +2270,10 @@ index b497e5da34985a3589a54ca42fb3b3d1621c6758..3849c84405dcc5bd7542ef0a272c4839
      
 diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/SelectableTextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/SelectableTextView.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..d9f5e7a7bec75bbcae2c8bb842eea568e40de6a2
+index 0000000000000000000000000000000000000000..ee9d95c8707a61a1d36ffcbf0a11f8f49b8af324
 --- /dev/null
 +++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/SelectableTextView.kt
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,210 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -2315,12 +2292,9 @@ index 0000000000000000000000000000000000000000..d9f5e7a7bec75bbcae2c8bb842eea568
 +package com.tencent.kuikly.core.views
 +
 +import com.tencent.kuikly.core.base.Attr
-+import com.tencent.kuikly.core.base.Color
 +import com.tencent.kuikly.core.base.DeclarativeBaseView
 +import com.tencent.kuikly.core.base.ViewConst
-+import com.tencent.kuikly.core.base.ViewContainer
 +import com.tencent.kuikly.core.base.event.Event
-+import com.tencent.kuikly.core.base.toInt
 +import com.tencent.kuikly.core.layout.FlexAlign
 +import com.tencent.kuikly.core.layout.FlexDirection
 +import com.tencent.kuikly.core.layout.FlexNode
@@ -2505,70 +2479,8 @@ index 0000000000000000000000000000000000000000..d9f5e7a7bec75bbcae2c8bb842eea568
 +        return this
 +    }
 +
-+    open fun color(color: Color): SelectableTextAttr {
-+        TextConst.TEXT_COLOR with color.toString()
-+        return this
-+    }
-+
-+    open fun color(color: Long): SelectableTextAttr {
-+        TextConst.TEXT_COLOR with Color(color).toString()
-+        return this
-+    }
-+
 +    open fun fontSize(size: Float): SelectableTextAttr {
 +        TextConst.FONT_SIZE with size
 +        return this
 +    }
-+
-+    open fun fontWeightNormal(): SelectableTextAttr {
-+        TextConst.FONT_WEIGHT with FontWeight.NORMAL.value
-+        return this
-+    }
-+
-+    open fun fontWeightMedium(): SelectableTextAttr {
-+        TextConst.FONT_WEIGHT with FontWeight.MEDIUM.value
-+        return this
-+    }
-+
-+    open fun fontWeightSemiBold(): SelectableTextAttr {
-+        TextConst.FONT_WEIGHT with FontWeight.SEMIBOLD.value
-+        return this
-+    }
-+
-+    open fun fontWeightBold(): SelectableTextAttr {
-+        TextConst.FONT_WEIGHT with FontWeight.BOLD.value
-+        return this
-+    }
-+
-+    open fun lineHeight(lineHeight: Float): SelectableTextAttr {
-+        TextConst.LINE_HEIGHT with lineHeight
-+        return this
-+    }
-+
-+    open fun useDpFontSizeDim(useDp: Boolean = true): SelectableTextAttr {
-+        TextConst.TEXT_USE_DP_FONT_SIZE_DIM with useDp.toInt()
-+        return this
-+    }
-+
-+    open fun textAlignLeft(): SelectableTextAttr {
-+        TextConst.TEXT_ALIGN with "left"
-+        return this
-+    }
-+
-+    open fun textAlignCenter(): SelectableTextAttr {
-+        TextConst.TEXT_ALIGN with "center"
-+        return this
-+    }
-+
-+    open fun textAlignRight(): SelectableTextAttr {
-+        TextConst.TEXT_ALIGN with "right"
-+        return this
-+    }
-+}
-+
-+/**
-+ * Adds a system-selectable plain text view. See [SelectableTextView].
-+ */
-+fun ViewContainer<*, *>.SelectableText(init: SelectableTextView.() -> Unit) {
-+    addChild(SelectableTextView(), init)
 +}
