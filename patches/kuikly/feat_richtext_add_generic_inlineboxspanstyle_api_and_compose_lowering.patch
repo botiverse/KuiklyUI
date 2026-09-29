@@ -17,7 +17,7 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
-index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5deb5bd3a46 100644
+index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a19863f42 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
 @@ -44,6 +44,8 @@ import com.tencent.kuikly.compose.ui.unit.isSpecified
@@ -123,7 +123,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
  
          // Check if this range is a placeholder
          val isPlaceholder = placeholders?.any {
-@@ -363,23 +426,75 @@ internal fun RichTextAttr.applyAnnotatedString(
+@@ -363,23 +426,73 @@ internal fun RichTextAttr.applyAnnotatedString(
          if (isPlaceholder) {
              // Create PlaceholderSpan
              placeholders!!.find { it.start == start }?.let { placeholder ->
@@ -168,7 +168,6 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
 +                            applySpanStyle(
 +                                range.item,
 +                                density,
-+                                includeInlineBox = false,
 +                                preserveInheritedFontFamily = true,
 +                            )
 +                        }
@@ -193,7 +192,6 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
 +                            applySpanStyle(
 +                                range.item,
 +                                density,
-+                                includeInlineBox = false,
 +                                preserveInheritedFontFamily = true,
 +                            )
 +                        }
@@ -205,7 +203,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
  
                  // Apply ParagraphStyle
                  annoText.paragraphStyles
-@@ -392,18 +507,15 @@ internal fun RichTextAttr.applyAnnotatedString(
+@@ -392,18 +505,15 @@ internal fun RichTextAttr.applyAnnotatedString(
                          }
                      }
  
@@ -232,7 +230,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
                      }
  
                      // Add click event handler
-@@ -414,9 +526,11 @@ internal fun RichTextAttr.applyAnnotatedString(
+@@ -414,9 +524,11 @@ internal fun RichTextAttr.applyAnnotatedString(
                      // Call applyLinkStyle for future extensions
                      applyLinkStyle(range.item)
                  }
@@ -245,7 +243,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
  
      if (spans.isEmpty()) {
          spans.add(TextSpan().apply {
-@@ -433,12 +547,19 @@ internal fun TextSpan.applyLinkStyle(link: LinkAnnotation) {
+@@ -433,12 +545,18 @@ internal fun TextSpan.applyLinkStyle(link: LinkAnnotation) {
  }
  
  // Helper method to apply SpanStyle
@@ -253,7 +251,6 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
 +internal fun TextSpan.applySpanStyle(
 +    spanStyle: SpanStyle,
 +    density: Density,
-+    includeInlineBox: Boolean = true,
 +    preserveInheritedFontFamily: Boolean = false,
 +) {
      // Apply font styles
@@ -267,19 +264,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5de
      applyFontWeight(spanStyle.fontWeight)
      applyFontStyle(spanStyle.fontStyle)
      applyShadow(spanStyle.shadow)
-@@ -447,6 +568,11 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
-     if (spanStyle.background.isSpecified) {
-         setProp(Attr.StyleConst.BACKGROUND_COLOR, spanStyle.background.toKuiklyColor().toString())
-     }
-+    if (includeInlineBox) {
-+        spanStyle.inlineBoxStyle?.let { box ->
-+            inlineBoxStyle(box.toCoreInlineBoxStyle())
-+        }
-+    }
-     if (spanStyle.brush is SolidColor) {
-         color((spanStyle.brush as SolidColor).value.toKuiklyColor())
-     } else if (spanStyle.brush is LinearGradient) {
-@@ -478,3 +604,17 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+@@ -478,3 +596,17 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
          letterSpacing(spanStyle.letterSpacing.value)
      }
  }
@@ -893,31 +878,10 @@ index 0000000000000000000000000000000000000000..ee87720913d3ec7b1f5ebf45de2b75e0
 +    val cornerRadius: Float = 0f,
 +)
 diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
-index 86dbe968c09c05a030eaf32375657a53a42ce981..c743431691e023cafe14fc8a0228327b16565cc3 100644
+index 86dbe968c09c05a030eaf32375657a53a42ce981..037dfbe76d51300e5201694d1e03a8d2c26e2bb8 100644
 --- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
 +++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
-@@ -95,6 +95,20 @@ fun RichTextView.ImageSpan(spanInit: ImageSpan.() -> Unit) {
-     getViewAttr().addSpan(imageSpan)
- }
- 
-+/**
-+ * Adds one explicit inline layout group. Children keep their own text/image
-+ * styling while native RichText owns their combined measurement and chrome.
-+ */
-+fun RichTextView.InlineBoxGroup(
-+    style: InlineBoxSpanStyle,
-+    groupInit: InlineBoxGroupSpan.() -> Unit,
-+) {
-+    val group = InlineBoxGroupSpan(style)
-+    group.pagerId = pagerId
-+    group.groupInit()
-+    getViewAttr().addSpan(group)
-+}
-+
- open class RichTextView : DeclarativeBaseView<RichTextAttr, RichTextEvent>(),
-     MeasureFunction {
-     var shadow: RichTextShadow? = null
-@@ -315,13 +329,16 @@ open class RichTextView : DeclarativeBaseView<RichTextAttr, RichTextEvent>(),
+@@ -315,13 +315,16 @@ open class RichTextView : DeclarativeBaseView<RichTextAttr, RichTextEvent>(),
  
      // 分发span布局位置变化
      private fun dispatchPlaceholderSpanLayoutEventIfNeed() {
@@ -941,7 +905,7 @@ index 86dbe968c09c05a030eaf32375657a53a42ce981..c743431691e023cafe14fc8a0228327b
                          if (rectStr?.isNotEmpty() == true) {
                              rectStr.split(" ").apply {
                                  if (this.size >= 4) {
-@@ -432,11 +449,128 @@ interface ISpan {
+@@ -432,6 +435,77 @@ interface ISpan {
      abstract fun willDestroy()
  }
  
@@ -972,21 +936,6 @@ index 86dbe968c09c05a030eaf32375657a53a42ce981..c743431691e023cafe14fc8a0228327b
 +    var pagerId: String = ""
 +    internal val children = fastArrayListOf<ISpan>()
 +    private var semanticText: String? = null
-+    private var clickHandlerFn: ((ClickParams) -> Unit)? = null
-+    private var longPressHandlerFn: ((LongPressParams) -> Unit)? = null
-+
-+    fun Span(textSpanInit: TextSpan.() -> Unit) {
-+        val span = TextSpan().apply {
-+            pagerId = this@InlineBoxGroupSpan.pagerId
-+            textSpanInit()
-+        }
-+        if (!span.isEmptySpan()) children.add(span)
-+    }
-+
-+    fun PlaceholderSpan(spanInit: PlaceholderSpan.() -> Unit) {
-+        val span = PlaceholderSpan().apply(spanInit)
-+        if (!span.isEmptySpan()) children.add(span)
-+    }
 +
 +    fun addChild(span: ISpan) {
 +        if (!span.isEmptySpan()) children.add(span)
@@ -996,14 +945,6 @@ index 86dbe968c09c05a030eaf32375657a53a42ce981..c743431691e023cafe14fc8a0228327b
 +
 +    fun semanticText(text: String) {
 +        semanticText = text
-+    }
-+
-+    fun click(handler: (ClickParams) -> Unit) {
-+        clickHandlerFn = handler
-+    }
-+
-+    fun longPress(handler: (LongPressParams) -> Unit) {
-+        longPressHandlerFn = handler
 +    }
 +
 +    override fun isEmptySpan(): Boolean = children.isEmpty()
@@ -1023,23 +964,15 @@ index 86dbe968c09c05a030eaf32375657a53a42ce981..c743431691e023cafe14fc8a0228327b
 +        semanticText?.let { put(PROP_KEY_SEMANTIC_TEXT, it) }
 +    }
 +
-+    override fun performClickHandler(clickParams: ClickParams): Boolean {
-+        clickHandlerFn?.invoke(clickParams)
-+        if (clickHandlerFn != null) return true
-+        return children.any { it.performClickHandler(clickParams) }
-+    }
++    override fun performClickHandler(clickParams: ClickParams): Boolean =
++        children.any { it.performClickHandler(clickParams) }
 +
-+    override fun hasClickEvent(): Boolean =
-+        clickHandlerFn != null || children.any { it.hasClickEvent() }
++    override fun hasClickEvent(): Boolean = children.any { it.hasClickEvent() }
 +
-+    override fun performLongPressHandler(longPressParams: LongPressParams): Boolean {
-+        longPressHandlerFn?.invoke(longPressParams)
-+        if (longPressHandlerFn != null) return true
-+        return children.any { it.performLongPressHandler(longPressParams) }
-+    }
++    override fun performLongPressHandler(longPressParams: LongPressParams): Boolean =
++        children.any { it.performLongPressHandler(longPressParams) }
 +
-+    override fun hasLongPressEvent(): Boolean =
-+        longPressHandlerFn != null || children.any { it.hasLongPressEvent() }
++    override fun hasLongPressEvent(): Boolean = children.any { it.hasLongPressEvent() }
 +
 +    override fun willDestroy() {
 +        children.forEach { it.willDestroy() }
@@ -1050,26 +983,6 @@ index 86dbe968c09c05a030eaf32375657a53a42ce981..c743431691e023cafe14fc8a0228327b
  open class TextSpan : TextAttr(), ISpan {
      internal var text: String = ""
      private var clickHandlerFn: ((ClickParams) -> Unit)? = null
-     private var longPressHandlerFn: ((LongPressParams) -> Unit)? = null
- 
-+    /** Attach generic inline box decoration to this existing text span. */
-+    fun inlineBoxStyle(style: InlineBoxSpanStyle): TextSpan {
-+        style.backgroundColor?.let { setProp(TextConst.INLINE_BOX_BACKGROUND_COLOR, it.toString()) }
-+        style.borderColor?.let { setProp(TextConst.INLINE_BOX_BORDER_COLOR, it.toString()) }
-+        setProp(TextConst.INLINE_BOX_BORDER_WIDTH, style.borderWidth)
-+        setProp(TextConst.INLINE_BOX_PADDING_START, style.paddingStart)
-+        setProp(TextConst.INLINE_BOX_PADDING_END, style.paddingEnd)
-+        setProp(TextConst.INLINE_BOX_PADDING_TOP, style.paddingTop)
-+        setProp(TextConst.INLINE_BOX_PADDING_BOTTOM, style.paddingBottom)
-+        setProp(TextConst.INLINE_BOX_MARGIN_START, style.marginStart)
-+        setProp(TextConst.INLINE_BOX_MARGIN_END, style.marginEnd)
-+        setProp(TextConst.INLINE_BOX_CORNER_RADIUS, style.cornerRadius)
-+        return this
-+    }
-+
-     override fun textDecorationColor(color: Color): TextSpan {
-         TextConst.TEXT_DECORATION_COLOR with color.toString()
-         return this
 diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt
 index d46718f681c731c96ccfffce3ddb107144d3323f..3cb2a0ca5aaf2aa02c4f20acb22a46406404a979 100644
 --- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt

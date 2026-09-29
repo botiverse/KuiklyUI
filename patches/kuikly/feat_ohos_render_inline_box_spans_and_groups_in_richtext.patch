@@ -5,8 +5,7 @@ Subject: feat(ohos): render inline-box spans and groups in RichText
 
 Flatten each InlineBoxGroupSpan into leading/trailing edge placeholders,
 word-joiner glue and ordinary child text so OH_Drawing measures and wraps
-the children itself; single inline-box spans reserve edge placeholders
-around their text. The shadow records chrome runs plus a layout-to-semantic
+the children itself. The shadow records chrome runs plus a layout-to-semantic
 offset map and hands both to the main thread with the typography; the view
 paints fill before glyphs and border after, and selection, copy and the
 default accessibility text use the semantic string. An explicit
@@ -18,7 +17,7 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
-index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282f6a22692 100644
+index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..9c785e25f45c2773efc057d0baee34486d23f6a9 100644
 --- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
 @@ -28,7 +28,9 @@
@@ -333,52 +332,15 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
          auto fontSize = (GetKRValue("fontSize", spanMap, props_)->toFloat() ?: 15.0) * dpi * fontSizeScale;
          auto text = GetKRValue("value", spanMap, spanMap)->toString();
          if (text.length() == 0) {
-@@ -464,6 +701,35 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -464,6 +701,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
          auto strokeWidth = GetKRValue("strokeWidth", spanMap, props_)->toFloat();
          auto strokeColorStr = GetKRValue("strokeColor", spanMap, props_)->toString();
          auto strokeColor = strokeColorStr.length() ? kuikly::util::ConvertToHexColor(strokeColorStr) : 0xff000000;
 +
-+        const std::string inlineBoxBackgroundColorStr =
-+            GetKRValue("inlineBoxBackgroundColor", spanMap, spanMap)->toString();
-+        const std::string inlineBoxBorderColorStr =
-+            GetKRValue("inlineBoxBorderColor", spanMap, spanMap)->toString();
-+        const float inlineBoxBorderWidth =
-+            GetKRValue("inlineBoxBorderWidth", spanMap, spanMap)->toFloat() * dpi;
-+        const float inlineBoxPaddingStart =
-+            GetKRValue("inlineBoxPaddingStart", spanMap, spanMap)->toFloat() * dpi;
-+        const float inlineBoxPaddingEnd =
-+            GetKRValue("inlineBoxPaddingEnd", spanMap, spanMap)->toFloat() * dpi;
-+        const float inlineBoxPaddingTop =
-+            GetKRValue("inlineBoxPaddingTop", spanMap, spanMap)->toFloat() * dpi;
-+        const float inlineBoxPaddingBottom =
-+            GetKRValue("inlineBoxPaddingBottom", spanMap, spanMap)->toFloat() * dpi;
-+        const float inlineBoxMarginStart =
-+            GetKRValue("inlineBoxMarginStart", spanMap, spanMap)->toFloat() * dpi;
-+        const float inlineBoxMarginEnd =
-+            GetKRValue("inlineBoxMarginEnd", spanMap, spanMap)->toFloat() * dpi;
-+        const float inlineBoxCornerRadius =
-+            GetKRValue("inlineBoxCornerRadius", spanMap, spanMap)->toFloat() * dpi;
-+        const bool isInlineBox = !isInlineBoxGroupPart && (inlineBoxBackgroundColorStr.length() ||
-+            inlineBoxBorderColorStr.length() || inlineBoxBorderWidth > 0 ||
-+            inlineBoxPaddingStart > 0 || inlineBoxPaddingEnd > 0 ||
-+            inlineBoxPaddingTop > 0 || inlineBoxPaddingBottom > 0 ||
-+            inlineBoxMarginStart > 0 || inlineBoxMarginEnd > 0 || inlineBoxCornerRadius > 0);
-+        if (isInlineBox) {
-+            textDecoration = TEXT_DECORATION_NONE;
-+        }
          
          auto placeholderWidth = GetKRValue("placeholderWidth", spanMap, spanMap)->toDouble();
          // 创建文本样式对象txtStyle
-@@ -473,7 +739,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
-         OH_Drawing_Brush *textBackgroundBrush = nullptr;
-         // 设置文字大小、字重等属性设置到文本样式对象中
-         OH_Drawing_SetTextStyleColor(txtStyle, color);
--        if (backgroundColorStr.length() && backgroundColor != 0x00000000) {
-+        if (!isInlineBox && backgroundColorStr.length() && backgroundColor != 0x00000000) {
-             textBackgroundBrush = OH_Drawing_BrushCreate();
-             OH_Drawing_BrushSetColor(textBackgroundBrush, backgroundColor);
-             OH_Drawing_SetTextStyleBackgroundBrush(txtStyle, textBackgroundBrush);
-@@ -634,7 +900,12 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -634,7 +872,12 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
                  TEXT_BASELINE_ALPHABETIC,    0,
              };
              OH_Drawing_TypographyHandlerAddPlaceholder(handler, &inlineView);
@@ -392,7 +354,7 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
              // 仅当此 placeholder 是由 PostProcessor("richtext") 展开产生的内置 image span
              // 时，登记到 image_draw_records_ 以便 view 层在 OnForegroundDraw 中绘制图片。
              // 业务自己声明的 ImageSpan（无 kInternalImageSrcKey 字段）继续走"父节点 ImageView"
-@@ -650,15 +921,104 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -650,15 +893,42 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
              placeholder_count++;
              charOffset += 1;
@@ -419,68 +381,6 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
 +            } else {
 +                append_placeholder_mapping({});
 +            }
-+        } else if (isInlineBox) {
-+            const float borderWidth = inlineBoxBorderWidth;
-+            const float paddingStart = inlineBoxPaddingStart;
-+            const float paddingEnd = inlineBoxPaddingEnd;
-+            const float marginStart = inlineBoxMarginStart;
-+            const float marginEnd = inlineBoxMarginEnd;
-+            const float boxHeight = fontSize + inlineBoxPaddingTop + inlineBoxPaddingBottom + borderWidth * 2.0f;
-+            OH_Drawing_PlaceholderSpan leadingEdgePlaceholder = {
-+                marginStart + borderWidth + paddingStart,
-+                boxHeight,
-+                ALIGNMENT_CENTER_OF_ROW_BOX,
-+                TEXT_BASELINE_ALPHABETIC,
-+                0,
-+            };
-+            OH_Drawing_PlaceholderSpan trailingEdgePlaceholder = {
-+                paddingEnd + borderWidth + marginEnd,
-+                boxHeight,
-+                ALIGNMENT_CENTER_OF_ROW_BOX,
-+                TEXT_BASELINE_ALPHABETIC,
-+                0,
-+            };
-+            const int spanStart = charOffset;
-+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &leadingEdgePlaceholder);
-+            placeholder_count++;
-+            charOffset += 1;
-+            append_placeholder_mapping({});
-+
-+            const int chromeStart = charOffset;
-+            const std::u16string text16 = KRUtf8ToUtf16(text);
-+            if (!text.empty()) {
-+                OH_Drawing_TypographyHandlerAddText(handler, text.c_str());
-+                charOffset += static_cast<int>(text16.size());
-+                append_mapped_text(text16, text16, nullptr);
-+            }
-+            const int chromeEnd = charOffset;
-+            if (chromeEnd > chromeStart) {
-+                context_thread_slock_chrome_runs_.push_back(
-+                    KRSlockChromeRun{
-+                        chromeStart,
-+                        chromeEnd,
-+                        inlineBoxBackgroundColorStr.length()
-+                            ? kuikly::util::ConvertToHexColor(inlineBoxBackgroundColorStr)
-+                            : 0,
-+                        inlineBoxBorderColorStr.length()
-+                            ? kuikly::util::ConvertToHexColor(inlineBoxBorderColorStr)
-+                            : 0,
-+                        borderWidth,
-+                        paddingStart,
-+                        paddingEnd,
-+                        marginStart,
-+                        marginEnd,
-+                        boxHeight,
-+                        inlineBoxCornerRadius,
-+                        false,
-+                    });
-+            }
-+
-+            OH_Drawing_TypographyHandlerAddPlaceholder(handler, &trailingEdgePlaceholder);
-+            placeholder_count++;
-+            charOffset += 1;
-+            append_placeholder_mapping({});
-+            span_offsets_.emplace_back(std::tuple(spanIndex, spanStart, charOffset));
          } else {
              OH_Drawing_TypographyHandlerAddText(handler, text.c_str());  // 添加文本
 -            text_content.append(text);
@@ -503,7 +403,7 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
          }
          OH_Drawing_DestroyTextStyle(txtStyle);
          if (textForegroundPen) {
-@@ -669,7 +1029,6 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -669,7 +939,6 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              OH_Drawing_BrushDestroy(textForegroundBrush);
              textForegroundBrush = nullptr;
          }
@@ -511,7 +411,7 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
          if (textBackgroundBrush) {
              OH_Drawing_BrushDestroy(textBackgroundBrush);
              textBackgroundBrush = nullptr;
-@@ -700,7 +1059,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -700,7 +969,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
  #ifndef NDEBUG
      if (ouput_measure_width_ < 0.01) {
          KR_LOG_ERROR << "Measure size:" << ouput_measure_width_ << ", " << ouput_measure_height_
@@ -520,7 +420,7 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
      }
  #endif
      context_measure_size_ = KRSize(ouput_measure_width_, ouput_measure_height_);
-@@ -710,7 +1069,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -710,7 +979,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
      if (typoStyle != nullptr) {
          OH_Drawing_DestroyTypographyStyle(typoStyle);
      }
@@ -531,7 +431,7 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
      // 触发 image span 异步预加载（决策 3C）。当 image_draw_records_ 为空（业务未注册
      // PostProcessor / 全是文本）时本方法立即返回，零开销。
      TriggerImagePrefetchIfNeed();
-@@ -730,6 +1091,10 @@ void KRRichTextShadow::ReleaseLastTypography() {
+@@ -730,6 +1001,10 @@ void KRRichTextShadow::ReleaseLastTypography() {
      context_thread_drawOffsetX_ = 0;
      context_thread_text_align_ = TEXT_ALIGN_LEFT;
      context_measure_size_ = KRSize(0, 0);
@@ -542,7 +442,7 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
  }
  
  // ===== Phase 3: image span 异步预加载（委托 KRCustomEmojiPixmapCache） =====
-@@ -770,7 +1135,8 @@ void KRRichTextShadow::TriggerImagePrefetchIfNeed() {
+@@ -770,7 +1045,8 @@ void KRRichTextShadow::TriggerImagePrefetchIfNeed() {
  /**
   * 调用获取Span位置方法
   */
@@ -552,7 +452,7 @@ index 2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f..1b48a27685e310729d500266ed14a282
      if(auto paragraph = GetParagraph()){
          auto [paragraphX, paragraphY, paragraphW, paragraphH] = paragraph->SpanRect(spanIndex);
          char buffer[50] = {0};
-@@ -779,8 +1145,8 @@ KRAnyValue KRRichTextShadow::SpanRect(int spanIndex) {
+@@ -779,8 +1055,8 @@ KRAnyValue KRRichTextShadow::SpanRect(int spanIndex) {
          return NewKRRenderValue(buffer);
      }
  

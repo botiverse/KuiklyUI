@@ -14,7 +14,7 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
-index 79a6db2e96c5fba4e499e68d14ebd5deb5bd3a46..8b22abb8423f3f9fce1fcf1da1ca891deff72800 100644
+index 7bf45f9fc0590ca8ba92adfbd5bc528a19863f42..caeecb2b0c63f3943811dda1cd6b4042c6ee2f3b 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
 @@ -265,6 +265,9 @@ internal fun TextAttr.applySoftWrap(softWrap: Boolean) {

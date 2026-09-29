@@ -139,7 +139,7 @@ index 2eb00c0b6d4211502ebe39744b17c2f8921e8986..9c180632dfa08adaca9b1daa2d6bce35
              if (phSpanTextRange != null) {
  
 diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
-index 0e4c45f3755a13f0a3994d494119948f3e92855a..8f447b0b5fb70733708e161a847eee225544a8f8 100644
+index 0e4c45f3755a13f0a3994d494119948f3e92855a..034ce5768731ba6730e20d46c0801f4e2a5b5821 100644
 --- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
 +++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
 @@ -57,6 +57,12 @@ import kotlin.math.ceil
@@ -212,28 +212,7 @@ index 0e4c45f3755a13f0a3994d494119948f3e92855a..8f447b0b5fb70733708e161a847eee22
          if (isPlaceHolderSpan(spanValue)) {
              return PlaceholderSpanProps(spanValue, kuiklyContext)
          }
-@@ -196,7 +197,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
- 
-         // 修饰相关
-         textSpans.add(ForegroundColorSpan(spanProps.color))
--        if (spanProps.backgroundColor != Color.TRANSPARENT) {
-+        if (spanProps.backgroundColor != Color.TRANSPARENT &&
-+            spanProps.inlineBoxStyle == null
-+        ) {
-             textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
-         }
-         if (spanProps.textDecoration.isNotEmpty()) {
-@@ -221,6 +224,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
-         if (spanProps.backgroundImage.isNotEmpty()) {
-             textSpans.add(LinearGradientForegroundSpan(spanProps.backgroundImage, layoutSizeGetter))
-         }
-+        spanProps.inlineBoxStyle?.let { style ->
-+            textSpans.add(KRInlineBoxSpan(style))
-+        }
- 
-         spanProps.textShadow?.let {
-             if (!it.isEmpty()) {
-@@ -245,8 +251,147 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+@@ -245,8 +246,144 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
          return textSpans
      }
  
@@ -256,9 +235,6 @@ index 0e4c45f3755a13f0a3994d494119948f3e92855a..8f447b0b5fb70733708e161a847eee22
 +        append(buildSpannedString {
 +            inSpans(spans) { append(spanText) }
 +        })
-+        if (spanProps is TextSpanProps && spanProps.inlineBoxStyle != null) {
-+            applyInlineBoxAtomicTextSpan(spanStart, spanEnd, spanProps.inlineBoxStyle)
-+        }
 +    }
 +
 +    private fun SpannableStringBuilder.appendInlineBoxGroup(
@@ -381,23 +357,7 @@ index 0e4c45f3755a13f0a3994d494119948f3e92855a..8f447b0b5fb70733708e161a847eee22
  abstract class SpanProps(spanValue: JSONObject) {
      protected val _text: String = spanValue.optString(KRTextProps.PROP_KEY_TEXT, "")
      open val text: String get() = _text
-@@ -273,6 +418,7 @@ class TextSpanProps(
-     val lineHeight: Float
-     val backgroundImage: String
-     val backgroundColor: Int
-+    val inlineBoxStyle: KRInlineBoxSpanStyle?
-     var textShadow: BoxShadow? = null
-     var useDpFontSizeDim = false
- 
-@@ -338,6 +484,7 @@ class TextSpanProps(
-                 .takeIf { it.isNotEmpty() }
-                 ?.toColor()
-                 ?: Color.TRANSPARENT
-+        inlineBoxStyle = KRInlineBoxSpanStyle.from(spanValue, kuiklyContext)
-         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
-         textShadow = BoxShadow(textShadowStr, kuiklyContext)
-         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
-@@ -365,12 +512,123 @@ class PlaceholderSpanProps(spanValue: JSONObject, private val kuiklyContext: IKu
+@@ -365,12 +502,123 @@ class PlaceholderSpanProps(spanValue: JSONObject, private val kuiklyContext: IKu
  /**
   * 用于记录 DSL Span 对应的 Text Range
   */
@@ -522,7 +482,7 @@ index 0e4c45f3755a13f0a3994d494119948f3e92855a..8f447b0b5fb70733708e161a847eee22
  /**
   * Uses a marker [CharacterStyle] whenever the caller customizes underline color, thickness, and/or
   * offset.
-@@ -406,6 +664,98 @@ internal class KRSkipInkCustomUnderlineSpan(
+@@ -406,6 +654,98 @@ internal class KRSkipInkCustomUnderlineSpan(
      }
  }
  

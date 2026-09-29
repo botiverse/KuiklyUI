@@ -14,20 +14,20 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
-index 59889066ea456136f035bc15876301ee9a24a5aa..73badfe233952b6abeefd11de62d3a1d4946f502 100644
+index 21bb4fdc24efc6ff3856d32bdb3fe2fd708f8448..29b0df0b1ed5968c26d824ddfa939043b5a70bf2 100644
 --- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
 +++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
-@@ -25,6 +25,9 @@ NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
+@@ -24,6 +24,9 @@ NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
  NSString *const kGradientInfoKeyFont = @"font";
  NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
  
 +static NSString *const KRRichTextAccessibilityFocusMethod = @"accessibilityFocus";
 +static NSString *const KRRichTextAccessibilityAnnounceMethod = @"accessibilityAnnounce";
 +
- @interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
- 
- @property (nonatomic, copy) NSString *originalText;
-@@ -193,6 +196,16 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+ @interface KRInlineBoxEdgeAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
+ - (instancetype)initWithAdvance:(CGFloat)advance
+                             font:(UIFont *)font
+@@ -87,6 +90,16 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
      KUIKLY_SET_CSS_COMMON_PROP;
  }
  

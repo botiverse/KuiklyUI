@@ -3,151 +3,24 @@ From: BiSheng <raft-mobile-bisheng@mail.build>
 Date: Tue, 29 Sep 2026 06:14:59 +0000
 Subject: feat(ios): render inline-box spans and groups in RichText
 
-A single inline-box span renders as one NSTextAttachment that measures and
-draws its own text inside the box. An InlineBoxGroupSpan keeps its children
-as ordinary attributed text between two edge attachments, joined with U+2060
-so TextKit wraps the group as one word; KRLayoutManager paints the chrome per
-line fragment. Copy, selection and the label's text restore the original
-attachment text and the group's semantic text.
+An InlineBoxGroupSpan keeps its children as ordinary attributed text
+between two edge attachments, joined with U+2060 so TextKit wraps the group
+as one word; KRLayoutManager paints the chrome per line fragment. Copy,
+selection and the label's text restore the group's semantic text.
 
 Fork-Patch: ios-richtext-inline-box
 Origin: 73fc777a bd2ad40f 45f45e40 41ad5a59 820e8067 d869f46f
 Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
-diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.h b/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
-index 49416f1ad487564826fad0f544d0fc1908967ac3..af7532fde711ba1636c1a96c130d9bf89c5504b4 100644
---- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
-+++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
-@@ -64,6 +64,8 @@ extern NSString *const KuiklyIndexAttributeName;
- @property (nonatomic, assign) CGFloat strokeWidth;
- @property (nonatomic, strong) NSShadow *shadow;
- @property (nonatomic, strong) NSArray<NSAttributedString *> *richAttrArray;
-+// Generic semantic-free inline box decoration carried by the existing TextSpan.
-+@property (nonatomic, strong, nullable) NSDictionary<NSString *, id> *inlineBoxStyle;
- 
- @end
- 
 diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
-index 4203d6fd4d4b5d68999f5660286409c0771e5c96..59889066ea456136f035bc15876301ee9a24a5aa 100644
+index 4203d6fd4d4b5d68999f5660286409c0771e5c96..21bb4fdc24efc6ff3856d32bdb3fe2fd708f8448 100644
 --- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
 +++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
-@@ -18,12 +18,155 @@
- #import "KRConvertUtil.h"
- #import "KuiklyRenderBridge.h"
- #import "NSObject+KR.h"
-+#import <CoreText/CoreText.h>
- 
- NSString *const KuiklyIndexAttributeName = @"KuiklyIndexAttributeName";
- NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
+@@ -24,6 +24,43 @@ NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
  NSString *const kGradientInfoKeyFont = @"font";
  NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
  
-+@interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
-+
-+@property (nonatomic, copy) NSString *originalText;
-+
-+- (instancetype)initWithText:(NSString *)text
-+                         font:(UIFont *)font
-+                    textColor:(UIColor *)textColor
-+                        style:(NSDictionary<NSString *, id> *)style
-+                letterSpacing:(CGFloat)letterSpacing;
-+
-+@end
-+
-+@implementation KRInlineBoxAttachment
-+
-+- (instancetype)initWithText:(NSString *)text
-+                         font:(UIFont *)font
-+                    textColor:(UIColor *)textColor
-+                        style:(NSDictionary<NSString *, id> *)style
-+                letterSpacing:(CGFloat)letterSpacing {
-+    if (self = [super init]) {
-+        _originalText = [text copy] ?: @"";
-+        UIFont *resolvedFont = font ?: [UIFont systemFontOfSize:15.0];
-+        UIColor *resolvedTextColor = textColor ?: [UIColor blackColor];
-+        UIColor *backgroundColor = style[@"backgroundColor"] ?: [UIColor clearColor];
-+        UIColor *borderColor = style[@"borderColor"] ?: [UIColor clearColor];
-+        CGFloat borderWidth = [style[@"borderWidth"] doubleValue];
-+        CGFloat paddingStart = [style[@"paddingStart"] doubleValue];
-+        CGFloat paddingEnd = [style[@"paddingEnd"] doubleValue];
-+        CGFloat paddingTop = [style[@"paddingTop"] doubleValue];
-+        CGFloat paddingBottom = [style[@"paddingBottom"] doubleValue];
-+        CGFloat marginStart = [style[@"marginStart"] doubleValue];
-+        CGFloat marginEnd = [style[@"marginEnd"] doubleValue];
-+        CGFloat cornerRadius = [style[@"cornerRadius"] doubleValue];
-+        NSMutableDictionary<NSAttributedStringKey, id> *attributes = [@{
-+            NSFontAttributeName: resolvedFont,
-+            NSForegroundColorAttributeName: resolvedTextColor,
-+        } mutableCopy];
-+        if (letterSpacing != 0) {
-+            attributes[NSKernAttributeName] = @(letterSpacing);
-+        }
-+        NSAttributedString *displayText = [[NSAttributedString alloc] initWithString:_originalText attributes:attributes];
-+        CTLineRef line = CTLineCreateWithAttributedString((CFAttributedStringRef)displayText);
-+        CGFloat ascent = 0;
-+        CGFloat descent = 0;
-+        CGFloat leading = 0;
-+        CGFloat textWidth = (CGFloat)CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
-+        CGFloat contentHeight = ascent + descent;
-+        CGFloat boxHeight = contentHeight + paddingTop + paddingBottom + borderWidth * 2.0;
-+        CGFloat totalWidth = textWidth + marginStart + marginEnd + paddingStart + paddingEnd + borderWidth * 2.0;
-+        CGFloat boxLeft = marginStart;
-+        CGFloat boxWidth = totalWidth - marginStart - marginEnd;
-+
-+        UIGraphicsBeginImageContextWithOptions(CGSizeMake(totalWidth, boxHeight), NO, 0.0);
-+        CGContextRef context = UIGraphicsGetCurrentContext();
-+        if (context) {
-+            CGRect boxRect = CGRectMake(boxLeft, 0, boxWidth, boxHeight);
-+            CGPathRef boxPath = CGPathCreateWithRoundedRect(boxRect, cornerRadius, cornerRadius, NULL);
-+            CGContextAddPath(context, boxPath);
-+            CGContextSetFillColorWithColor(context, backgroundColor.CGColor);
-+            CGContextFillPath(context);
-+            if (borderWidth > 0 && borderColor) {
-+                CGRect strokeRect = CGRectInset(boxRect, borderWidth / 2.0, borderWidth / 2.0);
-+                CGPathRef strokePath = CGPathCreateWithRoundedRect(
-+                    strokeRect,
-+                    MAX(0, cornerRadius - borderWidth / 2.0),
-+                    MAX(0, cornerRadius - borderWidth / 2.0),
-+                    NULL
-+                );
-+                CGContextAddPath(context, strokePath);
-+                CGContextSetStrokeColorWithColor(context, borderColor.CGColor);
-+                CGContextSetLineWidth(context, borderWidth);
-+                CGContextStrokePath(context);
-+                CGPathRelease(strokePath);
-+            }
-+            CGPathRelease(boxPath);
-+
-+            CGContextSaveGState(context);
-+            CGContextTranslateCTM(context, 0, boxHeight);
-+            CGContextScaleCTM(context, 1.0, -1.0);
-+            CGContextSetTextMatrix(context, CGAffineTransformIdentity);
-+            CGContextSetTextPosition(
-+                context,
-+                marginStart + borderWidth + paddingStart,
-+                borderWidth + paddingBottom + descent
-+            );
-+            CTLineDraw(line, context);
-+            CGContextRestoreGState(context);
-+        }
-+        UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-+        UIGraphicsEndImageContext();
-+        CFRelease(line);
-+
-+        self.image = image;
-+        CGFloat baselineOffset = (resolvedFont.ascender + resolvedFont.descender) / 2.0 - boxHeight / 2.0;
-+        self.bounds = CGRectMake(0, baselineOffset, totalWidth, boxHeight);
-+    }
-+    return self;
-+}
-+
-+- (NSString *)kr_originlTextBeforeTextAttachment {
-+    return self.originalText ?: @"";
-+}
-+
-+@end
-+
 +@interface KRInlineBoxEdgeAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
 +- (instancetype)initWithAdvance:(CGFloat)advance
 +                            font:(UIFont *)font
@@ -188,7 +61,7 @@ index 4203d6fd4d4b5d68999f5660286409c0771e5c96..59889066ea456136f035bc15876301ee
  @interface KRRichTextView()
  
  @property (nonatomic, strong) NSNumber *css_numberOfLines;
-@@ -305,7 +448,16 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+@@ -305,7 +342,16 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
      NSString *textPostProcessor = nil;
      NSMutableArray *richAttrArray = [NSMutableArray new];
      UIFont *mainFont = nil;
@@ -206,7 +79,7 @@ index 4203d6fd4d4b5d68999f5660286409c0771e5c96..59889066ea456136f035bc15876301ee
          if (span[@"placeholderWidth"]) { // 属于占位span
              NSAttributedString *placeholderSpanAttributedString = [self p_createPlaceholderSpanAttributedStringWithSpan:span];
              [richAttrArray addObject:placeholderSpanAttributedString];
-@@ -346,8 +498,6 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+@@ -346,8 +392,6 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
          CGFloat headIndent = [KRConvertUtil CGFloat:propStyle[@"headIndent"]];
          UIColor *strokeColor = [UIView css_color:propStyle[@"strokeColor"]];
          CGFloat strokeWidth = [KRConvertUtil CGFloat:propStyle[@"strokeWidth"]];
@@ -215,36 +88,7 @@ index 4203d6fd4d4b5d68999f5660286409c0771e5c96..59889066ea456136f035bc15876301ee
          NSShadow *textShadow = nil;
          NSString *cssTextShadow = propStyle[@"textShadow"];
          if ([cssTextShadow isKindOfClass:[NSString class]] && cssTextShadow.length > 0) {
-@@ -395,6 +545,28 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
-         spanAttrs.strokeWidth = strokeWidth;
-         spanAttrs.shadow = textShadow;
-         spanAttrs.richAttrArray = richAttrArray;
-+        BOOL hasInlineBoxStyle = propStyle[@"inlineBoxBackgroundColor"] ||
-+            propStyle[@"inlineBoxBorderColor"] || propStyle[@"inlineBoxBorderWidth"] ||
-+            propStyle[@"inlineBoxPaddingStart"] || propStyle[@"inlineBoxPaddingEnd"] ||
-+            propStyle[@"inlineBoxPaddingTop"] || propStyle[@"inlineBoxPaddingBottom"] ||
-+            propStyle[@"inlineBoxMarginStart"] || propStyle[@"inlineBoxMarginEnd"] ||
-+            propStyle[@"inlineBoxCornerRadius"];
-+        if (hasInlineBoxStyle) {
-+            NSMutableDictionary<NSString *, id> *box = [NSMutableDictionary new];
-+            UIColor *boxBackground = [UIView css_color:propStyle[@"inlineBoxBackgroundColor"]];
-+            UIColor *boxBorder = [UIView css_color:propStyle[@"inlineBoxBorderColor"]];
-+            if (boxBackground) box[@"backgroundColor"] = boxBackground;
-+            if (boxBorder) box[@"borderColor"] = boxBorder;
-+            box[@"borderWidth"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxBorderWidth"]]);
-+            box[@"paddingStart"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingStart"]]);
-+            box[@"paddingEnd"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingEnd"]]);
-+            box[@"paddingTop"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingTop"]]);
-+            box[@"paddingBottom"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxPaddingBottom"]]);
-+            box[@"marginStart"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxMarginStart"]]);
-+            box[@"marginEnd"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxMarginEnd"]]);
-+            box[@"cornerRadius"] = @([KRConvertUtil CGFloat:propStyle[@"inlineBoxCornerRadius"]]);
-+            spanAttrs.inlineBoxStyle = box;
-+        }
-         // 组合属性，生成这段Span对应的富文本
-         NSMutableAttributedString *spanAttrString = [self p_createSpanAttributedStringWithAttributes:spanAttrs];
-         if (spanAttrString) {
-@@ -421,8 +593,169 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+@@ -421,6 +465,141 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
      return resAttr;
  }
  
@@ -385,36 +229,8 @@ index 4203d6fd4d4b5d68999f5660286409c0771e5c96..59889066ea456136f035bc15876301ee
 +}
  
  - (nullable NSMutableAttributedString *)p_createSpanAttributedStringWithAttributes:(KRSpanAttributes *)attrs {
-+    if (attrs.inlineBoxStyle && attrs.text.length > 0) {
-+        KRInlineBoxAttachment *attachment = [[KRInlineBoxAttachment alloc]
-+            initWithText:attrs.text
-+                    font:attrs.font
-+               textColor:attrs.color
-+                   style:attrs.inlineBoxStyle
-+           letterSpacing:attrs.letterSpacing];
-+        NSMutableAttributedString *atomicBox = [[NSMutableAttributedString alloc]
-+            initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
-+        NSRange atomicRange = NSMakeRange(0, atomicBox.length);
-+        [atomicBox addAttribute:NSWritingDirectionAttributeName
-+                         value:@[@((NSInteger)NSWritingDirectionLeftToRight | (NSInteger)NSWritingDirectionOverride)]
-+                         range:atomicRange];
-+        [atomicBox addAttribute:NSFontAttributeName value:attrs.font ?: [UIFont systemFontOfSize:15.0] range:atomicRange];
-+        [atomicBox addAttribute:KuiklyIndexAttributeName value:@(attrs.spanIndex) range:atomicRange];
-+        [self p_applyTextAttributeWithAttr:atomicBox
-+                                textAliment:attrs.textAlign
-+                               lineSpacing:attrs.lineSpacing
-+                          paragraphSpacing:attrs.paragraphSpacing
-+                                lineHeight:attrs.lineHeight
-+                                     range:atomicRange
-+                                  fontSize:attrs.font.pointSize
-+                                headIndent:attrs.headIndent
-+                                      font:attrs.font ?: [UIFont systemFontOfSize:15.0]];
-+        return atomicBox;
-+    }
      NSMutableAttributedString *attributedString = [[NSMutableAttributedString alloc] initWithString:attrs.text attributes:@{}];
-     NSRange range = NSMakeRange(0, attributedString.length);
- 
-@@ -571,9 +904,20 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+@@ -571,9 +750,20 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
      if (!_mAttributedString) { // 文本还未排版，调用无效
          return @"";
      }

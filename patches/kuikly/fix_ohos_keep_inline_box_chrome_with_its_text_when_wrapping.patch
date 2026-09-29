@@ -79,7 +79,7 @@ index 0000000000000000000000000000000000000000..39b7870c1b37c71cb7e813c5e9a317e7
 +
 +#endif  // CORE_RENDER_OHOS_KRINLINEBOXATOMICTEXTEDGE_H
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
-index 1b48a27685e310729d500266ed14a282f6a22692..452e91749d1caaa4e6c3e92a9e081bd06dfa649a 100644
+index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade26176db7a54 100644
 --- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
 @@ -36,6 +36,7 @@
@@ -266,7 +266,7 @@ index 1b48a27685e310729d500266ed14a282f6a22692..452e91749d1caaa4e6c3e92a9e081bd0
          KRInlineBoxGroupPlan *inlineBoxGroupPlan = nullptr;
          if (isInlineBoxGroupPart) {
              auto plan_it = std::find_if(
-@@ -804,7 +889,10 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -776,7 +861,10 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
              OH_Drawing_SetTextStyleForegroundBrush(txtStyle, textForegroundBrush);
          }
@@ -278,7 +278,7 @@ index 1b48a27685e310729d500266ed14a282f6a22692..452e91749d1caaa4e6c3e92a9e081bd0
          OH_Drawing_SetTextStyleFontWeight(txtStyle, fontWeight);
          OH_Drawing_SetTextStyleBaseLine(txtStyle, TEXT_BASELINE_ALPHABETIC);
          OH_Drawing_SetTextStyleDecoration(txtStyle, textDecoration);
-@@ -818,8 +906,11 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -790,8 +878,11 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
          }
          OH_Drawing_SetTextStyleFontStyle(txtStyle, fontStyle);
@@ -292,7 +292,7 @@ index 1b48a27685e310729d500266ed14a282f6a22692..452e91749d1caaa4e6c3e92a9e081bd0
          }
          if (lineSpacing > 0) {
              OH_Drawing_SetTextStyleFontHeight(txtStyle, lineSpacing + std::max(lineHeight, 1.0));
-@@ -921,28 +1012,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -893,28 +984,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
              placeholder_count++;
              charOffset += 1;
@@ -321,9 +321,9 @@ index 1b48a27685e310729d500266ed14a282f6a22692..452e91749d1caaa4e6c3e92a9e081bd0
 -                append_placeholder_mapping({});
 +                finalize_inline_box_group(spanIndex, inlineBoxGroupPlan);
              }
-         } else if (isInlineBox) {
-             const float borderWidth = inlineBoxBorderWidth;
-@@ -1019,6 +1091,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+         } else {
+             OH_Drawing_TypographyHandlerAddText(handler, text.c_str());  // 添加文本
+@@ -929,6 +1001,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              } else {
                  append_mapped_text(text16, text16, nullptr);
              }
