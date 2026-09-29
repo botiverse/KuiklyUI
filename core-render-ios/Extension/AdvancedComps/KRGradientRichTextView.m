@@ -133,7 +133,9 @@
  * 调用view方法
  */
 - (void)hrv_callWithMethod:(NSString *)method params:(NSString *)params callback:(KuiklyRenderCallback)callback {
-    [_contentTextView hrv_callWithMethod:method params:params callback:callback];
+    if ([_contentTextView respondsToSelector:@selector(hrv_callWithMethod:params:callback:)]) {
+        [_contentTextView hrv_callWithMethod:method params:params callback:callback];
+    }
 }
 
 #pragma mark - override
