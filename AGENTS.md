@@ -1,0 +1,88 @@
+# AGENTS.md — botiverse/KuiklyUI fork 协作约定（staging4 patch queue）
+
+本仓库是 Tencent-TDS/KuiklyUI 的业务 fork，消费方是 botiverse/mobile：mobile 只通过 Raft Artifacts
+（`https://maven.artifacts.botiverse.dev`）消费 `com.tencent.kuikly-open:*:<KUIKLY_RELEASE_SET>-2.1.21`、
+OHOS `<KUIKLY_RELEASE_SET>-2.0.21-ohos` 与对应的 iOS/OHOS 渲染器包。所有 human 与 agent 贡献者均须遵守以下约定。
+
+## 分支模型
+
+- **`staging4` 是唯一的交付分支。** `staging2` / `staging3` 冻结为历史，不再接收交付。
+- `staging4` = 上游 tag（当前 **2.28.0** = `c9c1c743`）+ **每个 fork patch 一个提交** + CI/发布覆盖层提交。
+  不存在 merge commit；跟进上游不是 merge，而是在新 tag 上重放全部 patch（见下文）。
+- `raft-patches/` 是 patch 的唯一真源：`UPSTREAM`（tag 与 commit）、`series`（顺序）、`NNNN-<slug>.patch`，
+  以及 `apply.sh` / `export.sh` / `verify.sh`。分支必须能由「上游 tag + series」逐字节重建（CI 的 series drift 检查）。
+  在 `raft-patches/` 正式落地前，分支上的提交序列本身就是 series，CI 的 drift 步骤会提示跳过。
+
+## series 顺序
+
+1. 构建类：`build-test-deps`（仅测试依赖）、`build-raft-release-publication-hooks`（发布钩子）。
+2. 功能 patch：按依赖排序（例如 NodeEventBinder 先于输入框焦点仲裁）；上游 backport 放在它所替换或依赖的位置。
+3. 覆盖层（fork 自有新文件）：发布流水线（`.github/workflows/task93-kuikly-release.yml`、`.github/raft-artifacts/`、
+   `scripts/`、`KUIKLY_RELEASE_SET`、`Gemfile*`）、PR 门禁（`compose-pr.yml`、`tools/check-*.py`、
+   `tools/*-renderer-tests/`）、`demo-apk.yml`、本文件。PR 门禁放在最后：每个 checker 都会 grep 某个功能的契约，
+   功能 patch 被删除时必须同时删掉对应的 checker 步骤。
+
+## 新增一个 patch
+
+1. 从最新 `staging4` 拉任务分支；**一个逻辑修改 = 一个提交**，只提交最终形态（禁止把 fix+revert 净零对、A/B 试探逐个提交）。
+2. 模块内单测（`src/*Test*/`）随功能 patch 一起提交；`.github/**`、`tools/check-*.py`、`tools/*-renderer-tests/**`、
+   `Gemfile*`、`iosApp/Podfile.lock` 属于 CI patch，不要混进功能 patch。
+3. 提交信息：
+   - 标题：英文 conventional 格式 `<type>(<area>): <summary>`，不写中文，不写 Raft/Slock 内部任务号。
+   - 正文：2–6 行说明改了什么、为什么。
+   - trailer：`Fork-Patch: <slug>`、`Origin: <来源 sha>`（如有）、`Upstream-Status: pending | submitted <PR> | not-upstreamable`，
+     最后是 `git commit -s` 生成的 `Signed-off-by`。
+4. 运行 `raft-patches/export.sh <你的分支>` 重新导出 patch 与 series，把 patch 文件变更与分支提交放在同一个 PR 中。
+
+## 刷新 / 删除 patch
+
+- 修改已有 patch：在任务分支上 `git commit --fixup=<该 patch 的提交>`，再
+  `GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/staging4`，最后运行 `export.sh`。
+  不要为同一个 patch 叠加「fix of fix」提交。
+- 删除 patch：删掉对应提交并运行 `export.sh`。同时检查 `compose-pr.yml` 与 `tools/` 中依赖该功能的 checker 和 fixture。
+- 上游 backport：`git cherry-pick -x -s <upstream sha>`，保留上游作者，提交信息里保留
+  `(cherry picked from commit …)`。backport 替换 fork 自研修复时，删除被替换的 fork patch。
+
+## 跟进新的上游 tag
+
+1. 从新 tag 新建分支，更新 `raft-patches/UPSTREAM`，运行 `raft-patches/apply.sh`；遇到冲突时手工解决，保留上游行为和我们的意图，
+   然后 `git am --continue`。
+2. 对照上游逐个检查：已被上游覆盖的 patch 直接删除；「已吸收」要按文件内容和符号判断，不能只看 patch-id
+   （批量 squash 会让 `git cherry` 给出假阳性）。
+3. 运行 `export.sh` 和 `verify.sh`，然后以 PR 的形式替换 `staging4`（或切出下一个 `stagingN`）。
+   发布号从新 tag 重新计数：`<tag>-raft.1`。
+
+## PR 与 CI
+
+- PR 目标分支是 `staging4`，**PR 标题只用英文**（与提交标题同一格式）。
+- `compose-pr.yml` 的门禁（`dco-series` 任务）要求：
+  - PR 基于当前 `staging4` tip，历史线性，不含 merge commit；
+  - 每个提交都有与 committer 身份一致的 `Signed-off-by`（DCO）；
+  - author 与 committer 不同的提交，只允许是带 `(cherry picked from commit <sha>)` 的上游 backport；
+  - series drift 检查（`raft-patches/verify.sh`）通过。
+- 合入方式用 **Rebase and merge**，不要 squash，否则多个 patch 提交会被压成一个。
+- **禁止在本地运行 Gradle**（组织规定）。本地只做静态自检：符号存在（`git grep`）、无冲突标记、无重复定义、
+  `expect`/`actual` 在 android/ios/ohos/js 各目标齐全、ObjC 头文件与实现一致、YAML/shell/python 语法正确。
+  编译、单测和设备验证交给 CI 与真机。
+
+## 发布
+
+- 版本号的唯一真源是 `KUIKLY_RELEASE_SET`；`core-render-ohos/oh-package.json5` 的 `version` 必须同步为 `<release>-2.0.21-ohos`，
+  两者放在同一个提交里修改。
+- 发布通过 `task93-kuikly-release.yml` 的 `workflow_dispatch` 执行：先跑一次 `publish=false` 的候选构建，
+  再用受保护的 `publish=true` 复用该候选的产物。被发布的 source 必须是 live `staging4` 的祖先（landed）；
+  `release/*` 热修分支只能包含已在 `staging4` 落地的提交的 cherry-pick，或只改版本号的提交。
+
+## 高试错热点必须带锁定测试
+
+以下区域改动**必须**附带或更新锁定测试：
+
+- Android 行高居中（`HRLineHeightSpan`：HRLineHeightSpanGlyphTest / HRLineHeightSpanTest）；
+- compose lazy scroll echo / offset（`KuiklyScrollInfo` / `SubcomposeLayout`，2.28 上游已重写预组合路径）；
+- 布局尺寸上报取整（四端 LayoutSizeFormatter 与 `tools/check-layout-size-report-rounding.py`）。
+
+## 与上游 / fork 特性的冲突处理
+
+- 修上游问题前，先查 Tencent-TDS/KuiklyUI 是否已有进行中或已合入的等价修复；有的话优先 backport。
+- fork 特性（native dispatch capture、输入框状态仲裁、inline-box 等）与上游修复改到同一区域时，**禁止机械覆盖**。
+  必须由特性作者联合审查后手工合并，并附真机回归结果。
