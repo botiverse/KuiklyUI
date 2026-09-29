@@ -83,6 +83,7 @@ jobs:
       image: python:3.8.20-slim-bookworm
     steps:
       - name: Install contract prerequisites
+        shell: bash
         run: |
           set -euo pipefail
           apt-get update
