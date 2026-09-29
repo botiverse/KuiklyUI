@@ -64,6 +64,8 @@ extern NSString *const KuiklyIndexAttributeName;
 @property (nonatomic, assign) CGFloat strokeWidth;
 @property (nonatomic, strong) NSShadow *shadow;
 @property (nonatomic, strong) NSArray<NSAttributedString *> *richAttrArray;
+// Generic semantic-free inline box decoration carried by the existing TextSpan.
+@property (nonatomic, strong, nullable) NSDictionary<NSString *, id> *inlineBoxStyle;
 
 @end
 

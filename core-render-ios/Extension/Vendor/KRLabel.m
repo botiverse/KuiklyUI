@@ -19,10 +19,69 @@
 #import "KRAsyncDeallocManager.h"
 #import <objc/runtime.h>
 #import "NSObject+KR.h"
+#import "KuiklyRenderBridge.h"
 
 #define KRAssertMainThread() NSAssert(0 != pthread_main_np(), @"This method must be called on the main thread!")
 NSString *const KRHighlightAttributeKey = @"KRHighlightAttributeKey";
 NSString *const KRBGAttributeKey = @"KRBGAttributeKey";
+NSString *const KRInlineBoxStyleAttributeName = @"KRInlineBoxStyleAttributeName";
+NSString *const KRInlineBoxSemanticAttributeName = @"KRInlineBoxSemanticAttributeName";
+
+static NSString *KRRestoredAttachmentString(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return @"";
+    }
+    NSMutableString *result = [NSMutableString string];
+    __block NSUInteger cursor = 0;
+    [attributedString enumerateAttribute:NSAttachmentAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (range.location > cursor) {
+            [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, range.location - cursor)]];
+        }
+        if ([value respondsToSelector:@selector(kr_originlTextBeforeTextAttachment)]) {
+            id<KRTextAttachmentStringProtocol> attachment = (id<KRTextAttachmentStringProtocol>)value;
+            [result appendString:[attachment kr_originlTextBeforeTextAttachment] ?: @""];
+        } else {
+            [result appendString:[attributedString.string substringWithRange:range]];
+        }
+        cursor = NSMaxRange(range);
+    }];
+    if (cursor < attributedString.length) {
+        [result appendString:[attributedString.string substringWithRange:NSMakeRange(cursor, attributedString.length - cursor)]];
+    }
+    return result;
+}
+
+static NSString *KRRestoredTextAttachmentString(NSAttributedString *attributedString) {
+    if (attributedString.length == 0) {
+        return @"";
+    }
+    NSMutableString *result = [NSMutableString string];
+    __block NSUInteger cursor = 0;
+    [attributedString enumerateAttribute:KRInlineBoxSemanticAttributeName
+                                  inRange:NSMakeRange(0, attributedString.length)
+                                  options:0
+                               usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (![value isKindOfClass:[NSString class]]) {
+            return;
+        }
+        if (range.location > cursor) {
+            NSAttributedString *prefix = [attributedString attributedSubstringFromRange:NSMakeRange(cursor, range.location - cursor)];
+            [result appendString:KRRestoredAttachmentString(prefix)];
+        }
+        [result appendString:(NSString *)value];
+        cursor = NSMaxRange(range);
+    }];
+    if (cursor < attributedString.length) {
+        NSAttributedString *suffix = [attributedString attributedSubstringFromRange:NSMakeRange(cursor, attributedString.length - cursor)];
+        [result appendString:KRRestoredAttachmentString(suffix)];
+    }
+    NSString *restored = result.length > 0 ? result : KRRestoredAttachmentString(attributedString);
+    return [[restored stringByReplacingOccurrencesOfString:@"\u2060" withString:@""]
+        stringByReplacingOccurrencesOfString:@"\uFFFC" withString:@""];
+}
 
 
 @interface KRLabel()
@@ -53,7 +112,7 @@ NSString *const KRBGAttributeKey = @"KRBGAttributeKey";
 - (NSString *)accessibilityLabel{
     NSString * res = [super accessibilityLabel];
     if (res.length <= 0) {
-        return self.attributedText.string;
+        return KRRestoredTextAttachmentString(self.attributedText);
     }
     return res;
 }
@@ -523,8 +582,108 @@ NSString *const KRBGAttributeKey = @"KRBGAttributeKey";
 - (void)drawBackgroundForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
     _drawAtPoint = origin;
     [super drawBackgroundForGlyphRange:glyphsToShow atPoint:origin];
+    [self kr_drawInlineBoxChromeForGlyphRange:glyphsToShow atPoint:origin];
     _drawAtPoint = CGPointZero;
 }
+
+- (void)kr_drawInlineBoxChromeForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
+    NSTextStorage *textStorage = self.textStorage;
+    NSTextContainer *container = self.textContainers.firstObject;
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (textStorage.length == 0 || !container || !ctx) {
+        return;
+    }
+    NSRange charRange = [self characterRangeForGlyphRange:glyphsToShow actualGlyphRange:NULL];
+    [textStorage enumerateAttribute:KRInlineBoxStyleAttributeName
+                            inRange:charRange
+                            options:0
+                         usingBlock:^(id value, NSRange runRange, BOOL *stop) {
+        if (![value isKindOfClass:[NSDictionary class]]) return;
+        NSDictionary *style = (NSDictionary *)value;
+        NSRange runGlyphRange = [self glyphRangeForCharacterRange:runRange actualCharacterRange:NULL];
+        if (runGlyphRange.length == 0) return;
+        [self enumerateLineFragmentsForGlyphRange:runGlyphRange
+                                       usingBlock:^(CGRect lineRect, CGRect usedRect, NSTextContainer *lineContainer, NSRange lineGlyphRange, BOOL *lineStop) {
+            NSRange segment = NSIntersectionRange(lineGlyphRange, runGlyphRange);
+            if (segment.length == 0) return;
+            CGRect bounds = [self boundingRectForGlyphRange:segment inTextContainer:lineContainer];
+            CGFloat borderWidth = [style[@"borderWidth"] doubleValue];
+            CGFloat paddingTop = [style[@"paddingTop"] doubleValue];
+            CGFloat paddingBottom = [style[@"paddingBottom"] doubleValue];
+            CGFloat left = CGRectGetMinX(bounds) + origin.x;
+            CGFloat right = CGRectGetMaxX(bounds) + origin.x;
+            if (runRange.length >= 2) {
+                NSUInteger leadingCharacterIndex = runRange.location;
+                NSUInteger trailingCharacterIndex = NSMaxRange(runRange) - 1;
+                NSTextAttachment *leadingAttachment = [textStorage attribute:NSAttachmentAttributeName
+                                                                      atIndex:leadingCharacterIndex
+                                                               effectiveRange:NULL];
+                NSTextAttachment *trailingAttachment = [textStorage attribute:NSAttachmentAttributeName
+                                                                       atIndex:trailingCharacterIndex
+                                                                effectiveRange:NULL];
+                NSRange leadingGlyphRange = [self glyphRangeForCharacterRange:NSMakeRange(leadingCharacterIndex, 1)
+                                                          actualCharacterRange:NULL];
+                NSRange trailingGlyphRange = [self glyphRangeForCharacterRange:NSMakeRange(trailingCharacterIndex, 1)
+                                                           actualCharacterRange:NULL];
+                BOOL segmentOwnsEdges = leadingAttachment && trailingAttachment &&
+                    NSIntersectionRange(segment, leadingGlyphRange).length > 0 &&
+                    NSIntersectionRange(segment, trailingGlyphRange).length > 0;
+                if (segmentOwnsEdges) {
+                    CGPoint leadingLocation = [self locationForGlyphAtIndex:leadingGlyphRange.location];
+                    CGPoint trailingLocation = [self locationForGlyphAtIndex:trailingGlyphRange.location];
+                    CGFloat attachmentLeft = leadingLocation.x + origin.x;
+                    CGFloat attachmentRight = trailingLocation.x + origin.x +
+                        CGRectGetWidth(trailingAttachment.bounds);
+                    BOOL decorationEscapesEdges = left < attachmentLeft || right > attachmentRight;
+                    if (decorationEscapesEdges) {
+                        // Edge attachments define the group's horizontal layout advance.
+                        // Use them only when decoration inflates the glyph bounds, keeping
+                        // unaffected inline boxes on the existing painter pixel-for-pixel.
+                        CGFloat marginStart = [style[@"marginStart"] doubleValue];
+                        CGFloat marginEnd = [style[@"marginEnd"] doubleValue];
+                        left = attachmentLeft + marginStart;
+                        right = attachmentRight - marginEnd;
+                    }
+                }
+            }
+            if (right <= left) return;
+            CGFloat boxHeight = [style[@"boxHeight"] doubleValue];
+            if (boxHeight <= 0) {
+                boxHeight = CGRectGetHeight(bounds) + paddingTop + paddingBottom + borderWidth * 2.0;
+            }
+            CGFloat fragmentTop = CGRectGetMinY(lineRect) + origin.y;
+            CGFloat fragmentBottom = CGRectGetMaxY(lineRect) + origin.y;
+            CGFloat fragmentHeight = fragmentBottom - fragmentTop;
+            // Keep the intended box height whenever the line can contain it, but
+            // center the whole fill+border rect inside TextKit's drawable fragment.
+            // This preserves the chip height instead of trimming only its colored
+            // tail, while ensuring the border fully encloses the fill. Extremely
+            // short fragments fall back to their available height.
+            CGFloat paintedHeight = MIN(boxHeight, fragmentHeight);
+            CGFloat centerY = (fragmentTop + fragmentBottom) / 2.0;
+            CGFloat top = centerY - paintedHeight / 2.0;
+            CGFloat bottom = centerY + paintedHeight / 2.0;
+            if (bottom <= top) return;
+            CGRect rect = CGRectMake(left, top, right - left, bottom - top);
+            UIColor *fill = style[@"backgroundColor"];
+            UIColor *border = style[@"borderColor"];
+            CGFloat radius = [style[@"cornerRadius"] doubleValue];
+            if ([fill isKindOfClass:[UIColor class]]) {
+                CGContextSetFillColorWithColor(ctx, fill.CGColor);
+                UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:radius];
+                [path fill];
+            }
+            if ([border isKindOfClass:[UIColor class]] && borderWidth > 0) {
+                CGContextSetStrokeColorWithColor(ctx, border.CGColor);
+                CGContextSetLineWidth(ctx, borderWidth);
+                CGRect strokeRect = CGRectInset(rect, borderWidth / 2.0, borderWidth / 2.0);
+                UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:strokeRect cornerRadius:MAX(0, radius - borderWidth / 2.0)];
+                [path stroke];
+            }
+        }];
+    }];
+}
+
 - (void)dealloc{
 #if DEBUG
     
