@@ -221,3 +221,101 @@ index f1195407d1da29143954440dc58193d3d47a703b..b1fcf81f275441a88106452e29b36c63
          }
      }
  
+diff --git a/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m b/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7efd50b84d296594094b40cadcdf3238014b124
+--- /dev/null
++++ b/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m
+@@ -0,0 +1,59 @@
++// Regression: the blur event payload must carry the RAW output text
++// (attachments restored via kr_originlTextBeforeTextAttachment), never the
++// display string — otherwise a textPostProcessor field's blur would overwrite
++// the stored raw value with its visible placeholder.
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++#import "KRTextBlurEventPayload.h"
++#import "KuiklyRenderBridge.h"
++
++@interface KRBlurTestAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
++@end
++@implementation KRBlurTestAttachment
++- (NSString *)kr_originlTextBeforeTextAttachment { return @"@alice"; }
++@end
++
++static int failures = 0;
++#define KRAssert(cond, msg) do { if (!(cond)) { \
++    NSLog(@"FAIL: %s", msg); failures++; } else { NSLog(@"PASS: %s", msg); } } while (0)
++
++int main(void) {
++    @autoreleasepool {
++        // 1) Attachment restored to raw text; placeholder never leaks.
++        NSMutableAttributedString *display =
++            [[NSMutableAttributedString alloc] initWithString:@"hi \uFFFC"];
++        [display addAttribute:NSAttachmentAttributeName
++                        value:[KRBlurTestAttachment new]
++                        range:NSMakeRange(3, 1)];
++        NSDictionary *payload =
++            KRBlurEventPayloadFromAttributedText(display, nil, @(42));
++        KRAssert([payload[@"text"] isEqualToString:@"hi @alice"],
++                 "blur text is raw output text (attachment restored)");
++        KRAssert(![payload[@"text"] containsString:@"\uFFFC"],
++                 "blur text is not the display string");
++        KRAssert([payload[@"focusRequestId"] isEqualToNumber:@(42)],
++                 "focusRequestId carried through");
++
++        // 2) Plain attributed text passes through unchanged.
++        payload = KRBlurEventPayloadFromAttributedText(
++            [[NSAttributedString alloc] initWithString:@"plain"], nil, nil);
++        KRAssert([payload[@"text"] isEqualToString:@"plain"],
++                 "plain text passes through");
++        KRAssert(payload[@"focusRequestId"] == nil,
++                 "nil focusRequestId omitted from payload");
++
++        // 3) Empty string stays empty (explicit clear must not be lost).
++        payload = KRBlurEventPayloadFromAttributedText(
++            [[NSAttributedString alloc] initWithString:@""], nil, nil);
++        KRAssert([payload[@"text"] isEqualToString:@""],
++                 "explicit empty string preserved");
++
++        // 4) No attributed text -> plain-text fallback (raw current text).
++        payload = KRBlurEventPayloadFromAttributedText(nil, @"rawCurrent", nil);
++        KRAssert([payload[@"text"] isEqualToString:@"rawCurrent"],
++                 "nil attributedText falls back to plain text");
++
++        NSLog(@"%@", failures == 0 ? @"ALL PASS" : @"FAILURES");
++        return failures == 0 ? 0 : 1;
++    }
++}
+diff --git a/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh b/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..e8263f0b8441fd3a4d9329603a9a6e1389d006ab
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
++build_dir="${1:-$repo_root/build/ios-textarea-blur-raw-text-test}"
++mkdir -p "$build_dir"
++
++xcrun clang \
++  -fobjc-arc \
++  -fblocks \
++  -fmodules \
++  -Werror \
++  -Wno-incomplete-implementation \
++  -Wno-protocol \
++  -Wno-unused-parameter \
++  -DTARGET_OS_OSX=1 \
++  -framework AppKit \
++  -framework Foundation \
++  -I "$repo_root/core-render-ios/include" \
++  -I "$repo_root/core-render-ios/MacSupport" \
++  -I "$repo_root/core-render-ios/Extension/Components" \
++  -I "$repo_root/core-render-ios/Extension/BridgeProtocol" \
++  "$repo_root/core-render-ios/Extension/Components/KRTextBlurEventPayload.m" \
++  "$repo_root/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m" \
++  -o "$build_dir/KRTextBlurPayloadRawTextTest"
++
++"$build_dir/KRTextBlurPayloadRawTextTest"

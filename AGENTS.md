@@ -18,7 +18,6 @@ All human and agent contributors follow these rules.
 | `src/` (git-ignored) | materialized source: branch `patched` = `upstream-pin` + one commit per patch |
 | `script/release/` | release contract, publisher, producer and POM-consumer scripts (+ tests) |
 | `KUIKLY_RELEASE_SET`, `Gemfile*`, `.github/raft-artifacts/` | release set, CocoaPods pin, release metadata |
-| `tools/` | CI source-contract checkers and iOS/OHOS fixture runners; they read `src/` (or `$KUIKLY_SRC`) |
 | `.github/workflows/`, `.github/actions/sync/` | CI; every job runs `script/sync` then builds inside `src/` |
 
 Tooling that only *operates on* the source lives here. Anything the Gradle,
@@ -38,10 +37,10 @@ script/lint-patches && script/check-patches
 ```
 
 - **One logical change = one patch.** Commit only the final form. Never a fix+revert pair, never a "fix of fix" patch. Fold follow-ups into the owning patch.
-- Unit tests under a module's `src/*Test*/` go in the feature patch. CI-only checkers and harness runners go in `tools/` of this repo, never in a patch.
+- **Tests travel with their fix.** Module unit tests (`src/*Test*/`), source-contract checkers (`tools/check-*.py`), iOS/OHOS fixture sources and runners (`tools/*-renderer-tests/`) all go in the patch whose fix they verify, at their source-tree path. A helper shared by several fixes goes in the earliest owning patch. This repository keeps tests only for its own tooling (`script/release/test_kuikly_release_contract.py`).
 - Never hand-edit a `.patch` file. `script/check-patches` fails if the queue is not in canonical export form.
 - **Upstream backports:** in `src/`, run `git cherry-pick -x <upstream sha>`, keep upstream authorship, add the fork trailers, then export. When a backport replaces a fork patch, drop the fork patch.
-- **Dropping a patch:** drop its commit in `src/`, then export. Also remove any `tools/` checker or workflow step that asserts that feature.
+- **Dropping a patch:** drop its commit in `src/`, then export. Its tests go with it; remove the matching workflow step.
 - **Moving to a new upstream tag:**
   1. Update `ref` and `commit` in `patches/config.json`.
   2. Run `script/sync`. `git am --3way` stops on a conflict: resolve it keeping upstream behaviour plus our intent, then `git am --continue`.
@@ -72,10 +71,10 @@ script/lint-patches && script/check-patches
   - `common-core-android` (JVM + Web suites)
   - `ios-renderer` (fixtures + warnings-as-errors renderer build)
   - `ohos-native` (arm64 link)
-  - `source-contracts` (`tools/check-*.py` + OHOS host fixtures)
+  - `source-contracts` (`src/tools/check-*.py` + OHOS host fixtures, all shipped by patches)
 - **No local Gradle** (org rule). Locally, only run static checks:
   - `script/sync`, `script/lint-patches`, `script/check-patches`;
-  - `python3 script/release/test_kuikly_release_contract.py` and the `tools/check-*.py --self-test` checkers (run from `src/`);
+  - `python3 script/release/test_kuikly_release_contract.py` and `cd src && python3 tools/check-*.py --self-test`;
   - `bash -n`, YAML parse, and `git grep` that the symbols you reference exist.
 
   Compilation, unit tests and device checks belong to CI and real devices.

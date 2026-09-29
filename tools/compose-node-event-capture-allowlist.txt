@@ -1,2 +1,0 @@
-# path|event method|reason
-compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt|click|stable empty handler consumes native touch without capturing composition state

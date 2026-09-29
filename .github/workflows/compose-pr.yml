@@ -207,13 +207,13 @@ jobs:
             :compose:compileTestKotlinIosSimulatorArm64 \
             --no-build-cache --no-daemon
       - name: Run native text-input sequencing fixture
-        run: tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+        run: src/tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
       - name: textarea blur raw text regression
-        run: tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+        run: src/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
       - name: Run gradient rich-text optional dispatch fixture
-        run: tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+        run: src/tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
       - name: Run layout size report formatter fixture
-        run: tools/ios-renderer-tests/run-layout-size-formatter-test.sh
+        run: src/tools/ios-renderer-tests/run-layout-size-formatter-test.sh
       - name: Build production renderer with warnings as errors
         run: |
           mkdir -p build
@@ -232,7 +232,7 @@ jobs:
             build | tee build/ios-renderer.log
       - name: Run rich-text generic method contract fixture
         run: |
-          tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh \
+          src/tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh \
             src \
             build/ios-derived \
             build/rich-text-generic-method-fixture
@@ -285,6 +285,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          cd src
           tools/ohos-renderer-tests/run-arm64-direct-link.sh "$GITHUB_WORKSPACE/build/ohos-evidence"
       - name: Upload OHOS native evidence
         if: always()
@@ -298,7 +299,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        # Checkers read the materialized source; tools live one level up.
+        # Fix-specific checkers ship inside their patches (src/tools/).
         working-directory: src
     steps:
       - uses: actions/checkout@v4
@@ -306,23 +307,25 @@ jobs:
           ref: ${{ env.EXPECTED_HEAD_SHA }}
       - uses: ./.github/actions/sync
       - name: Reject stale native callbacks retained by Compose node initialization
-        run: python3 ../tools/check-compose-node-event-freshness.py --self-test
+        run: python3 tools/check-compose-node-event-freshness.py --self-test
       - name: Preserve active user motion when RecyclerView enters dragging
-        run: python3 ../tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
+        run: python3 tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
       - name: Keep DrawModifierNode view-aware production dispatch
-        run: python3 ../tools/check-draw-modifier-view-dispatch.py --self-test
+        run: python3 tools/check-draw-modifier-view-dispatch.py --self-test
       - name: Reject non-finite iOS scroll event values
-        run: python3 ../tools/check-ios-scroll-event-finiteness.py --self-test
+        run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
       - name: Preserve profiler file output across Pager and session lifecycle
-        run: python3 ../tools/check-profiler-file-output-lifecycle.py --self-test
+        run: python3 tools/check-profiler-file-output-lifecycle.py --self-test
       - name: Keep layout size reports ceiled to the hundredth on every renderer
-        run: python3 ../tools/check-layout-size-report-rounding.py --self-test
+        run: python3 tools/check-layout-size-report-rounding.py --self-test
       - name: Keep OHOS contentInset leading offsets aligned with the margin model
         run: core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
       - name: Keep OHOS layout size report formatter ceiled to the hundredth
         run: core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
       - name: Keep OHOS typed-avatar descriptors fail-closed
         run: core-render-ohos/src/test/cpp/run_avatar_image_model_test.sh
+      - name: Keep OHOS inline-box chrome with its text when wrapping
+        run: core-render-ohos/src/test/cpp/run_inline_box_atomic_text_edge_test.sh
 
   exact-matrix:
     if: always()
