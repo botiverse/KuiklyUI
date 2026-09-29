@@ -176,6 +176,8 @@ fun rememberMoveableDrawerState(
  * @param state The [MoveableDrawerState] to control this drawer. Create with [rememberMoveableDrawerState].
  * @param modifier Modifier for the drawer container.
  * @param scrimColor Color of the scrim overlay shown when the drawer is open.
+ * @param userScrollEnabled Whether pager gestures and pager scroll semantics are enabled. This
+ * does not affect programmatic [MoveableDrawerState.open] or [MoveableDrawerState.close] calls.
  * @param drawerContent Content of the drawer panel.
  * @param content Main content area.
  */
@@ -184,6 +186,7 @@ fun MoveableDrawer(
     state: MoveableDrawerState,
     modifier: Modifier = Modifier,
     scrimColor: Color = Color.Black.copy(alpha = 0.3f),
+    userScrollEnabled: Boolean = true,
     drawerContent: @Composable () -> Unit,
     content: @Composable () -> Unit
 ) {
@@ -194,12 +197,14 @@ fun MoveableDrawer(
     val drawerProgress by remember {
         derivedStateOf { state.progress }
     }
+    val interactionPolicy = moveableDrawerInteractionPolicy(userScrollEnabled)
 
     Box(modifier.fillMaxSize()) {
         DrawerHorizontalPager(
             state = state.internalState,
             modifier = Modifier.fillMaxSize(),
             beyondViewportPageCount = 1,
+            userScrollEnabled = interactionPolicy.pagerUserScrollEnabled,
         ) { page ->
             when (page) {
                 0 -> {
@@ -254,3 +259,14 @@ fun MoveableDrawer(
         }
     }
 }
+
+internal data class MoveableDrawerInteractionPolicy(
+    val pagerUserScrollEnabled: Boolean
+)
+
+internal fun moveableDrawerInteractionPolicy(
+    userScrollEnabled: Boolean
+): MoveableDrawerInteractionPolicy =
+    MoveableDrawerInteractionPolicy(
+        pagerUserScrollEnabled = userScrollEnabled
+    )
