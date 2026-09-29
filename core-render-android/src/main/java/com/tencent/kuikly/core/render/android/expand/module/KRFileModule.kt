@@ -19,6 +19,7 @@ import com.tencent.kuikly.core.render.android.css.ktx.toJSONObjectSafely
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderBaseModule
 import com.tencent.kuikly.core.render.android.export.KuiklyRenderCallback
 import java.io.File
+import java.util.concurrent.Executors
 
 /**
  * 文件读写 Module，提供 App Caches 目录的文件写入能力。
@@ -61,6 +62,7 @@ class KRFileModule : KuiklyRenderBaseModule() {
         val json = params.toJSONObjectSafely()
         val filename = json.optString(PARAM_FILENAME)
         val content = json.optString(PARAM_CONTENT)
+        val operationId = json.optString(PARAM_OPERATION_ID).orEmpty()
 
         if (filename.isNullOrEmpty() || content.isNullOrEmpty()) {
             callback?.invoke(mapOf("error" to "missing filename or content"))
@@ -73,25 +75,35 @@ class KRFileModule : KuiklyRenderBaseModule() {
             return
         }
 
-        Thread {
+        FILE_EXECUTOR.execute {
+            val file = File(dir, filename)
+            if (operationId.isNotEmpty() && COMPLETED_OPERATION_IDS.contains(operationId)) {
+                callback?.invoke(mapOf("path" to file.absolutePath))
+                return@execute
+            }
             try {
-                val file = File(dir, filename)
                 // 追加写，末尾加换行，适合 JSONL 格式
                 file.appendText(content + "\n", Charsets.UTF_8)
+                if (operationId.isNotEmpty()) {
+                    COMPLETED_OPERATION_IDS.add(operationId)
+                }
                 callback?.invoke(mapOf("path" to file.absolutePath))
             } catch (e: Exception) {
                 callback?.invoke(mapOf("error" to (e.message ?: "unknown error")))
             }
-        }.start()
+        }
     }
 
     private fun writeFile(params: String?, callback: KuiklyRenderCallback?) {
         val json = params.toJSONObjectSafely()
         val filename = json.optString(PARAM_FILENAME)
         val content = json.optString(PARAM_CONTENT)
+        val operationId = json.optString(PARAM_OPERATION_ID).orEmpty()
 
-        if (filename.isNullOrEmpty() || content.isNullOrEmpty()) {
-            callback?.invoke(mapOf("error" to "missing filename or content"))
+        // Empty content is a valid overwrite operation: profiler start/reset uses it to truncate
+        // the previous session's report before any new frame is recorded.
+        if (filename.isNullOrEmpty()) {
+            callback?.invoke(mapOf("error" to "missing filename"))
             return
         }
 
@@ -101,16 +113,24 @@ class KRFileModule : KuiklyRenderBaseModule() {
             return
         }
 
-        // 在后台线程执行文件写入，避免阻塞 UI
-        Thread {
+        // A process-wide FIFO keeps writes ordered even when a profiler operation is retried
+        // through another Pager after the first Pager lost its native callback.
+        FILE_EXECUTOR.execute {
+            val file = File(dir, filename)
+            if (operationId.isNotEmpty() && COMPLETED_OPERATION_IDS.contains(operationId)) {
+                callback?.invoke(mapOf("path" to file.absolutePath))
+                return@execute
+            }
             try {
-                val file = File(dir, filename)
                 file.writeText(content, Charsets.UTF_8)
+                if (operationId.isNotEmpty()) {
+                    COMPLETED_OPERATION_IDS.add(operationId)
+                }
                 callback?.invoke(mapOf("path" to file.absolutePath))
             } catch (e: Exception) {
                 callback?.invoke(mapOf("error" to (e.message ?: "unknown error")))
             }
-        }.start()
+        }
     }
 
     companion object {
@@ -120,5 +140,12 @@ class KRFileModule : KuiklyRenderBaseModule() {
         private const val METHOD_GET_FILES_DIR = "getFilesDir"
         private const val PARAM_FILENAME = "filename"
         private const val PARAM_CONTENT = "content"
+        private const val PARAM_OPERATION_ID = "operationId"
+
+        /** All accesses to [COMPLETED_OPERATION_IDS] run on this process-wide FIFO executor. */
+        private val FILE_EXECUTOR = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "KuiklyProfilerFile").apply { isDaemon = true }
+        }
+        private val COMPLETED_OPERATION_IDS = HashSet<String>()
     }
 }
