@@ -22,6 +22,7 @@ import com.tencent.kuikly.compose.coroutines.internal.KuiklyContextScheduler
 import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
 import com.tencent.kuikly.compose.ui.unit.IntOffset
+import com.tencent.kuikly.core.datetime.DateTime
 import com.tencent.kuikly.core.layout.Frame
 import com.tencent.kuikly.core.manager.BridgeManager
 import com.tencent.kuikly.core.pager.PageData
@@ -109,27 +110,29 @@ class KuiklyScrollInfo {
         private const val DEFAULT_CONTENT_SIZE = 3000
         private const val SCROLL_BOTTOM_THRESHOLD = 100
         private const val DEFAULT_DENSITY = 3f
+        internal const val IGNORE_SCROLL_OFFSET_TIMEOUT_NANOS = 1_000_000_000L
     }
 
     private val scrollViewBinding =
         ScrollViewBindingGate<ScrollerView<ScrollerAttr, ScrollerEvent>>()
 
     /**
-     * Scroll offset that needs to be ignored
+     * Monotonic clock for the programmatic-move guard; replaceable in tests.
+     */
+    internal var nanoClock: () -> Long = { DateTime.nanoTime() }
+
+    private var ignoreScrollOffsetSetAtNanos = 0L
+
+    /**
+     * Target of the pending programmatic offset move whose native echo must not
+     * be dispatched as user input. Stays armed until the echo arrives, the user
+     * starts dragging, or [IGNORE_SCROLL_OFFSET_TIMEOUT_NANOS] passes.
      */
     var ignoreScrollOffset: IntOffset? = null
-
-    internal fun consumeIgnoredScrollOffset(
-        offsetX: Float,
-        offsetY: Float,
-        epsilon: Double,
-    ): Boolean {
-        val ignoredOffset = ignoreScrollOffset ?: return false
-        val matched = kotlin.math.abs(ignoredOffset.x - offsetX) <= epsilon &&
-            kotlin.math.abs(ignoredOffset.y - offsetY) <= epsilon
-        ignoreScrollOffset = null
-        return matched
-    }
+        set(value) {
+            field = value
+            ignoreScrollOffsetSetAtNanos = if (value != null) nanoClock() else 0L
+        }
 
     /**
      * Disposition of a native scroll callback relative to a pending programmatic
@@ -143,12 +146,19 @@ class KuiklyScrollInfo {
      * compose; on a bottom-anchored list whose content size is still estimated
      * this feeds the expand/align retry loop and serially composes every row up
      * to the list start, blocking the Kotlin thread for seconds (task #318).
+     *
+     * The guard must also survive callbacks that were emitted before the move
+     * was applied. Android emits a stream of overscroll/bounce callbacks at the
+     * list start while a top expansion (>= 3000dp) is deferred to the next
+     * layout; if the first of them cleared the guard, the real echo would then
+     * be dispatched as a +3000dp user scroll and land the list at its end.
      */
     internal enum class NativeScrollEventDisposition {
         /** Exact echo of the programmatic move: drop the event entirely. */
         Consume,
-        /** Off-target echo of the programmatic move: adopt the reported offset
-         *  into bookkeeping, but never dispatch a compose scroll. */
+        /** Callback while a programmatic move is pending (or its echo was lost):
+         *  adopt the reported offset into bookkeeping, but never dispatch a
+         *  compose scroll. */
         SyncOnly,
         /** Genuine scroll: dispatch to compose. */
         Dispatch
@@ -159,12 +169,29 @@ class KuiklyScrollInfo {
         offsetY: Float,
         epsilon: Double,
     ): NativeScrollEventDisposition {
-        val hadPendingProgrammaticMove = ignoreScrollOffset != null
-        val matched = consumeIgnoredScrollOffset(offsetX, offsetY, epsilon)
+        val pending = ignoreScrollOffset ?: return NativeScrollEventDisposition.Dispatch
+        val matched = kotlin.math.abs(pending.x - offsetX) <= epsilon &&
+            kotlin.math.abs(pending.y - offsetY) <= epsilon
         return when {
-            matched -> NativeScrollEventDisposition.Consume
-            hadPendingProgrammaticMove && !isDragging -> NativeScrollEventDisposition.SyncOnly
-            else -> NativeScrollEventDisposition.Dispatch
+            matched -> {
+                ignoreScrollOffset = null
+                // A pending-window SyncOnly may have moved the bookkeeping to a
+                // stale pre-move offset; the echo confirms the move's target.
+                composeOffset = (if (isVertical()) pending.y else pending.x).toFloat()
+                NativeScrollEventDisposition.Consume
+            }
+            isDragging -> {
+                // A finger on the screen owns the viewport: never swallow real input.
+                ignoreScrollOffset = null
+                NativeScrollEventDisposition.Dispatch
+            }
+            nanoClock() - ignoreScrollOffsetSetAtNanos >= IGNORE_SCROLL_OFFSET_TIMEOUT_NANOS -> {
+                // The echo never matched (native clamped the move): adopt where
+                // native actually is, then resume normal dispatch.
+                ignoreScrollOffset = null
+                NativeScrollEventDisposition.SyncOnly
+            }
+            else -> NativeScrollEventDisposition.SyncOnly
         }
     }
 
