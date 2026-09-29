@@ -51,6 +51,7 @@ import com.tencent.kuikly.core.render.android.css.ktx.toColor
 import com.tencent.kuikly.core.render.android.css.ktx.toPxF
 import com.tencent.kuikly.core.render.android.css.ktx.toPxI
 import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
+import com.tencent.kuikly.core.views.TextConst
 import org.json.JSONObject
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -201,6 +202,18 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         if (spanProps.textDecoration.isNotEmpty()) {
             if (spanProps.textDecoration == KRTextProps.TEXT_DECORATION_LINE_THROUGH) {
                 textSpans.add(StrikethroughSpan())
+            } else if (
+                spanProps.textDecorationColor != null ||
+                spanProps.textDecorationThickness != null ||
+                spanProps.textDecorationOffset != null
+            ) {
+                textSpans.add(
+                    createKRCustomUnderlineSpan(
+                        color = spanProps.textDecorationColor,
+                        thickness = spanProps.textDecorationThickness,
+                        offset = spanProps.textDecorationOffset
+                    )
+                )
             } else {
                 textSpans.add(UnderlineSpan())
             }
@@ -254,6 +267,9 @@ class TextSpanProps(
     val fontStyle: Int
     val letterSpacing: Float
     val textDecoration: String
+    val textDecorationColor: Int?
+    val textDecorationThickness: Float?
+    val textDecorationOffset: Float?
     val lineHeight: Float
     val backgroundImage: String
     val backgroundColor: Int
@@ -297,6 +313,20 @@ class TextSpanProps(
             defaultProps.letterSpacing
         }
         textDecoration = spanValue.optString(KRTextProps.PROP_KEY_TEXT_DECORATION, defaultProps.textDecoration)
+        textDecorationColor =
+            spanValue.optString(TextConst.TEXT_DECORATION_COLOR)
+                .takeIf { it.isNotEmpty() }
+                ?.toColor()
+        textDecorationThickness =
+            spanValue.optDouble(TextConst.TEXT_DECORATION_THICKNESS, 0.0)
+                .toFloat()
+                .takeIf { it > 0f }
+                ?.let { kuiklyContext.toPxF(it) }
+        textDecorationOffset =
+            spanValue.optDouble(TextConst.TEXT_DECORATION_OFFSET, 0.0)
+                .toFloat()
+                .takeIf { it != 0f }
+                ?.let { kuiklyContext.toPxF(it) }
         lineHeight = if (spanValue.has(KRTextProps.PROP_KEY_LINE_HEIGHT)) {
             kuiklyContext.toPxF(spanValue.optDouble(KRTextProps.PROP_KEY_LINE_HEIGHT).toFloat())
         } else {
@@ -338,6 +368,41 @@ class PlaceholderSpanProps(spanValue: JSONObject, private val kuiklyContext: IKu
 data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
     override fun toString(): String {
         return "{$index, $start, $end}"
+    }
+}
+
+/**
+ * Uses a marker [CharacterStyle] whenever the caller customizes underline color, thickness, and/or
+ * offset.
+ * [KRRichTextViewDrawer] overlays those marked ranges in an isolated layer and punches gaps from
+ * the resolved glyph ink geometry, matching CSS `text-decoration-skip-ink: auto` while preserving
+ * existing text/background drawing. The marker remains breakable; the previous all-purpose
+ * [ReplacementSpan] made the complete decorated range one atomic layout run and could push a long
+ * URL outside its available width.
+ *
+ * Android does not expose a public underline-offset field on [TextPaint], so the drawer applies the
+ * requested offset directly without turning the decorated range into an atomic replacement.
+ */
+internal fun createKRCustomUnderlineSpan(
+    color: Int?,
+    thickness: Float?,
+    offset: Float?,
+): Any = KRSkipInkCustomUnderlineSpan(color = color, thickness = thickness, offset = offset)
+
+internal class KRSkipInkCustomUnderlineSpan(
+    internal val color: Int?,
+    internal val thickness: Float?,
+    internal val offset: Float?,
+) : CharacterStyle(), UpdateAppearance {
+
+    override fun updateDrawState(textPaint: TextPaint) {
+        // The view drawer owns this decoration. Keep Android TextLine's post-glyph underline paths
+        // disabled so there is one SSOT and glyph ink can cover the stroke.
+        textPaint.isUnderlineText = false
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            textPaint.underlineColor = 0
+            textPaint.underlineThickness = 0f
+        }
     }
 }
 

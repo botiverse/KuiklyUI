@@ -390,6 +390,21 @@ open class TextAttr : Attr() {
         return this
     }
 
+    open fun textDecorationColor(color: Color): TextAttr {
+        TextConst.TEXT_DECORATION_COLOR with color.toString()
+        return this
+    }
+
+    open fun textDecorationThickness(thickness: Float): TextAttr {
+        TextConst.TEXT_DECORATION_THICKNESS with thickness
+        return this
+    }
+
+    open fun textDecorationOffset(offset: Float): TextAttr {
+        TextConst.TEXT_DECORATION_OFFSET with offset
+        return this
+    }
+
     open fun textAlignCenter(): TextAttr {
         TextConst.TEXT_ALIGN with TextAlign.CENTER.value
         return this
@@ -538,6 +553,9 @@ object TextConst {
     const val FONT_FAMILY = "fontFamily"
     const val TEXT_OVERFLOW = "lineBreakMode"
     const val TEXT_DECORATION = "textDecoration"
+    const val TEXT_DECORATION_COLOR = "textDecorationColor"
+    const val TEXT_DECORATION_THICKNESS = "textDecorationThickness"
+    const val TEXT_DECORATION_OFFSET = "textDecorationOffset"
     const val TEXT_COLOR = "color"
     const val TINT_COLOR = "tintColor"
     const val LINES = "numberOfLines"

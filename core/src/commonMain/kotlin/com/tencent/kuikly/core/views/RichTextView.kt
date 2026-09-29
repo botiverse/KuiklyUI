@@ -437,6 +437,21 @@ open class TextSpan : TextAttr(), ISpan {
     private var clickHandlerFn: ((ClickParams) -> Unit)? = null
     private var longPressHandlerFn: ((LongPressParams) -> Unit)? = null
 
+    override fun textDecorationColor(color: Color): TextSpan {
+        TextConst.TEXT_DECORATION_COLOR with color.toString()
+        return this
+    }
+
+    override fun textDecorationThickness(thickness: Float): TextSpan {
+        TextConst.TEXT_DECORATION_THICKNESS with thickness
+        return this
+    }
+
+    override fun textDecorationOffset(offset: Float): TextSpan {
+        TextConst.TEXT_DECORATION_OFFSET with offset
+        return this
+    }
+
     fun click(handler: (ClickParams) -> Unit) {
         clickHandlerFn = handler
     }
