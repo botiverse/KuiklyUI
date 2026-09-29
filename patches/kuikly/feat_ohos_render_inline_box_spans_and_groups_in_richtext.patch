@@ -645,7 +645,7 @@ index 2173390aa1e6e2d990dbcff0937b2e8cb9f5046e..579ebb9b069ec78358b22b97a8492afb
      int SpanIndexAt(float x, float y);
      int ResolveLongPressSpanIndex(const KRRenderValueMap &params);
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
-index bfa37b5ee8e92193b4c218fbd537a1668c91f4fd..0917ec7ce6193d7f30a2bab6c725d5005f6b38c4 100644
+index cd2f1519f063d24c7c688c851a897bb2892a1781..6f4fd938b0700ea7f3e34ec439d3fa5698704440 100644
 --- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
 @@ -15,6 +15,8 @@
@@ -825,15 +825,15 @@ index bfa37b5ee8e92193b4c218fbd537a1668c91f4fd..0917ec7ce6193d7f30a2bab6c725d500
      // 决策 6C：image span（由 PostProcessor("richtext") 拆段产生）只在 V1（老 typography）
      // OnForegroundDraw 路径下能被绘制——因为 V2 的 StyledString 是交给 ArkUI 节点直接
      // 渲染，SDK 当前没暴露插入图片绘制 hook 的入口。这个判定已收敛到
-@@ -166,6 +308,7 @@ void KRRichTextView::DidRemoveFromParentView() {
+@@ -158,6 +300,7 @@ void KRRichTextView::DidRemoveFromParentView() {
+     IKRRenderViewExport::DidRemoveFromParentView();
      shadow_ = nullptr;
      paragraph_ = nullptr;
-     use_styled_string_ = false;
 +    has_explicit_accessibility_ = false;
      last_draw_frame_width_ = -1.0;
  }
  
-@@ -229,6 +372,11 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
+@@ -218,6 +361,11 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
          }
      }
  
@@ -845,7 +845,7 @@ index bfa37b5ee8e92193b4c218fbd537a1668c91f4fd..0917ec7ce6193d7f30a2bab6c725d500
      if (!selection_rects_.selection_rects.empty()) {
          double density = KRConfig::GetDpi();
          OH_Drawing_Brush *backgroundBrush = OH_Drawing_BrushCreate();
-@@ -265,6 +413,7 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
+@@ -254,6 +402,7 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
              }
          }
          if(line_count > 0){
@@ -853,7 +853,7 @@ index bfa37b5ee8e92193b4c218fbd537a1668c91f4fd..0917ec7ce6193d7f30a2bab6c725d500
              return;
          }
      }
-@@ -344,6 +493,9 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
+@@ -333,6 +482,9 @@ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
              OH_Drawing_TypographyDestroyTextBox(placeholder_rects);
          }
      }
@@ -863,7 +863,7 @@ index bfa37b5ee8e92193b4c218fbd537a1668c91f4fd..0917ec7ce6193d7f30a2bab6c725d500
  }
  
  void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &prop_value,
-@@ -378,6 +530,14 @@ void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &pr
+@@ -367,6 +519,14 @@ void KRRichTextView::ToSetProp(const std::string &prop_key, const KRAnyValue &pr
          IKRRenderViewExport::ToSetProp(prop_key, prop_value, middleManCallback);
      } else if(prop_key == kPropNameLineBreakMargin) {
          line_break_margin_ = prop_value->toFloat();
@@ -878,7 +878,7 @@ index bfa37b5ee8e92193b4c218fbd537a1668c91f4fd..0917ec7ce6193d7f30a2bab6c725d500
      }else {
          IKRRenderViewExport::ToSetProp(prop_key, prop_value, event_callback);
      }
-@@ -764,6 +924,9 @@ KRParagraphInfo KRRichTextView::GetParagraphInfo() {
+@@ -753,6 +913,9 @@ KRParagraphInfo KRRichTextView::GetParagraphInfo() {
  }
  
  std::string KRRichTextView::GetSelectedContent(std::string &pre, std::string &post) {
@@ -889,7 +889,7 @@ index bfa37b5ee8e92193b4c218fbd537a1668c91f4fd..0917ec7ce6193d7f30a2bab6c725d500
  
      if (selection_rects_.start > 0) {
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h
-index 9836f0b74908ab3bc49ab69043be372be3ef4d62..404ea0739a832d6a40767fac0aa960f88bd01c88 100644
+index 2f9d770bd46ee00a523b22a8f6cbd887c13e6eca..95ca6108dd791dbe56f7633f9c36fe52b7d8e923 100644
 --- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h
 @@ -157,7 +157,7 @@ class KRRichTextView : public IKRRenderViewExport {
@@ -908,4 +908,4 @@ index 9836f0b74908ab3bc49ab69043be372be3ef4d62..404ea0739a832d6a40767fac0aa960f8
 +    bool has_explicit_accessibility_ = false;
      std::shared_ptr<KRParagraph> paragraph_;
      std::shared_ptr<IKRRenderShadowExport> shadow_;
-     bool use_styled_string_ = false;
+     float last_draw_frame_width_ = -1.0;
