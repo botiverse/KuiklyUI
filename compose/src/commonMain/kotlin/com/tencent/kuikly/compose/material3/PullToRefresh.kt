@@ -176,6 +176,9 @@ class PullToRefreshState(
  * @param topInset Extra top inset for overlay header (e.g. collapsing HeaderBar).
  *   Pass the header's maximum height, not its animated height.
  * @param refreshThreshold Threshold to trigger refresh
+ * @param holdRefreshInset Whether the list should keep [refreshThreshold] top inset while
+ *   [state] is refreshing. Disable this when refresh progress is rendered outside the list and
+ *   existing content must return to its resting position immediately after the pull is released.
  * @param content Custom refresh indicator content
  */
 fun LazyListScope.pullToRefreshItem(
@@ -185,6 +188,7 @@ fun LazyListScope.pullToRefreshItem(
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
     refreshThreshold: Dp = 80.dp,
+    holdRefreshInset: Boolean = true,
     content: @Composable (
         pullProgress: Float,
         isRefreshing: Boolean,
@@ -204,6 +208,7 @@ fun LazyListScope.pullToRefreshItem(
             modifier = modifier,
             topInset = topInset,
             refreshThreshold = refreshThreshold,
+            holdRefreshInset = holdRefreshInset,
             content = content
         )
     }
@@ -221,6 +226,7 @@ internal fun PullToRefreshItem(
     modifier: Modifier = Modifier,
     topInset: Dp = 0.dp,
     refreshThreshold: Dp = 80.dp,
+    holdRefreshInset: Boolean = true,
     content: @Composable (
         pullProgress: Float,
         isRefreshing: Boolean,
@@ -303,7 +309,12 @@ internal fun PullToRefreshItem(
                                 "progress=$progress thresholdPx=$refreshThresholdPx"
                         }
                         state.updatePullState(PullState.PULLING)
-                        scrollView?.setContentInsetWhenEndDrag(top = refreshThresholdLogical)
+                        scrollView?.setContentInsetWhenEndDrag(
+                            top = pullRefreshEndDragInset(
+                                holdRefreshInset = holdRefreshInset,
+                                refreshThreshold = refreshThresholdLogical
+                            )
+                        )
                     }
                 }
                 PullState.PULLING -> {
@@ -318,11 +329,17 @@ internal fun PullToRefreshItem(
                         }
                     } else {
                         // Released while pulling, start refresh
+                        val releasedState = pullStateAfterRefreshRelease(holdRefreshInset)
                         pullToRefreshLog {
-                            "PULLING -> REFRESHING (release): offset=$contentOffset " +
-                                "pullDistance=$pullDistance"
+                            "PULLING -> $releasedState (release): offset=$contentOffset " +
+                                "pullDistance=$pullDistance holdRefreshInset=$holdRefreshInset"
                         }
-                        state.updatePullState(PullState.REFRESHING)
+                        state.updatePullState(releasedState)
+                        if (!holdRefreshInset) {
+                            state.updateProgress(0f)
+                            scrollView?.setContentInsetWhenEndDrag(top = 0f)
+                            scrollView?.setContentInset(top = 0f, animated = false)
+                        }
                         updatedOnRefresh()
                     }
                 }
@@ -337,14 +354,20 @@ internal fun PullToRefreshItem(
     }
 
     // Handle inset changes based on pull state
-    LaunchedEffect(state.pullState) {
+    LaunchedEffect(state.pullState, holdRefreshInset) {
         val scrollView = scrollState.kuiklyInfo.scrollView
         val isDragging = scrollView?.isDragging == true
         when (state.pullState) {
             PullState.REFRESHING -> {
                 suppressIdleInsetReset = false
-                pullToRefreshLog { "apply inset REFRESHING top=$refreshThresholdLogical animated=true" }
-                scrollView?.setContentInset(top = refreshThresholdLogical, animated = true)
+                if (holdRefreshInset) {
+                    pullToRefreshLog { "apply inset REFRESHING top=$refreshThresholdLogical animated=true" }
+                    scrollView?.setContentInset(top = refreshThresholdLogical, animated = true)
+                } else {
+                    pullToRefreshLog { "skip inset REFRESHING holdRefreshInset=false" }
+                    scrollView?.setContentInsetWhenEndDrag(top = 0f)
+                    scrollView?.setContentInset(top = 0f, animated = false)
+                }
             }
             PullState.IDLE -> {
                 // Never apply contentInset while dragging:
@@ -379,8 +402,8 @@ internal fun PullToRefreshItem(
     }
 
     // Sync external refresh state
-    LaunchedEffect(state.isRefreshing) {
-        if (state.isRefreshing) {
+    LaunchedEffect(state.isRefreshing, holdRefreshInset) {
+        if (state.isRefreshing && holdRefreshInset) {
             if (state.pullState != PullState.REFRESHING) {
                 state.updatePullState(PullState.REFRESHING)
             }
@@ -404,6 +427,15 @@ internal fun PullToRefreshItem(
         content(state.pullProgress, state.isRefreshing, refreshThreshold)
     }
 }
+
+internal fun pullStateAfterRefreshRelease(holdRefreshInset: Boolean): PullState =
+    if (holdRefreshInset) PullState.REFRESHING else PullState.IDLE
+
+internal fun pullRefreshEndDragInset(
+    holdRefreshInset: Boolean,
+    refreshThreshold: Float
+): Float =
+    if (holdRefreshInset) refreshThreshold.coerceAtLeast(0f) else 0f
 
 /**
  * Default refresh indicator
