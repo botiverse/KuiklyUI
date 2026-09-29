@@ -21,7 +21,6 @@ import com.tencent.kuikly.compose.profiler.RecompositionFrameEndEvent
 import com.tencent.kuikly.compose.profiler.RecompositionFrameStartEvent
 import com.tencent.kuikly.compose.profiler.RecompositionOutputStrategy
 import com.tencent.kuikly.compose.profiler.RecompositionReport
-import com.tencent.kuikly.core.log.KLog
 
 /**
  * 日志输出策略。
@@ -55,12 +54,12 @@ class LogOutputStrategy(
         for (event in events) {
             when (event) {
                 is RecompositionFrameStartEvent -> {
-                    KLog.d(TAG, "Frame #${event.frameId} START (ts=${event.timestampMs}ms)")
+                    logDebug("Frame #${event.frameId} START (ts=${event.timestampMs}ms)")
                     indent++
                 }
                 is RecompositionFrameEndEvent -> {
                     indent = (indent - 1).coerceAtLeast(0)
-                    KLog.d(TAG, "Frame #${event.frameId} END (duration=${event.durationMs}ms, recomposed=${event.recomposedCount})")
+                    logDebug("Frame #${event.frameId} END (duration=${event.durationMs}ms, recomposed=${event.recomposedCount})")
                 }
                 is ComposableRecomposedEvent -> {
                     if (event.composableName == "<anonymous>") continue
@@ -72,7 +71,7 @@ class LogOutputStrategy(
                         " triggers=[${event.triggerStates.joinToString(", ")}]"
                     } else ""
                     val indent2 = indentStr(indent)
-                    KLog.d(TAG, "${indent2}RECOMPOSED: ${event.composableName}$locationInfo (${event.durationMs}ms)$scopeInfo$parentInfo$paramInfo$statesInfo")
+                    logDebug("${indent2}RECOMPOSED: ${event.composableName}$locationInfo (${event.durationMs}ms)$scopeInfo$parentInfo$paramInfo$statesInfo")
                 }
                 else -> { /* TouchContextEvent / ScrollContextEvent — not logged per-frame */ }
             }
@@ -80,20 +79,20 @@ class LogOutputStrategy(
     }
 
     override fun onReportReady(report: RecompositionReport) {
-        KLog.i(TAG, "=== Recomposition Report ===")
-        KLog.i(TAG, "Session: ${report.sessionId}")
-        KLog.i(TAG, "Duration: ${report.durationMs}ms | Frames: ${report.totalFrames} | Recompositions: ${report.totalRecompositions}")
+        logInfo("=== Recomposition Report ===")
+        logInfo("Session: ${report.sessionId}")
+        logInfo("Duration: ${report.durationMs}ms | Frames: ${report.totalFrames} | Recompositions: ${report.totalRecompositions}")
 
         if (report.hotspots.isNotEmpty()) {
-            KLog.i(TAG, "--- HOTSPOTS ---")
+            logInfo("--- HOTSPOTS ---")
             for (hotspot in report.hotspots) {
                 val loc = if (hotspot.sourceLocation != null) " @${hotspot.sourceLocation}" else ""
-                KLog.i(TAG, "  ${hotspot.name}$loc: ${hotspot.recompositionCount}x (avg=${formatFloat(hotspot.avgDurationMs)}ms, max=${hotspot.maxDurationMs}ms)")
+                logInfo("  ${hotspot.name}$loc: ${hotspot.recompositionCount}x (avg=${formatFloat(hotspot.avgDurationMs)}ms, max=${hotspot.maxDurationMs}ms)")
             }
         }
 
         if (report.composables.isNotEmpty()) {
-            KLog.i(TAG, "--- Composables ---")
+            logInfo("--- Composables ---")
             for (stats in report.composables) {
                 val marker = if (stats.isHotspot) " [HOTSPOT]" else ""
                 val paramInfo = if (stats.paramChangeFrequency.isNotEmpty()) {
@@ -110,7 +109,7 @@ class LogOutputStrategy(
                     " no state change"
                 }
                 val loc = if (stats.sourceLocation != null) " @${stats.sourceLocation}" else ""
-                KLog.i(TAG, "  ${stats.name}$loc: ${stats.recompositionCount}x (avg=${formatFloat(stats.avgDurationMs)}ms)$marker$paramInfo$stateInfo")
+                logInfo("  ${stats.name}$loc: ${stats.recompositionCount}x (avg=${formatFloat(stats.avgDurationMs)}ms)$marker$paramInfo$stateInfo")
                 // Scope 分布行
                 if (stats.scopeDistribution.isNotEmpty() || stats.noScopeRecompositions > 0) {
                     val scopeInfo = if (stats.scopeDistribution.isNotEmpty()) {
@@ -121,10 +120,18 @@ class LogOutputStrategy(
                     } else {
                         "{}"
                     }
-                    KLog.i(TAG, "    → scopes: $scopeInfo, no-scope: ${stats.noScopeRecompositions}")
+                    logInfo("    → scopes: $scopeInfo, no-scope: ${stats.noScopeRecompositions}")
                 }
             }
         }
+    }
+
+    private fun logDebug(message: String) {
+        profilerLogDebug(TAG, message)
+    }
+
+    private fun logInfo(message: String) {
+        profilerLogInfo(TAG, message)
     }
 
     private fun indentStr(level: Int): String = "  ".repeat(level)
@@ -144,3 +151,7 @@ class LogOutputStrategy(
         return "$intPart.$fracPart"
     }
 }
+
+internal expect fun profilerLogDebug(tag: String, message: String)
+
+internal expect fun profilerLogInfo(tag: String, message: String)
