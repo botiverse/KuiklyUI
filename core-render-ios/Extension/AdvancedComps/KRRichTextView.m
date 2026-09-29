@@ -25,6 +25,9 @@ NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
 NSString *const kGradientInfoKeyFont = @"font";
 NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
 
+static NSString *const KRRichTextAccessibilityFocusMethod = @"accessibilityFocus";
+static NSString *const KRRichTextAccessibilityAnnounceMethod = @"accessibilityAnnounce";
+
 @interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
 
 @property (nonatomic, copy) NSString *originalText;
@@ -191,6 +194,16 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
 
 - (void)hrv_setPropWithKey:(NSString *)propKey propValue:(id)propValue {
     KUIKLY_SET_CSS_COMMON_PROP;
+}
+
+- (void)hrv_callWithMethod:(NSString *)method
+                    params:(NSString *)params
+                  callback:(KuiklyRenderCallback)callback {
+    if ([method isEqualToString:KRRichTextAccessibilityFocusMethod]) {
+        UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, self);
+    } else if ([method isEqualToString:KRRichTextAccessibilityAnnounceMethod] && params.length > 0) {
+        UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, params);
+    }
 }
 
 - (void)hrv_prepareForeReuse {
