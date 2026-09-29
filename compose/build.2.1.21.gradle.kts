@@ -81,6 +81,7 @@ kotlin {
 
         commonTest.dependencies {
             implementation(kotlin("test"))
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
         }
 
         val runtimeLegacyTest by creating {
@@ -88,6 +89,9 @@ kotlin {
         }
         val androidUnitTest by getting {
             dependsOn(runtimeLegacyTest)
+            dependencies {
+                implementation("org.robolectric:robolectric:4.12.2")
+            }
         }
 
         // Normal 2.1.21 artifacts stay on Compose runtime 1.7.3 and disable prefetch.
