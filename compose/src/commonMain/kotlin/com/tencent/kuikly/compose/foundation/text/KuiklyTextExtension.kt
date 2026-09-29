@@ -398,8 +398,13 @@ internal fun RichTextAttr.applyAnnotatedString(
 
                 // Apply LinkAnnotation styles if found
                 linkAnnotation?.let { range ->
-                    val spanStyle = range.item.styles?.style ?: SpanStyle()
-                    applySpanStyle(spanStyle, density)
+                    // A style-less link is interaction metadata only. Applying
+                    // an empty SpanStyle writes empty font props onto the core
+                    // span and erases inherited/custom families (for example
+                    // Space Grotesk on a whole-body click annotation).
+                    range.item.styles?.style?.let { spanStyle ->
+                        applySpanStyle(spanStyle, density)
+                    }
 
                     // Add click event handler
                     click { _ ->
@@ -433,6 +438,11 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
     if (spanStyle.fontSize.isSpecified) {
         fontSize(scaleToDensity(density, spanStyle.fontSize.value))
     }
+    // Overlapping spans are lowered onto the same TextSpan in order, so a
+    // null fontFamily means "inherit the enclosing span", not "reset".
+    // applyFontFamily(null) would clear a family already written by an
+    // outer span; FontFamily.Default still reaches the reset branch.
+    spanStyle.fontFamily?.let { applyFontFamily(it) }
     applyFontWeight(spanStyle.fontWeight)
     applyFontStyle(spanStyle.fontStyle)
     applyShadow(spanStyle.shadow)
