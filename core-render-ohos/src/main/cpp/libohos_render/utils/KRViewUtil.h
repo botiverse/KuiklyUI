@@ -146,6 +146,8 @@ void UpdateNodeAccessibility(ArkUI_NodeHandle node, const std::string &accessibi
  *   checkbox → NODE_ACCESSIBILITY_ROLE = ARKUI_NODE_CHECKBOX
  *   search   → NODE_ACCESSIBILITY_ROLE = ARKUI_NODE_TEXT_INPUT（降级，与 Android EditText 语义对齐）
  *   none     → NODE_ACCESSIBILITY_MODE = ARKUI_ACCESSIBILITY_MODE_DISABLED（不设 role，改设 mode）
+ *   hidden   → NODE_ACCESSIBILITY_MODE = ARKUI_ACCESSIBILITY_MODE_DISABLED_FOR_DESCENDANTS
+ *              (hides the node and its whole subtree; no role is set)
  *
  * 注意：ArkUI_NodeType 枚举无 SEARCH/NONE 值，故 search 降级到 TEXT_INPUT，none 走 mode 通道。
  * 对 ArkTS 侧创建的 node 调用 setAttribute 会返回 106103（ARKUI_ERROR_CODE_ARKTS_NODE_NOT_SUPPORTED），

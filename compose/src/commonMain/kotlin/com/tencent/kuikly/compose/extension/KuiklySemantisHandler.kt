@@ -25,6 +25,7 @@ import com.tencent.kuikly.compose.ui.semantics.SemanticsOwner
 import com.tencent.kuikly.compose.ui.semantics.SemanticsProperties
 import com.tencent.kuikly.compose.ui.semantics.getAllSemanticsNodes
 import com.tencent.kuikly.compose.ui.semantics.getOrNull
+import com.tencent.kuikly.core.base.Attr
 import com.tencent.kuikly.core.base.attr.AccessibilityRole
 
 /**
@@ -35,7 +36,14 @@ import com.tencent.kuikly.core.base.attr.AccessibilityRole
  * 2. 感知 stateDescription 的新增、变化和消失，并提供回调接口供业务自定义处理。
  * 3. 内部维护节点 stateDescription 和原生语义状态，支持节点卸载与主动清理，防止内存泄漏。
  */
-class KuiklySemantisHandler {
+class KuiklySemantisHandler(
+    /**
+     * When true, a node that resolves to [AccessibilityRole.NONE] (no role and no text) gets the
+     * renderer's default role instead of an explicit "none". OHOS maps "none" to
+     * ARKUI_ACCESSIBILITY_MODE_DISABLED, which must not be applied to every role-less layout node.
+     */
+    private val rolelessNodesUseRendererDefault: () -> Boolean = { false }
+) {
 
     private val lastStateDescriptionMap = mutableMapOf<Int, String?>()
     private val nativeSemanticsNodes = NativeSemanticsNodeRegistry<KNode<*>>()
@@ -63,7 +71,8 @@ class KuiklySemantisHandler {
                 currentNativeNodes[nodeId] = this
                 val accessibility = buildAccessibilityText(node.config)
                 view.getViewAttr().accessibility(accessibility)
-                view.getViewAttr().accessibilityRole(
+                applyNativeAccessibilityRole(
+                    this,
                     resolveNativeAccessibilityRole(isInvisibleToUser, accessibility.isNotEmpty(), role)
                 )
                 view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
@@ -191,9 +200,16 @@ class KuiklySemantisHandler {
     private fun clearNativeSemantics(node: KNode<*>) {
         node.view.getViewAttr().apply {
             accessibility("")
-            accessibilityRole(AccessibilityRole.NONE)
             accessibilityInfo(false, false)
         }
+        applyNativeAccessibilityRole(node, AccessibilityRole.NONE)
+    }
+
+    private fun applyNativeAccessibilityRole(node: KNode<*>, role: AccessibilityRole) {
+        node.view.getViewAttr().setProp(
+            Attr.StyleConst.ACCESSIBILITY_ROLE,
+            nativeAccessibilityRoleValue(role, rolelessNodesUseRendererDefault())
+        )
     }
 
     private fun hideNativeSemantics(node: KNode<*>) {
@@ -223,6 +239,19 @@ internal fun resolveNativeAccessibilityRole(
     role == Role.Button -> AccessibilityRole.BUTTON
     role == Role.RadioButton -> AccessibilityRole.CHECKBOX
     else -> AccessibilityRole.TEXT
+}
+
+/**
+ * Wire value for the native accessibilityRole prop. An empty value is not a known role on any
+ * renderer, so it resets the node to the renderer default (OHOS: role/mode/group reset).
+ */
+internal fun nativeAccessibilityRoleValue(
+    role: AccessibilityRole,
+    rolelessNodesUseRendererDefault: Boolean
+): String = if (role == AccessibilityRole.NONE && rolelessNodesUseRendererDefault) {
+    ""
+} else {
+    role.roleName
 }
 
 internal class NativeSemanticsNodeRegistry<T : Any> {

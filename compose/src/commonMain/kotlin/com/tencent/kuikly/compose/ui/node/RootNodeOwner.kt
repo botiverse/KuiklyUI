@@ -121,7 +121,9 @@ internal class RootNodeOwner(
 //        }
     val owner: Owner = OwnerImpl(layoutDirection, coroutineContext, rootKView, density)
     val semanticsOwner = SemanticsOwner(owner.root)
-    private val semanticsKuiklyHandler = KuiklySemantisHandler()
+    private val semanticsKuiklyHandler = KuiklySemantisHandler(
+        rolelessNodesUseRendererDefault = { rootKView.getPager().pageData.isOhOs }
+    )
 
     val isSemanticsRunnnng: Boolean
         get() = rootKView.getPager().isAccessibilityRunning() ||
