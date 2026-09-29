@@ -1,2 +1,6 @@
 /src/
 __pycache__/
+# Bundler (CocoaPods pin) and CI evidence live outside src/
+/.bundle/
+/vendor/bundle/
+/build/

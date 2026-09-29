@@ -1,0 +1,37 @@
+name: Materialize patched Kuikly source
+description: >-
+  Restore the cached upstream pin, then run script/sync to materialize
+  src/ = upstream pin (patches/config.json) + patches/kuikly/.patches.
+outputs:
+  tree:
+    description: Materialized src/ tree hash
+    value: ${{ steps.sync.outputs.tree }}
+  commit:
+    description: Materialized src/ HEAD (deterministic for a given patches commit)
+    value: ${{ steps.sync.outputs.commit }}
+runs:
+  using: composite
+  steps:
+    - name: Read upstream pin
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        commit="$(python3 -c 'import json; print(json.load(open("patches/config.json"))["repos"][0]["commit"])')"
+        [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+        echo "commit=$commit" >> "$GITHUB_OUTPUT"
+    - name: Restore upstream objects
+      uses: actions/cache@v4
+      with:
+        path: src/.git
+        key: kuikly-upstream-${{ steps.pin.outputs.commit }}
+    - name: Sync patched source
+      id: sync
+      shell: bash
+      run: |
+        set -euo pipefail
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        git config --global --add safe.directory "$GITHUB_WORKSPACE/src"
+        script/sync --force
+        echo "tree=$(git -C src rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+        echo "commit=$(git -C src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
