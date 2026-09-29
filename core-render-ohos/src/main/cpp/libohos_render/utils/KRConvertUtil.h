@@ -42,6 +42,8 @@ OH_Drawing_TextAlign ConvertToTextAlign(const std::string &textAlign);
 
 OH_Drawing_TextDecoration ConvertToTextDecoration(const std::string &textDecoration);
 
+double ConvertToTextDecorationThicknessScale(double thicknessPx, double fontSizePx);
+
 OH_Drawing_EllipsisModal ConvertToTextBreakMode(const std::string &breakeMode);
 
 OH_Drawing_FontStyle ConvertToFontStyle(const std::string &fontStyle);
