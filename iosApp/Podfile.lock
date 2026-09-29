@@ -1,0 +1,42 @@
+PODS:
+  - demo (1.0)
+  - libpag (4.3.71)
+  - Masonry (1.1.0)
+  - OpenKuiklyIOSRender (2.0.0)
+  - SDWebImage (5.20.1):
+    - SDWebImage/Core (= 5.20.1)
+  - SDWebImage/Core (5.20.1)
+  - WMPlayer (5.0.0):
+    - Masonry
+
+DEPENDENCIES:
+  - demo (from `../demo`)
+  - libpag (~> 4.3.21)
+  - OpenKuiklyIOSRender (from `../`)
+  - SDWebImage (~> 5.20.1)
+  - WMPlayer (~> 5.0)
+
+SPEC REPOS:
+  trunk:
+    - libpag
+    - Masonry
+    - SDWebImage
+    - WMPlayer
+
+EXTERNAL SOURCES:
+  demo:
+    :path: "../demo"
+  OpenKuiklyIOSRender:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  demo: a2fcae57f9749308dbb32a0aa6f442e8caa1dfc0
+  libpag: ef557e782d9b1b8c694d7031977ac524f1b99260
+  Masonry: 678fab65091a9290e40e2832a55e7ab731aad201
+  OpenKuiklyIOSRender: 0ea7064904d6b4e1fd4d0f3f63b3230dfc1584d0
+  SDWebImage: 33d0f23bddeb5d209ae959153883247be6703713
+  WMPlayer: a914f80ed5dca7cd9e3a94ec07a2b02eec8c15c0
+
+PODFILE CHECKSUM: abb3b00ad549604735ab9e9a3cb62b80435fe61f
+
+COCOAPODS: 1.16.2
