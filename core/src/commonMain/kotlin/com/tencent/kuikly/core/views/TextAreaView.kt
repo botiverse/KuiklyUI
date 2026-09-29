@@ -722,7 +722,14 @@ open class TextAreaEvent : Event() {
         this.register(INPUT_FOCUS){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(
+                InputParams(
+                    text = text,
+                    focusRequestId = focusRequestId,
+                    focusIntentOnly = it.optBoolean("focusIntentOnly"),
+                ),
+            )
         }
     }
     /**
@@ -733,7 +740,8 @@ open class TextAreaEvent : Event() {
         this.register(INPUT_BLUR){
             it as JSONObject
             val text = it.optString("text")
-            handler(InputParams(text))
+            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
+            handler(InputParams(text, focusRequestId = focusRequestId))
         }
     }
 
