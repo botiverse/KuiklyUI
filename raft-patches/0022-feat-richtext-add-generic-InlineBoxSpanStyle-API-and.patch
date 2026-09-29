@@ -1,0 +1,1210 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:14:28 +0000
+Subject: [PATCH] feat(richtext): add generic InlineBoxSpanStyle API and
+ compose lowering
+
+Introduce InlineBoxSpanStyle (background, border, padding, margin, corner
+radius) on Compose SpanStyle/link styles and in core. applyAnnotatedString
+now lowers each inline-box range to one InlineBoxGroupSpan that keeps its
+styled children, semantic text and placeholders, instead of copying the box
+onto every flattened fragment. Span rect lookups accept "index child" paths
+so placeholders inside a group still resolve. Renderers follow separately.
+
+Fork-Patch: richtext-inline-box-api-compose
+Origin: 73fc777a 7ed15b7d e845df56 3099998f dd54e166 61da1f63 cd96a7f9
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../foundation/text/KuiklyTextExtension.kt    | 192 +++++++++++++---
+ .../text/modifiers/TextStringRichNode.kt      |  17 +-
+ .../compose/ui/text/InlineBoxSpanStyle.kt     |  37 ++++
+ .../kuikly/compose/ui/text/SpanStyle.kt       |  19 ++
+ .../kuikly/compose/ui/text/TextStyle.kt       |   3 +
+ .../text/InlineBoxGroupLoweringTest.kt        | 205 ++++++++++++++++++
+ .../compose/ui/text/InlineBoxSpanStyleTest.kt |  36 +++
+ .../kuikly/core/views/InlineBoxSpanStyle.kt   |  38 ++++
+ .../tencent/kuikly/core/views/RichTextView.kt | 148 ++++++++++++-
+ .../com/tencent/kuikly/core/views/TextView.kt |  10 +
+ docs/API/components/rich-text.md              |  83 +++++++
+ 11 files changed, 751 insertions(+), 37 deletions(-)
+ create mode 100644 compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyle.kt
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyleTest.kt
+ create mode 100644 core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InlineBoxSpanStyle.kt
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..79a6db2e96c5fba4e499e68d14ebd5deb5bd3a46 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+@@ -44,6 +44,8 @@ import com.tencent.kuikly.compose.ui.unit.isSpecified
+ import com.tencent.kuikly.core.base.Attr
+ import com.tencent.kuikly.core.base.Attr.StyleConst
+ import com.tencent.kuikly.core.views.ISpan
++import com.tencent.kuikly.core.views.InlineBoxGroupSpan
++import com.tencent.kuikly.core.views.InlineBoxSpanStyle as CoreInlineBoxSpanStyle
+ import com.tencent.kuikly.core.base.BoxShadow
+ import com.tencent.kuikly.core.collection.fastArrayListOf
+ import com.tencent.kuikly.core.collection.fastMutableSetOf
+@@ -322,15 +324,45 @@ internal fun RichTextAttr.applyAnnotatedString(
+         positions.add(range.end)
+     }
+ 
+-    // Collect ParagraphStyle positions
+-    annoText.paragraphStyles.forEach { range ->
++    // Collect LinkAnnotation positions
++    val linkAnnotations = annoText.getLinkAnnotations(0, annoText.length)
++    linkAnnotations.forEach { range ->
+         positions.add(range.start)
+         positions.add(range.end)
+     }
+ 
+-    // Collect LinkAnnotation positions
+-    val linkAnnotations = annoText.getLinkAnnotations(0, annoText.length)
+-    linkAnnotations.forEach { range ->
++    data class InlineBoxRange(
++        val style: com.tencent.kuikly.compose.ui.text.InlineBoxSpanStyle,
++        val start: Int,
++        val end: Int,
++    )
++
++    val rawInlineBoxRanges = (
++        annoText.spanStyles.mapNotNull { range ->
++            range.item.inlineBoxStyle?.let { InlineBoxRange(it, range.start, range.end) }
++        } +
++            linkAnnotations.mapNotNull { range ->
++                range.item.styles?.style?.inlineBoxStyle?.let {
++                    InlineBoxRange(it, range.start, range.end)
++                }
++            }
++        )
++    require(rawInlineBoxRanges.groupBy { it.start to it.end }.values.all { sameRange ->
++        sameRange.map { it.style }.distinct().size == 1
++    }) {
++        "Conflicting InlineBoxSpanStyle values on the same range are not supported"
++    }
++    val inlineBoxRanges = rawInlineBoxRanges
++        .distinctBy { it.start to it.end }
++        .sortedWith(compareBy({ it.start }, { it.end }))
++    require(inlineBoxRanges.zipWithNext().none { (left, right) ->
++        right.start < left.end
++    }) {
++        "Overlapping InlineBoxSpanStyle ranges are not supported"
++    }
++
++    // Collect ParagraphStyle positions
++    annoText.paragraphStyles.forEach { range ->
+         positions.add(range.start)
+         positions.add(range.end)
+     }
+@@ -350,10 +382,41 @@ internal fun RichTextAttr.applyAnnotatedString(
+ 
+     val sortedPositions = positions.sorted()
+ 
+-    // Process segments by positions
++    var activeInlineBoxRange: InlineBoxRange? = null
++    var activeInlineBoxGroup: InlineBoxGroupSpan? = null
++
++    fun flushInlineBoxGroup() {
++        activeInlineBoxGroup?.let(spans::add)
++        activeInlineBoxGroup = null
++        activeInlineBoxRange = null
++    }
++
++    // Process segments by positions. An InlineBoxSpanStyle range is preserved
++    // as one explicit core group instead of being copied onto each flattened
++    // child span.
+     for (i in 0 until sortedPositions.size - 1) {
+         val start = sortedPositions[i]
+         val end = sortedPositions[i + 1]
++        val inlineBoxRange = inlineBoxRanges.firstOrNull { range ->
++            start >= range.start && end <= range.end
++        }
++
++        if (inlineBoxRange != activeInlineBoxRange) {
++            flushInlineBoxGroup()
++            if (inlineBoxRange != null) {
++                activeInlineBoxRange = inlineBoxRange
++                activeInlineBoxGroup = InlineBoxGroupSpan(
++                    inlineBoxRange.style.toCoreInlineBoxStyle()
++                ).apply {
++                    pagerId = this@applyAnnotatedString.pagerId
++                    semanticText(
++                        annoText.text
++                            .substring(inlineBoxRange.start, inlineBoxRange.end)
++                            .replace("\uFFFC", "")
++                    )
++                }
++            }
++        }
+ 
+         // Check if this range is a placeholder
+         val isPlaceholder = placeholders?.any {
+@@ -363,23 +426,75 @@ internal fun RichTextAttr.applyAnnotatedString(
+         if (isPlaceholder) {
+             // Create PlaceholderSpan
+             placeholders!!.find { it.start == start }?.let { placeholder ->
+-                spans.add(PlaceholderSpan().apply {
++                val span = PlaceholderSpan().apply {
+                     placeholderSize(
+                         this@applyAnnotatedString.scaleToDensity(density, placeholder.item.width.value),
+                         this@applyAnnotatedString.scaleToDensity(density, placeholder.item.height.value),
+                     )
+-                })
++                    // Preserve the AnnotatedString alternate text so native
++                    // selection/copy and accessibility do not degrade an
++                    // inline composable to PlaceholderSpan's default space.
++                    description(annoText.text.substring(start, end))
++                }
++                activeInlineBoxGroup?.addChild(span) ?: spans.add(span)
+             }
+         } else if (start < end) {
+             // Create TextSpan for normal text
+-            spans.add(TextSpan().apply {
++            val span = TextSpan().apply {
+                 this.pagerId = this@applyAnnotatedString.pagerId
+                 text(annoText.text.substring(start, end))
+ 
+-                // Apply SpanStyle
+-                annoText.spanStyles
++                val linkAnnotation = linkAnnotations
++                    .firstOrNull { range -> !(end <= range.start || start >= range.end) }
++                val overlappingSpanStyles = annoText.spanStyles
+                     .filter { range -> !(end <= range.start || start >= range.end) }
+-                    .forEach { range -> applySpanStyle(range.item, density) }
++
++                if (inlineBoxRange != null) {
++                    // Paragraph/body spans commonly cover the whole link range. Apply
++                    // those inherited defaults first so the link's typography remains
++                    // authoritative, while strictly inner spans can still override it.
++                    overlappingSpanStyles
++                        .filter { range ->
++                            range.start <= inlineBoxRange.start && range.end >= inlineBoxRange.end
++                        }
++                        .forEach { range ->
++                            applySpanStyle(
++                                range.item,
++                                density,
++                                includeInlineBox = false,
++                                preserveInheritedFontFamily = true,
++                            )
++                        }
++
++                    // Geometry and background belong to the outer group. Children keep
++                    // only link typography/foreground/decoration.
++                    linkAnnotation?.item?.styles?.style?.let { linkStyle ->
++                        applySpanStyle(
++                            linkStyle.copy(
++                                background = Color.Unspecified,
++                                inlineBoxStyle = null,
++                            ),
++                            density,
++                        )
++                    }
++
++                    overlappingSpanStyles
++                        .filter { range ->
++                            range.start > inlineBoxRange.start || range.end < inlineBoxRange.end
++                        }
++                        .forEach { range ->
++                            applySpanStyle(
++                                range.item,
++                                density,
++                                includeInlineBox = false,
++                                preserveInheritedFontFamily = true,
++                            )
++                        }
++                } else {
++                    overlappingSpanStyles.forEach { range ->
++                        applySpanStyle(range.item, density)
++                    }
++                }
+ 
+                 // Apply ParagraphStyle
+                 annoText.paragraphStyles
+@@ -392,18 +507,15 @@ internal fun RichTextAttr.applyAnnotatedString(
+                         }
+                     }
+ 
+-                // Handle LinkAnnotation for current range
+-                val linkAnnotation = linkAnnotations
+-                    .firstOrNull { range -> !(end <= range.start || start >= range.end) }
+-
+-                // Apply LinkAnnotation styles if found
+                 linkAnnotation?.let { range ->
+-                    // A style-less link is interaction metadata only. Applying
+-                    // an empty SpanStyle writes empty font props onto the core
+-                    // span and erases inherited/custom families (for example
+-                    // Space Grotesk on a whole-body click annotation).
+-                    range.item.styles?.style?.let { spanStyle ->
+-                        applySpanStyle(spanStyle, density)
++                    if (inlineBoxRange == null) {
++                        // A style-less link is interaction metadata only. Applying
++                        // an empty SpanStyle writes empty font props onto the core
++                        // span and erases inherited/custom families (for example
++                        // Space Grotesk on a whole-body click annotation).
++                        range.item.styles?.style?.let { spanStyle ->
++                            applySpanStyle(spanStyle, density)
++                        }
+                     }
+ 
+                     // Add click event handler
+@@ -414,9 +526,11 @@ internal fun RichTextAttr.applyAnnotatedString(
+                     // Call applyLinkStyle for future extensions
+                     applyLinkStyle(range.item)
+                 }
+-            })
++            }
++            activeInlineBoxGroup?.addChild(span) ?: spans.add(span)
+         }
+     }
++    flushInlineBoxGroup()
+ 
+     if (spans.isEmpty()) {
+         spans.add(TextSpan().apply {
+@@ -433,12 +547,19 @@ internal fun TextSpan.applyLinkStyle(link: LinkAnnotation) {
+ }
+ 
+ // Helper method to apply SpanStyle
+-internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
++internal fun TextSpan.applySpanStyle(
++    spanStyle: SpanStyle,
++    density: Density,
++    includeInlineBox: Boolean = true,
++    preserveInheritedFontFamily: Boolean = false,
++) {
+     // Apply font styles
+     if (spanStyle.fontSize.isSpecified) {
+         fontSize(scaleToDensity(density, spanStyle.fontSize.value))
+     }
+-    applyFontFamily(spanStyle.fontFamily)
++    if (!preserveInheritedFontFamily || spanStyle.fontFamily != null) {
++        applyFontFamily(spanStyle.fontFamily)
++    }
+     applyFontWeight(spanStyle.fontWeight)
+     applyFontStyle(spanStyle.fontStyle)
+     applyShadow(spanStyle.shadow)
+@@ -447,6 +568,11 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+     if (spanStyle.background.isSpecified) {
+         setProp(Attr.StyleConst.BACKGROUND_COLOR, spanStyle.background.toKuiklyColor().toString())
+     }
++    if (includeInlineBox) {
++        spanStyle.inlineBoxStyle?.let { box ->
++            inlineBoxStyle(box.toCoreInlineBoxStyle())
++        }
++    }
+     if (spanStyle.brush is SolidColor) {
+         color((spanStyle.brush as SolidColor).value.toKuiklyColor())
+     } else if (spanStyle.brush is LinearGradient) {
+@@ -478,3 +604,17 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+         letterSpacing(spanStyle.letterSpacing.value)
+     }
+ }
++
++private fun com.tencent.kuikly.compose.ui.text.InlineBoxSpanStyle.toCoreInlineBoxStyle() =
++    CoreInlineBoxSpanStyle(
++        backgroundColor = backgroundColor.takeIf { it.isSpecified }?.toKuiklyColor(),
++        borderColor = borderColor.takeIf { it.isSpecified }?.toKuiklyColor(),
++        borderWidth = borderWidth.value,
++        paddingStart = paddingStart.value,
++        paddingEnd = paddingEnd.value,
++        paddingTop = paddingTop.value,
++        paddingBottom = paddingBottom.value,
++        marginStart = marginStart.value,
++        marginEnd = marginEnd.value,
++        cornerRadius = cornerRadius.value,
++    )
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/modifiers/TextStringRichNode.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/modifiers/TextStringRichNode.kt
+index e770cbabb131272e077ce49d792b74f06df56214..561acca6414dbc1cde7e7dc6cbd83adf0681fb07 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/modifiers/TextStringRichNode.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/modifiers/TextStringRichNode.kt
+@@ -62,6 +62,7 @@ import com.tencent.kuikly.compose.ui.unit.constrain
+ import com.tencent.kuikly.core.layout.Frame
+ import com.tencent.kuikly.core.manager.BridgeManager
+ import com.tencent.kuikly.core.views.PlaceholderSpan
++import com.tencent.kuikly.core.views.InlineBoxGroupSpan
+ import com.tencent.kuikly.core.views.RichTextAttr
+ import com.tencent.kuikly.core.views.RichTextView
+ import com.tencent.kuikly.core.views.TextConst
+@@ -233,10 +234,17 @@ internal class TextStringRichNode(
+         val pageDensity = textView!!.getPager().pagerDensity()
+         // 遍历所有文本片段,处理占位符
+         textView?.getViewAttr()?.getSpans()?.forEachIndexed { index, span ->
+-            if (span !is PlaceholderSpan) return@forEachIndexed
+-
++            val placeholders = when (span) {
++                is PlaceholderSpan -> listOf(null to span)
++                is InlineBoxGroupSpan -> span.childrenForLayout().mapIndexedNotNull { childIndex, child ->
++                    (child as? PlaceholderSpan)?.let { childIndex to it }
++                }
++                else -> emptyList()
++            }
++            placeholders.forEach { (childIndex, placeholderSpan) ->
+             // 获取占位符的位置和大小信息
+-            val rectStr = textView.shadow?.callMethod("spanRect", index.toString())
++            val rectTarget = childIndex?.let { "$index $it" } ?: index.toString()
++            val rectStr = textView.shadow?.callMethod("spanRect", rectTarget)
+             if (rectStr.isNullOrEmpty()) return@forEachIndexed
+ 
+             // 解析位置和大小信息
+@@ -249,13 +257,14 @@ internal class TextStringRichNode(
+             }
+ 
+             // 更新占位符的frame并添加到矩形列表
+-            span.spanFrame = Frame(x, y, width, height)
++            placeholderSpan.spanFrame = Frame(x, y, width, height)
+             placeholderRects.add(
+                 Rect(
+                     offset = Offset(x * pageDensity, y * pageDensity),
+                     size = Size(width * pageDensity, height * pageDensity)
+                 )
+             )
++            }
+         }
+ 
+         val effectiveAnnotated = annotatedText ?: AnnotatedString(plainText ?: "")
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyle.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyle.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..d525c6a27dae7dc14cc2673e2f2bafc5136c825a
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyle.kt
+@@ -0,0 +1,37 @@
++/*
++ * Copyright 2019 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.text
++
++import androidx.compose.runtime.Immutable
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.unit.Dp
++import com.tencent.kuikly.compose.ui.unit.dp
++
++/** Generic box decoration applied to an existing [SpanStyle] range. */
++@Immutable
++data class InlineBoxSpanStyle(
++    val backgroundColor: Color = Color.Unspecified,
++    val borderColor: Color = Color.Unspecified,
++    val borderWidth: Dp = 0.dp,
++    val paddingStart: Dp = 0.dp,
++    val paddingEnd: Dp = 0.dp,
++    val paddingTop: Dp = 0.dp,
++    val paddingBottom: Dp = 0.dp,
++    val marginStart: Dp = 0.dp,
++    val marginEnd: Dp = 0.dp,
++    val cornerRadius: Dp = 0.dp,
++)
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt
+index b32a70bf5da84559a284aa69c76c8dc36578751d..59937c2568819ef9d900889ac63ee14748b55a4a 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt
+@@ -101,6 +101,7 @@ class SpanStyle internal constructor(
+ //    val textGeometricTransform: TextGeometricTransform? = null,
+ //    val localeList: LocaleList? = null,
+     val background: Color = Color.Unspecified,  // kuikly暂时不支持
++    val inlineBoxStyle: InlineBoxSpanStyle? = null,
+     val textDecoration: TextDecoration? = null,
+     val shadow: Shadow? = null,
+     val textDecorationColor: Color = Color.Unspecified,
+@@ -161,6 +162,7 @@ class SpanStyle internal constructor(
+ //        textGeometricTransform: TextGeometricTransform? = null,
+ //        localeList: LocaleList? = null,
+         background: Color = Color.Unspecified,
++        inlineBoxStyle: InlineBoxSpanStyle? = null,
+         textDecoration: TextDecoration? = null,
+         shadow: Shadow? = null,
+         textDecorationColor: Color = Color.Unspecified,
+@@ -181,6 +183,7 @@ class SpanStyle internal constructor(
+ //        textGeometricTransform = textGeometricTransform,
+ //        localeList = localeList,
+         background = background,
++        inlineBoxStyle = inlineBoxStyle,
+         textDecoration = textDecoration,
+         shadow = shadow,
+         textDecorationColor = textDecorationColor,
+@@ -246,6 +249,7 @@ class SpanStyle internal constructor(
+ //        textGeometricTransform: TextGeometricTransform? = null,
+ //        localeList: LocaleList? = null,
+         background: Color = Color.Unspecified,
++        inlineBoxStyle: InlineBoxSpanStyle? = null,
+         textDecoration: TextDecoration? = null,
+         shadow: Shadow? = null,
+         textDecorationColor: Color = Color.Unspecified,
+@@ -266,6 +270,7 @@ class SpanStyle internal constructor(
+ //        textGeometricTransform = textGeometricTransform,
+ //        localeList = localeList,
+         background = background,
++        inlineBoxStyle = inlineBoxStyle,
+         textDecoration = textDecoration,
+         shadow = shadow,
+         textDecorationColor = textDecorationColor,
+@@ -318,6 +323,7 @@ class SpanStyle internal constructor(
+ //            textGeometricTransform = other.textGeometricTransform,
+ //            localeList = other.localeList,
+             background = other.background,
++            inlineBoxStyle = other.inlineBoxStyle,
+             textDecoration = other.textDecoration,
+             shadow = other.shadow,
+             textDecorationColor = other.textDecorationColor,
+@@ -347,6 +353,7 @@ class SpanStyle internal constructor(
+ //        textGeometricTransform: TextGeometricTransform? = this.textGeometricTransform,
+ //        localeList: LocaleList? = this.localeList,
+         background: Color = this.background,
++        inlineBoxStyle: InlineBoxSpanStyle? = this.inlineBoxStyle,
+         textDecoration: TextDecoration? = this.textDecoration,
+         shadow: Shadow? = this.shadow,
+         textDecorationColor: Color = this.textDecorationColor,
+@@ -372,6 +379,7 @@ class SpanStyle internal constructor(
+ //            textGeometricTransform = textGeometricTransform,
+ //            localeList = localeList,
+             background = background,
++            inlineBoxStyle = inlineBoxStyle,
+             textDecoration = textDecoration,
+             shadow = shadow,
+             textDecorationColor = textDecorationColor,
+@@ -396,6 +404,7 @@ class SpanStyle internal constructor(
+ //        textGeometricTransform: TextGeometricTransform? = this.textGeometricTransform,
+ //        localeList: LocaleList? = this.localeList,
+         background: Color = this.background,
++        inlineBoxStyle: InlineBoxSpanStyle? = this.inlineBoxStyle,
+         textDecoration: TextDecoration? = this.textDecoration,
+         shadow: Shadow? = this.shadow,
+         textDecorationColor: Color = this.textDecorationColor,
+@@ -417,6 +426,7 @@ class SpanStyle internal constructor(
+ //            textGeometricTransform = textGeometricTransform,
+ //            localeList = localeList,
+             background = background,
++            inlineBoxStyle = inlineBoxStyle,
+             textDecoration = textDecoration,
+             shadow = shadow,
+             textDecorationColor = textDecorationColor,
+@@ -447,6 +457,7 @@ class SpanStyle internal constructor(
+ //        if (textGeometricTransform != other.textGeometricTransform) return false
+ //        if (localeList != other.localeList) return false
+         if (background != other.background) return false
++        if (inlineBoxStyle != other.inlineBoxStyle) return false
+ //        if (platformStyle != other.platformStyle) return false
+         return true
+     }
+@@ -477,6 +488,7 @@ class SpanStyle internal constructor(
+ //        result = 31 * result + (textGeometricTransform?.hashCode() ?: 0)
+ //        result = 31 * result + (localeList?.hashCode() ?: 0)
+         result = 31 * result + background.hashCode()
++        result = 31 * result + (inlineBoxStyle?.hashCode() ?: 0)
+         result = 31 * result + (textDecoration?.hashCode() ?: 0)
+         result = 31 * result + textDecorationColor.hashCode()
+         result = 31 * result + textDecorationThickness.hashCode()
+@@ -499,6 +511,7 @@ class SpanStyle internal constructor(
+ //        result = 31 * result + (textGeometricTransform?.hashCode() ?: 0)
+ //        result = 31 * result + (localeList?.hashCode() ?: 0)
+         result = 31 * result + background.hashCode()
++        result = 31 * result + (inlineBoxStyle?.hashCode() ?: 0)
+ //        result = 31 * result + (platformStyle?.hashCode() ?: 0)
+         return result
+     }
+@@ -522,6 +535,7 @@ class SpanStyle internal constructor(
+ //            append("textGeometricTransform=$textGeometricTransform, ")
+ //            append("localeList=$localeList, ")
+             append("background=$background, ")
++            append("inlineBoxStyle=$inlineBoxStyle, ")
+             append("textDecoration=$textDecoration, ")
+             append("textDecorationColor=$textDecorationColor, ")
+             append("textDecorationThickness=$textDecorationThickness, ")
+@@ -612,6 +626,7 @@ fun lerp(start: SpanStyle, stop: SpanStyle, fraction: Float): SpanStyle {
+             stop.background,
+             fraction
+         ),
++        inlineBoxStyle = lerpDiscrete(start.inlineBoxStyle, stop.inlineBoxStyle, fraction),
+         textDecoration = lerpDiscrete(
+             start.textDecoration,
+             stop.textDecoration,
+@@ -676,6 +691,7 @@ internal fun resolveSpanStyleDefaults(style: SpanStyle) = SpanStyle(
+ //    textGeometricTransform = style.textGeometricTransform ?: TextGeometricTransform.None,
+ //    localeList = style.localeList ?: LocaleList.current,
+     background = style.background.takeOrElse { DefaultBackgroundColor },
++    inlineBoxStyle = style.inlineBoxStyle,
+     textDecoration = style.textDecoration ?: TextDecoration.None,
+     textDecorationColor = style.textDecorationColor,
+     textDecorationThickness = style.textDecorationThickness,
+@@ -700,6 +716,7 @@ internal fun SpanStyle.fastMerge(
+ //    textGeometricTransform: TextGeometricTransform?,
+ //    localeList: LocaleList?,
+     background: Color,
++    inlineBoxStyle: InlineBoxSpanStyle?,
+     textDecoration: TextDecoration?,
+     shadow: Shadow?,
+     textDecorationColor: Color = Color.Unspecified,
+@@ -742,6 +759,7 @@ internal fun SpanStyle.fastMerge(
+ //        textGeometricTransform != null && textGeometricTransform != this.textGeometricTransform ||
+ //        localeList != null && localeList != this.localeList ||
+         background.isSpecified && background != this.background ||
++        inlineBoxStyle != null && inlineBoxStyle != this.inlineBoxStyle ||
+         shadow != null && shadow != this.shadow
+ //            ||
+ //        platformStyle != null && platformStyle != this.platformStyle ||
+@@ -775,6 +793,7 @@ internal fun SpanStyle.fastMerge(
+ //        textGeometricTransform = textGeometricTransform ?: this.textGeometricTransform,
+ //        localeList = localeList ?: this.localeList,
+         background = background.takeOrElse { this.background },
++        inlineBoxStyle = inlineBoxStyle ?: this.inlineBoxStyle,
+         textDecoration = textDecoration ?: this.textDecoration,
+         textDecorationColor = textDecorationColor.takeOrElse { this.textDecorationColor },
+         textDecorationThickness = if (!textDecorationThickness.isUnspecified) {
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/TextStyle.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/TextStyle.kt
+index d993c1628f3a6eb587c089776853dcaae71c5fff..5f1670b36f3059aee083cdeaf9beb1d3438cfbb4 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/TextStyle.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/TextStyle.kt
+@@ -133,6 +133,7 @@ class TextStyle internal constructor(
+ //            textGeometricTransform = textGeometricTransform,
+ //            localeList = localeList,
+             background = background,
++            inlineBoxStyle = null,
+             textDecoration = textDecoration,
+             shadow = shadow,
+ //            platformStyle = platformStyle?.spanStyle,
+@@ -236,6 +237,7 @@ class TextStyle internal constructor(
+ //            textGeometricTransform = textGeometricTransform,
+ //            localeList = localeList,
+             background = background,
++            inlineBoxStyle = null,
+             textDecoration = textDecoration,
+             shadow = shadow,
+ //            platformStyle = platformStyle?.spanStyle,
+@@ -356,6 +358,7 @@ class TextStyle internal constructor(
+ //            textGeometricTransform = textGeometricTransform,
+ //            localeList = localeList,
+             background = background,
++            inlineBoxStyle = null,
+             textDecoration = textDecoration,
+             shadow = shadow,
+ //            platformStyle = platformStyle?.spanStyle,
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
+index 499d7f0437c94ea911c81ca5d63474f5e2be1320..735f15af131552caa600ca8a8bfc090764770346 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
+@@ -7,18 +7,28 @@
+ 
+ package com.tencent.kuikly.compose.foundation.text
+ 
++import com.tencent.kuikly.compose.ui.graphics.Color
+ import com.tencent.kuikly.compose.ui.text.AnnotatedString
++import com.tencent.kuikly.compose.ui.text.InlineBoxSpanStyle
+ import com.tencent.kuikly.compose.ui.text.LinkAnnotation
+ import com.tencent.kuikly.compose.ui.text.SpanStyle
++import com.tencent.kuikly.compose.ui.text.TextLinkStyles
+ import com.tencent.kuikly.compose.ui.text.font.FontFamily
+ import com.tencent.kuikly.compose.ui.text.font.FontWeight
++import com.tencent.kuikly.compose.ui.text.withLink
+ import com.tencent.kuikly.compose.ui.text.withStyle
+ import com.tencent.kuikly.compose.ui.unit.Density
++import com.tencent.kuikly.compose.ui.unit.dp
++import com.tencent.kuikly.core.base.Attr
++import com.tencent.kuikly.core.views.InlineBoxGroupSpan
++import com.tencent.kuikly.core.views.InlineBoxSpanStyle as CoreInlineBoxSpanStyle
++import com.tencent.kuikly.core.views.PlaceholderSpan
+ import com.tencent.kuikly.core.views.RichTextAttr
+ import com.tencent.kuikly.core.views.TextConst
+ import com.tencent.kuikly.core.views.TextSpan
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
++import kotlin.test.assertFailsWith
+ import kotlin.test.assertIs
+ 
+ class InlineBoxGroupLoweringTest {
+@@ -47,4 +57,199 @@ class InlineBoxGroupLoweringTest {
+         assertEquals("serif", spans[1].spanPropsMap()[TextConst.FONT_FAMILY])
+         assertEquals("700", spans[1].spanPropsMap()[TextConst.FONT_WEIGHT])
+     }
++
++    @Test
++    fun inlineBoxLinkStyleStillAppliesChildTypography() {
++        val box = InlineBoxSpanStyle(
++            backgroundColor = Color.Yellow,
++            borderColor = Color.Black,
++            borderWidth = 1.dp,
++            paddingStart = 4.dp,
++            paddingEnd = 4.dp,
++        )
++        val builder = AnnotatedString.Builder()
++        builder.withLink(
++            LinkAnnotation.Url(
++                url = "https://example.test/channel",
++                styles = TextLinkStyles(
++                    style = SpanStyle(
++                        background = Color.Yellow,
++                        fontWeight = FontWeight.Bold,
++                        inlineBoxStyle = box,
++                    ),
++                ),
++            ),
++        ) {
++            append("#channel")
++        }
++
++        val attr = RichTextAttr()
++        attr.applyAnnotatedString(
++            annoText = builder.toAnnotatedString(),
++            density = Density(1f),
++        )
++
++        val group = assertIs<InlineBoxGroupSpan>(attr.getSpans().single())
++        val child = assertIs<TextSpan>(group.childrenForLayout().single())
++        assertEquals("#channel", child.getText())
++        assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
++        assertEquals(null, child.spanPropsMap()[Attr.StyleConst.BACKGROUND_COLOR])
++    }
++
++    @Test
++    fun outerBodyStyleDoesNotOverrideInlineBoxLinkTypography() {
++        val box = InlineBoxSpanStyle(
++            backgroundColor = Color.Yellow,
++            borderColor = Color.Black,
++            borderWidth = 1.dp,
++        )
++        val builder = AnnotatedString.Builder()
++        builder.withStyle(
++            SpanStyle(
++                fontFamily = FontFamily.SansSerif,
++                fontWeight = FontWeight.Normal,
++            )
++        ) {
++            append("before ")
++            withLink(
++                LinkAnnotation.Url(
++                    url = "https://example.test/channel",
++                    styles = TextLinkStyles(
++                        style = SpanStyle(
++                            fontFamily = FontFamily.Serif,
++                            fontWeight = FontWeight.Bold,
++                            inlineBoxStyle = box,
++                        ),
++                    ),
++                ),
++            ) {
++                append("#channel")
++            }
++            append(" after")
++        }
++
++        val attr = RichTextAttr()
++        attr.applyAnnotatedString(
++            annoText = builder.toAnnotatedString(),
++            density = Density(1f),
++        )
++
++        val group = assertIs<InlineBoxGroupSpan>(attr.getSpans()[1])
++        val child = assertIs<TextSpan>(group.childrenForLayout().single())
++        assertEquals("#channel", child.getText())
++        assertEquals("serif", child.spanPropsMap()[TextConst.FONT_FAMILY])
++        assertEquals("700", child.spanPropsMap()[TextConst.FONT_WEIGHT])
++    }
++
++    @Test
++    fun linkStyleRangeLowersToOneGroupWithStyledChildren() {
++        val box = InlineBoxSpanStyle(
++            backgroundColor = Color.Yellow,
++            borderColor = Color.Black,
++            borderWidth = 1.dp,
++            paddingStart = 4.dp,
++            paddingEnd = 4.dp,
++            paddingTop = 1.dp,
++            paddingBottom = 1.dp,
++            marginStart = 2.dp,
++            marginEnd = 2.dp,
++        )
++        val builder = AnnotatedString.Builder()
++        builder.append("before ")
++        builder.withLink(
++            LinkAnnotation.Url(
++                url = "https://example.test/message",
++                styles = TextLinkStyles(style = SpanStyle(inlineBoxStyle = box)),
++            )
++        ) {
++            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
++                append("#proj")
++            }
++            append(" ")
++            withStyle(SpanStyle(color = Color.Gray)) {
++                append("msg")
++            }
++        }
++
++        val attr = RichTextAttr()
++        attr.applyAnnotatedString(
++            annoText = builder.toAnnotatedString(),
++            density = Density(1f),
++        )
++
++        val spans = attr.getSpans()
++        assertEquals(2, spans.size)
++        assertEquals("before ", assertIs<TextSpan>(spans[0]).getText())
++        val group = assertIs<InlineBoxGroupSpan>(spans[1])
++        val children = group.childrenForLayout()
++        assertEquals(3, children.size)
++        val label = assertIs<TextSpan>(children[0])
++        val suffix = assertIs<TextSpan>(children[2])
++
++        assertEquals("#proj", label.getText())
++        assertEquals("700", label.spanPropsMap()[TextConst.FONT_WEIGHT])
++        assertEquals("msg", suffix.getText())
++
++        val props = group.spanPropsMap()
++        assertEquals("#proj msg", props[InlineBoxGroupSpan.PROP_KEY_SEMANTIC_TEXT])
++    }
++
++    @Test
++    fun groupSerializationKeepsNestedPlaceholderPathsAndChildTypography() {
++        val group = InlineBoxGroupSpan(CoreInlineBoxSpanStyle(borderWidth = 1f)).apply {
++            semanticText("#proj msg")
++            addChild(PlaceholderSpan().apply { placeholderSize(12f, 12f) })
++            addChild(TextSpan().apply {
++                text("#proj")
++                setProp(TextConst.FONT_SIZE, 14f)
++                fontWeightBold()
++            })
++            addChild(PlaceholderSpan().apply { placeholderSize(6f, 1f) })
++            addChild(TextSpan().apply {
++                text("msg")
++                setProp(TextConst.FONT_SIZE, 10f)
++            })
++        }
++
++        @Suppress("UNCHECKED_CAST")
++        val children = group.spanPropsMap()[InlineBoxGroupSpan.PROP_KEY_CHILDREN] as List<Map<String, Any>>
++        assertEquals(12f, children[0][PlaceholderSpan.PROP_KEY_PLACEHOLDER_WIDTH])
++        assertEquals(14f, children[1][TextConst.FONT_SIZE])
++        assertEquals("700", children[1][TextConst.FONT_WEIGHT])
++        assertEquals(6f, children[2][PlaceholderSpan.PROP_KEY_PLACEHOLDER_WIDTH])
++        assertEquals(10f, children[3][TextConst.FONT_SIZE])
++    }
++
++    @Test
++    fun overlappingInlineBoxRangesFailFast() {
++        val box = InlineBoxSpanStyle(backgroundColor = Color.Yellow)
++        val text = AnnotatedString.Builder("abcdef").apply {
++            addStyle(SpanStyle(inlineBoxStyle = box), 0, 4)
++            addStyle(SpanStyle(inlineBoxStyle = box), 2, 6)
++        }.toAnnotatedString()
++
++        assertFailsWith<IllegalArgumentException> {
++            RichTextAttr().applyAnnotatedString(text, density = Density(1f))
++        }
++    }
++
++    @Test
++    fun conflictingInlineBoxStylesOnSameRangeFailFast() {
++        val text = AnnotatedString.Builder("chip").apply {
++            addStyle(
++                SpanStyle(inlineBoxStyle = InlineBoxSpanStyle(backgroundColor = Color.Yellow)),
++                0,
++                4,
++            )
++            addStyle(
++                SpanStyle(inlineBoxStyle = InlineBoxSpanStyle(backgroundColor = Color.Red)),
++                0,
++                4,
++            )
++        }.toAnnotatedString()
++
++        assertFailsWith<IllegalArgumentException> {
++            RichTextAttr().applyAnnotatedString(text, density = Density(1f))
++        }
++    }
+ }
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyleTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyleTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..d611508955d2dbefca2181158ac7eaf1b62e696f
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyleTest.kt
+@@ -0,0 +1,36 @@
++/*
++ * Copyright 2019 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ */
++
++package com.tencent.kuikly.compose.ui.text
++
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.unit.dp
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class InlineBoxSpanStyleTest {
++
++    @Test
++    fun mergeCarriesInlineBoxStyleOnExistingSpanStyle() {
++        val box = InlineBoxSpanStyle(
++            backgroundColor = Color.Yellow,
++            borderColor = Color.Black,
++            borderWidth = 1.dp,
++            paddingStart = 4.dp,
++            paddingEnd = 5.dp,
++        )
++
++        val merged = SpanStyle(color = Color.Red).merge(SpanStyle(inlineBoxStyle = box))
++
++        assertEquals(Color.Red, merged.color)
++        assertEquals(box, merged.inlineBoxStyle)
++        assertEquals(box, merged.copy().inlineBoxStyle)
++    }
++}
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InlineBoxSpanStyle.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InlineBoxSpanStyle.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..ee87720913d3ec7b1f5ebf45de2b75e0ac326533
+--- /dev/null
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InlineBoxSpanStyle.kt
+@@ -0,0 +1,38 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.views
++
++import com.tencent.kuikly.core.base.Color
++
++/**
++ * Semantic-agnostic inline box decoration carried by an existing [TextSpan].
++ *
++ * Values use Kuikly logical pixels. Renderers must include the horizontal box
++ * geometry in text measurement, paint one fragment per final visual line, and
++ * keep hit-testing/copy mapped to the original span text.
++ */
++data class InlineBoxSpanStyle(
++    val backgroundColor: Color? = null,
++    val borderColor: Color? = null,
++    val borderWidth: Float = 0f,
++    val paddingStart: Float = 0f,
++    val paddingEnd: Float = 0f,
++    val paddingTop: Float = 0f,
++    val paddingBottom: Float = 0f,
++    val marginStart: Float = 0f,
++    val marginEnd: Float = 0f,
++    val cornerRadius: Float = 0f,
++)
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
+index 86dbe968c09c05a030eaf32375657a53a42ce981..c743431691e023cafe14fc8a0228327b16565cc3 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
+@@ -95,6 +95,20 @@ fun RichTextView.ImageSpan(spanInit: ImageSpan.() -> Unit) {
+     getViewAttr().addSpan(imageSpan)
+ }
+ 
++/**
++ * Adds one explicit inline layout group. Children keep their own text/image
++ * styling while native RichText owns their combined measurement and chrome.
++ */
++fun RichTextView.InlineBoxGroup(
++    style: InlineBoxSpanStyle,
++    groupInit: InlineBoxGroupSpan.() -> Unit,
++) {
++    val group = InlineBoxGroupSpan(style)
++    group.pagerId = pagerId
++    group.groupInit()
++    getViewAttr().addSpan(group)
++}
++
+ open class RichTextView : DeclarativeBaseView<RichTextAttr, RichTextEvent>(),
+     MeasureFunction {
+     var shadow: RichTextShadow? = null
+@@ -315,13 +329,16 @@ open class RichTextView : DeclarativeBaseView<RichTextAttr, RichTextEvent>(),
+ 
+     // 分发span布局位置变化
+     private fun dispatchPlaceholderSpanLayoutEventIfNeed() {
+-        attr.spans.forEach { child ->
+-            if (child is PlaceholderSpan && child.spanFrameDidChangedHandlerFn != null) {
+-                val placeholderSpan = child
+-                getPager().addTaskWhenPagerUpdateLayoutFinish {
+-                    val index = attr.spans.indexOf(placeholderSpan)
+-                    if (index >= 0) {
+-                        val rectStr = shadow?.callMethod("spanRect", index.toString())
++        attr.spans.forEachIndexed { index, child ->
++            child.visitPlaceholders { childIndex, placeholderSpan ->
++                if (placeholderSpan.spanFrameDidChangedHandlerFn != null) {
++                    getPager().addTaskWhenPagerUpdateLayoutFinish {
++                        val rectTarget = if (childIndex == null) {
++                            index.toString()
++                        } else {
++                            "$index $childIndex"
++                        }
++                        val rectStr = shadow?.callMethod("spanRect", rectTarget)
+                         if (rectStr?.isNotEmpty() == true) {
+                             rectStr.split(" ").apply {
+                                 if (this.size >= 4) {
+@@ -432,11 +449,128 @@ interface ISpan {
+     abstract fun willDestroy()
+ }
+ 
++private inline fun ISpan.visitPlaceholders(
++    visitor: (childIndex: Int?, placeholder: PlaceholderSpan) -> Unit,
++) {
++    when (this) {
++        is PlaceholderSpan -> visitor(null, this)
++        is InlineBoxGroupSpan -> children.forEachIndexed { index, child ->
++            if (child is PlaceholderSpan) visitor(index, child)
++        }
++    }
++}
++
++/**
++ * First-class RichText group. Unlike applying [InlineBoxSpanStyle] to each
++ * flattened text fragment, this preserves one exact range and its styled
++ * children across the common/native boundary.
++ */
++open class InlineBoxGroupSpan(
++    private val style: InlineBoxSpanStyle,
++) : ISpan {
++    companion object {
++        const val PROP_KEY_CHILDREN = "inlineBoxChildren"
++        const val PROP_KEY_SEMANTIC_TEXT = "inlineBoxSemanticText"
++    }
++
++    var pagerId: String = ""
++    internal val children = fastArrayListOf<ISpan>()
++    private var semanticText: String? = null
++    private var clickHandlerFn: ((ClickParams) -> Unit)? = null
++    private var longPressHandlerFn: ((LongPressParams) -> Unit)? = null
++
++    fun Span(textSpanInit: TextSpan.() -> Unit) {
++        val span = TextSpan().apply {
++            pagerId = this@InlineBoxGroupSpan.pagerId
++            textSpanInit()
++        }
++        if (!span.isEmptySpan()) children.add(span)
++    }
++
++    fun PlaceholderSpan(spanInit: PlaceholderSpan.() -> Unit) {
++        val span = PlaceholderSpan().apply(spanInit)
++        if (!span.isEmptySpan()) children.add(span)
++    }
++
++    fun addChild(span: ISpan) {
++        if (!span.isEmptySpan()) children.add(span)
++    }
++
++    fun childrenForLayout(): List<ISpan> = children
++
++    fun semanticText(text: String) {
++        semanticText = text
++    }
++
++    fun click(handler: (ClickParams) -> Unit) {
++        clickHandlerFn = handler
++    }
++
++    fun longPress(handler: (LongPressParams) -> Unit) {
++        longPressHandlerFn = handler
++    }
++
++    override fun isEmptySpan(): Boolean = children.isEmpty()
++
++    override fun spanPropsMap(): Map<String, Any> = fastHashMapOf<String, Any>().apply {
++        style.backgroundColor?.let { put(TextConst.INLINE_BOX_BACKGROUND_COLOR, it.toString()) }
++        style.borderColor?.let { put(TextConst.INLINE_BOX_BORDER_COLOR, it.toString()) }
++        put(TextConst.INLINE_BOX_BORDER_WIDTH, style.borderWidth)
++        put(TextConst.INLINE_BOX_PADDING_START, style.paddingStart)
++        put(TextConst.INLINE_BOX_PADDING_END, style.paddingEnd)
++        put(TextConst.INLINE_BOX_PADDING_TOP, style.paddingTop)
++        put(TextConst.INLINE_BOX_PADDING_BOTTOM, style.paddingBottom)
++        put(TextConst.INLINE_BOX_MARGIN_START, style.marginStart)
++        put(TextConst.INLINE_BOX_MARGIN_END, style.marginEnd)
++        put(TextConst.INLINE_BOX_CORNER_RADIUS, style.cornerRadius)
++        put(PROP_KEY_CHILDREN, children.map { it.spanPropsMap() })
++        semanticText?.let { put(PROP_KEY_SEMANTIC_TEXT, it) }
++    }
++
++    override fun performClickHandler(clickParams: ClickParams): Boolean {
++        clickHandlerFn?.invoke(clickParams)
++        if (clickHandlerFn != null) return true
++        return children.any { it.performClickHandler(clickParams) }
++    }
++
++    override fun hasClickEvent(): Boolean =
++        clickHandlerFn != null || children.any { it.hasClickEvent() }
++
++    override fun performLongPressHandler(longPressParams: LongPressParams): Boolean {
++        longPressHandlerFn?.invoke(longPressParams)
++        if (longPressHandlerFn != null) return true
++        return children.any { it.performLongPressHandler(longPressParams) }
++    }
++
++    override fun hasLongPressEvent(): Boolean =
++        longPressHandlerFn != null || children.any { it.hasLongPressEvent() }
++
++    override fun willDestroy() {
++        children.forEach { it.willDestroy() }
++        children.clear()
++    }
++}
++
+ open class TextSpan : TextAttr(), ISpan {
+     internal var text: String = ""
+     private var clickHandlerFn: ((ClickParams) -> Unit)? = null
+     private var longPressHandlerFn: ((LongPressParams) -> Unit)? = null
+ 
++    /** Attach generic inline box decoration to this existing text span. */
++    fun inlineBoxStyle(style: InlineBoxSpanStyle): TextSpan {
++        style.backgroundColor?.let { setProp(TextConst.INLINE_BOX_BACKGROUND_COLOR, it.toString()) }
++        style.borderColor?.let { setProp(TextConst.INLINE_BOX_BORDER_COLOR, it.toString()) }
++        setProp(TextConst.INLINE_BOX_BORDER_WIDTH, style.borderWidth)
++        setProp(TextConst.INLINE_BOX_PADDING_START, style.paddingStart)
++        setProp(TextConst.INLINE_BOX_PADDING_END, style.paddingEnd)
++        setProp(TextConst.INLINE_BOX_PADDING_TOP, style.paddingTop)
++        setProp(TextConst.INLINE_BOX_PADDING_BOTTOM, style.paddingBottom)
++        setProp(TextConst.INLINE_BOX_MARGIN_START, style.marginStart)
++        setProp(TextConst.INLINE_BOX_MARGIN_END, style.marginEnd)
++        setProp(TextConst.INLINE_BOX_CORNER_RADIUS, style.cornerRadius)
++        return this
++    }
++
+     override fun textDecorationColor(color: Color): TextSpan {
+         TextConst.TEXT_DECORATION_COLOR with color.toString()
+         return this
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt
+index d46718f681c731c96ccfffce3ddb107144d3323f..3cb2a0ca5aaf2aa02c4f20acb22a46406404a979 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt
+@@ -571,6 +571,16 @@ object TextConst {
+     const val STROKE_WIDTH = "strokeWidth"
+     const val TEXT_POST_PROCESSOR = "textPostProcessor"
+     const val TEXT_USE_DP_FONT_SIZE_DIM = "useDpFontSizeDim"
++    const val INLINE_BOX_BACKGROUND_COLOR = "inlineBoxBackgroundColor"
++    const val INLINE_BOX_BORDER_COLOR = "inlineBoxBorderColor"
++    const val INLINE_BOX_BORDER_WIDTH = "inlineBoxBorderWidth"
++    const val INLINE_BOX_PADDING_START = "inlineBoxPaddingStart"
++    const val INLINE_BOX_PADDING_END = "inlineBoxPaddingEnd"
++    const val INLINE_BOX_PADDING_TOP = "inlineBoxPaddingTop"
++    const val INLINE_BOX_PADDING_BOTTOM = "inlineBoxPaddingBottom"
++    const val INLINE_BOX_MARGIN_START = "inlineBoxMarginStart"
++    const val INLINE_BOX_MARGIN_END = "inlineBoxMarginEnd"
++    const val INLINE_BOX_CORNER_RADIUS = "inlineBoxCornerRadius"
+ 
+     const val SHADOW_METHOD_IS_LINE_BREAK_MARGIN = "isLineBreakMargin"
+     const val PLACEHOLDER = "placeholder"
+diff --git a/docs/API/components/rich-text.md b/docs/API/components/rich-text.md
+index 42853274941386babc64b6bc6d4bf4305a3dbfe3..f4fb5337c6a76ed6ed254e7e35da50e6dbb0773c 100644
+--- a/docs/API/components/rich-text.md
++++ b/docs/API/components/rich-text.md
+@@ -191,6 +191,49 @@ internal class TestPage : BasePager() {
+ 
+ :::
+ 
++### InlineBoxGroup方法
++
++`InlineBoxGroup` 用于将多个不同样式的 `Span` / `PlaceholderSpan` 作为一个明确的行内分组进行排版。
++子 Span 仍保留各自的字体、字号、颜色和占位尺寸；原生 RichText 排版引擎负责文本测量、换行、统一背景/边框绘制、点击命中与语义文本。
++
++```kotlin
++RichText {
++    InlineBoxGroup(
++        InlineBoxSpanStyle(
++            backgroundColor = Color(0xFFFCEFBD),
++            borderColor = Color.BLACK,
++            borderWidth = 1f,
++            paddingStart = 4f,
++            paddingEnd = 4f,
++            paddingTop = 1f,
++            paddingBottom = 1f,
++            marginStart = 2f,
++            marginEnd = 2f,
++        )
++    ) {
++        PlaceholderSpan {
++            placeholderSize(12f, 12f)
++        }
++        Span {
++            text("#project")
++            fontSize(14f)
++            fontWeightBold()
++        }
++        Span {
++            text(" msg")
++            fontSize(10f)
++            color(Color(0x80000000))
++        }
++        semanticText("#project msg")
++        click {
++            // 整个 group 共用一个点击区域
++        }
++    }
++}
++```
++
++`semanticText` 用于为含占位符或布局辅助字符的 group 提供稳定的复制/无障碍文本。布局辅助字符不会作为 group 身份或业务语义。
++
+ ## 事件
+ 
+ 支持[Text组件的所有事件](text.md#事件)
+@@ -208,6 +251,46 @@ internal class TestPage : BasePager() {
+ `Span.longPress` 从 **2.23.0** 开始支持。
+ :::
+ 
++### Span inline box decoration
++
++`TextSpan` supports a semantic-agnostic inline box decoration through
++`inlineBoxStyle`. The style participates in text measurement and keeps the
++original span click/long-press and copied text semantics.
++
++```kotlin
++Span {
++    text("linked message")
++    inlineBoxStyle(
++        InlineBoxSpanStyle(
++            backgroundColor = Color(0x33FFD440),
++            borderColor = Color.BLACK,
++            borderWidth = 1f,
++            paddingStart = 4f,
++            paddingEnd = 4f,
++            paddingTop = 2f,
++            paddingBottom = 2f,
++        )
++    )
++}
++```
++
++Compose DSL uses the same existing span carrier:
++
++```kotlin
++SpanStyle(
++    inlineBoxStyle = InlineBoxSpanStyle(
++        backgroundColor = Color.Yellow.copy(alpha = 0.2f),
++        borderColor = Color.Black,
++        borderWidth = 1.dp,
++        paddingStart = 4.dp,
++        paddingEnd = 4.dp,
++    )
++)
++```
++
++The decoration is presentation-only. Business meanings such as message,
++channel, task, or mention stay in the caller's annotation/action layer.
++
+ `RichText` 中的 `Span` / `ImageSpan` 支持单独注册 `longPress` 事件。命中可长按的 span 时，会优先回调该 span 的 `longPress`；如果当前触点未命中任何注册了 `longPress` 的 span，则会回退到 `RichText.longPress`。
+ 
+ `longPress` 回调参数为 `LongPressParams`，字段说明可参考[通用事件文档](basic-attr-event.md)。

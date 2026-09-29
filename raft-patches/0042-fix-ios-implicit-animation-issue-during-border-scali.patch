@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: xubin <67296761+RoeKun@users.noreply.github.com>
+Date: Sun, 20 Sep 2026 14:52:03 +0800
+Subject: [PATCH] fix(ios): implicit animation issue during border scaling
+ (#1749)
+
+Backport of upstream #1749 (post-2.28): wrap the manually attached border
+layer update in layoutSublayers and the mask/shadowPath update in
+p_boundsDidChanged in a CATransaction with actions disabled, so borders no
+longer lag the content by the default 0.25s implicit animation. Only
+UIView+CSS.m is taken; the upstream demo page is left out. Replaces fork
+commit 88eb73d8; drop this patch once the base includes #1749.
+
+(cherry picked from commit b132ea70f99973e79645db1aa8c647bf0c378b75)
+
+Fork-Patch: ios-border-implicit-animation-backport-1749
+Origin: 88eb73d8
+Upstream-Status: submitted Tencent-TDS/KuiklyUI#1749
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ core-render-ios/Extension/Category/UIView+CSS.m | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/core-render-ios/Extension/Category/UIView+CSS.m b/core-render-ios/Extension/Category/UIView+CSS.m
+index 0fe44d3c1be5ad52f3dc4e655b5e23c3d725c9d9..9c6c0ef7910ef287e3e6ed7baa1269708bd0634c 100644
+--- a/core-render-ios/Extension/Category/UIView+CSS.m
++++ b/core-render-ios/Extension/Category/UIView+CSS.m
+@@ -852,6 +852,10 @@ static BOOL KRIsHiddenAccessibilityRole(id role) {
+ }
+ 
+ - (void)p_boundsDidChanged {
++    // 圆角 / clipPath mask 也是手动挂上去的独立 CAShapeLayer（CSSShapeLayer 在 setFrame: 里同步重算 path），
++    // 同样不享受 UIView backing layer 的隐式动画屏蔽，属性变更会走 CA 默认的 0.25s，这里统一禁掉
++    [CATransaction begin];
++    [CATransaction setDisableActions:YES];
+     [self.layer.mask setFrame:self.bounds];
+     if (self.layer.shadowPath) {
+         // 如果存在 clipPath，shadowPath 应该使用 clipPath 的路径
+@@ -876,6 +880,7 @@ static BOOL KRIsHiddenAccessibilityRole(id role) {
+             #endif // [macOS]
+         }
+     }
++    [CATransaction commit];
+ }
+ 
+ /// 对齐安卓圆角最大为半圆
+@@ -1593,6 +1598,10 @@ static BOOL KRIsHiddenAccessibilityRole(id role) {
+  */
+ - (void)layoutSublayers {
+     [super layoutSublayers];
++    // 边框 layer 是手动 addSublayer 的独立 CAShapeLayer，属性变更默认会带 0.25s 的隐式动画，
++    // 这里统一禁用，让边框与内容在同一帧到位
++    [CATransaction begin];
++    [CATransaction setDisableActions:YES];
+     
+     // 0. macOS: 确保边框在最顶层（NSScrollView/NSTextView 内部 sublayer 可能覆盖边框）
+ #if TARGET_OS_OSX
+@@ -1614,6 +1623,7 @@ static BOOL KRIsHiddenAccessibilityRole(id role) {
+     // 2. 尺寸未变化时跳过重绘（性能优化）或者重绘标志位为false
+     // 仅在 clipPath 变化时为 YES）
+     if (CGSizeEqualToSize(self.bounds.size, _lastSize) && !_needsRedraw) {
++        [CATransaction commit];
+         return ;
+     }
+     _lastSize = self.bounds.size;
+@@ -1679,6 +1689,7 @@ static BOOL KRIsHiddenAccessibilityRole(id role) {
+     #else
+     self.path = path.CGPath;
+     #endif
++    [CATransaction commit];
+ }
+ 
+ @end

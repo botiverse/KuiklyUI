@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:03:44 +0000
+Subject: [PATCH] fix(compose): keep retained native event callbacks fresh
+
+Native callbacks installed in ComposeNode factory/viewInit blocks run only
+once, so they captured stale composition values. Add NodeEventBinder /
+updatedNodeEvent, a stable callback that delegates to the latest composed
+lambda, and use it for Dialog willDismiss and the MoveableDrawer scrim click.
+The CoreTextField part of the original change is carried by the text-focus patch.
+
+Fork-Patch: compose-node-event-binder
+Origin: 824a0fd2
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../compose/extension/NodeEventBinder.kt      | 54 ++++++++++++++++
+ .../foundation/drawer/MoveableDrawer.kt       | 11 +++-
+ .../kuikly/compose/ui/window/Dialog.kt        |  9 ++-
+ .../compose/extension/NodeEventBinderTest.kt  | 61 +++++++++++++++++++
+ 4 files changed, 129 insertions(+), 6 deletions(-)
+ create mode 100644 compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinder.kt
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinderTest.kt
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinder.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinder.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..737eac3d8fd259e60732c9293f48de1e7843fa57
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinder.kt
+@@ -0,0 +1,54 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.extension
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++
++/**
++ * Owns the current delegate behind a callback whose identity is retained by a native node.
++ *
++ * A `ComposeNode.factory` or `MakeKuiklyComposeNode.viewInit` block runs only when its node is
++ * created. Native event callbacks installed there must therefore keep a stable identity while
++ * dispatching to the latest composition values.
++ */
++internal class NodeEventBinder<P>(initialEvent: (P) -> Unit) {
++    // Snapshot state is intentional: if recomposition is aborted, its delegate update must not
++    // leak to a native callback before Compose commits that composition.
++    private var currentEvent: (P) -> Unit by mutableStateOf(initialEvent)
++
++    val event: (P) -> Unit = { parameter ->
++        currentEvent(parameter)
++    }
++
++    fun update(event: (P) -> Unit) {
++        currentEvent = event
++    }
++}
++
++/**
++ * Returns a stable one-argument native event callback that always delegates to [event] from the
++ * latest composition.
++ */
++@Composable
++internal fun <P> updatedNodeEvent(event: (P) -> Unit): (P) -> Unit {
++    val binder = remember { NodeEventBinder(event) }
++    binder.update(event)
++    return binder.event
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt
+index c277de2122356db8d3afa19b1df2651e2708929a..5d44b8a2b6c3d9f255e0a7c1cd69860e5ca68c08 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt
+@@ -22,6 +22,7 @@ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
+ import com.tencent.kuikly.compose.extension.MakeKuiklyComposeNode
++import com.tencent.kuikly.compose.extension.updatedNodeEvent
+ import com.tencent.kuikly.compose.foundation.background
+ import com.tencent.kuikly.compose.foundation.clickable
+ import com.tencent.kuikly.compose.foundation.interaction.MutableInteractionSource
+@@ -39,6 +40,7 @@ import com.tencent.kuikly.compose.ui.unit.Dp
+ import com.tencent.kuikly.compose.ui.unit.dp
+ import com.tencent.kuikly.compose.scroller.kuiklyInfo
+ import com.tencent.kuikly.core.views.DivView
++import com.tencent.kuikly.core.base.event.ClickParams
+ import kotlinx.coroutines.launch
+ 
+ /**
+@@ -186,6 +188,9 @@ fun MoveableDrawer(
+     content: @Composable () -> Unit
+ ) {
+     val scope = rememberCoroutineScope()
++    val closeDrawerEvent: (ClickParams) -> Unit = updatedNodeEvent { _: ClickParams ->
++        scope.launch { state.close() }
++    }
+     val drawerProgress by remember {
+         derivedStateOf { state.progress }
+     }
+@@ -209,6 +214,8 @@ fun MoveableDrawer(
+                             factory = { DivView() },
+                             modifier = Modifier.fillMaxSize(),
+                             viewInit = {
++                                // node-event-freshness-allow: stable empty handler only consumes
++                                // the native touch path and captures no composition value.
+                                 getViewEvent().click { }
+                             },
+                         )
+@@ -237,9 +244,7 @@ fun MoveableDrawer(
+                                         scope.launch { state.close() }
+                                     },
+                                 viewInit = {
+-                                    getViewEvent().click {
+-                                        scope.launch { state.close() }
+-                                    }
++                                    getViewEvent().click(closeDrawerEvent)
+                                 },
+                             )
+                         }
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/window/Dialog.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/window/Dialog.kt
+index 4402c3a14244ccdee56ee82ac81025a43dca1b31..e229702c5e1f6b3c376739e256861ea72f27e773 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/window/Dialog.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/window/Dialog.kt
+@@ -30,6 +30,7 @@ import com.tencent.kuikly.compose.BackHandler
+ import com.tencent.kuikly.compose.KuiklyApplier
+ import com.tencent.kuikly.compose.foundation.clickable
+ import com.tencent.kuikly.compose.foundation.layout.Box
++import com.tencent.kuikly.compose.extension.updatedNodeEvent
+ import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
+ import com.tencent.kuikly.compose.ui.InternalComposeUiApi
+ import com.tencent.kuikly.compose.ui.Modifier
+@@ -68,6 +69,7 @@ import com.tencent.kuikly.core.base.Attr.StyleConst
+ import com.tencent.kuikly.core.base.event.Touch
+ import com.tencent.kuikly.core.views.DivView
+ import com.tencent.kuikly.core.views.ModalView
++import com.tencent.kuikly.core.views.ModalDismissReason
+ import com.tencent.kuikly.core.views.willDismiss
+ import kotlin.js.JsName
+ import kotlin.math.min
+@@ -306,6 +308,9 @@ private fun DialogLayout(
+     // 插槽标识符
+     var slotId = remember { 0 }
+     val backPressedDispatcher= LocalOnBackPressedDispatcherOwner.current
++    val willDismissEvent: (ModalDismissReason) -> Unit = updatedNodeEvent { _: ModalDismissReason ->
++        backPressedDispatcher.onBackPressedDispatcher.dispatchOnBackEvent()
++    }
+ 
+ 
+     DisposableEffect(Unit) {
+@@ -316,9 +321,7 @@ private fun DialogLayout(
+                     KNode(ModalView().also {
+                         it.inWindow = currentProperties.inWindow
+                     }) {
+-                        getViewEvent().willDismiss {
+-                            backPressedDispatcher.onBackPressedDispatcher.dispatchOnBackEvent()
+-                        }
++                        getViewEvent().willDismiss(willDismissEvent)
+                     }
+                 },
+                 update = {
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinderTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinderTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b08eb35b5503c7ec524d4ea61707f7b5d1db0493
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinderTest.kt
+@@ -0,0 +1,61 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.extension
++
++import androidx.compose.runtime.snapshots.Snapshot
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertSame
++
++class NodeEventBinderTest {
++    @Test
++    fun retainedHandlerTracksInactiveActiveInactiveLifecycle() {
++        val dispatches = mutableListOf<String>()
++        val binder = NodeEventBinder<String> { dispatches += "inactive:$it" }
++        val retainedHandler = binder.event
++
++        retainedHandler("prewarm")
++        binder.update { dispatches += "active:$it" }
++        retainedHandler("visible")
++        binder.update { dispatches += "inactive:$it" }
++        retainedHandler("kept-alive")
++
++        assertEquals(
++            listOf("inactive:prewarm", "active:visible", "inactive:kept-alive"),
++            dispatches,
++        )
++        assertSame(retainedHandler, binder.event)
++    }
++
++    @Test
++    fun abortedSnapshotDoesNotPublishUncommittedDelegate() {
++        val dispatches = mutableListOf<String>()
++        val binder = NodeEventBinder<String> { dispatches += "committed:$it" }
++        val abortedComposition = Snapshot.takeMutableSnapshot()
++
++        try {
++            abortedComposition.enter {
++                binder.update { dispatches += "aborted:$it" }
++            }
++        } finally {
++            abortedComposition.dispose()
++        }
++
++        binder.event("native-event")
++
++        assertEquals(listOf("committed:native-event"), dispatches)
++    }
++}

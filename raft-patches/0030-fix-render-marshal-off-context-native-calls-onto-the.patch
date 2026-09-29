@@ -1,0 +1,591 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:05:56 +0000
+Subject: [PATCH] fix(render): marshal off-context native calls onto the
+ context thread
+
+Kotlin can call into native from a non-context thread (coroutines on
+background dispatchers, K/N workers). Async calls are now re-posted to the
+context thread on Android, iOS and OHOS; sync calls made off-context fail
+loudly instead of mutating render state from the wrong thread. The sync
+method classification is shared per platform. On iOS, FireFatalException
+from a worker hops synchronously onto the #1566 context thread so crash
+reporting no longer trips the context-thread assertion.
+
+Fork-Patch: render-marshal-offcontext-native-calls
+Origin: af2c4d51 25cbc1fa 9ba11795
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../context/IKuiklyRenderContextHandler.kt    |  35 +++++
+ .../context/KuiklyRenderJvmContextHandler.kt  |  29 +++--
+ .../render/android/core/KuiklyRenderCore.kt   |  23 +---
+ .../context/NativeCallContextDispatchTest.kt  | 123 ++++++++++++++++++
+ core-render-ios/Core/KuiklyRenderCore.m       |  22 ++--
+ .../KuiklyRenderFrameworkContextHandler.m     |  33 ++++-
+ .../Protocol/KuiklyRenderContextProtocol.h    |  17 +++
+ .../context/IKRRenderNativeContextHandler.h   |  17 +++
+ .../KRRenderNativeContextHandlerManager.cpp   |  62 +++++----
+ .../KRRenderNativeContextHandlerManager.h     |   5 +
+ .../cpp/libohos_render/core/KRRenderCore.cpp  |  13 +-
+ 11 files changed, 295 insertions(+), 84 deletions(-)
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/context/NativeCallContextDispatchTest.kt
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/IKuiklyRenderContextHandler.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/IKuiklyRenderContextHandler.kt
+index c7ab1d376b27117c2dcaa5665e3c0c64c974ee41..9f07f6254264f8ecfe9f94f508e077716d866833 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/IKuiklyRenderContextHandler.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/IKuiklyRenderContextHandler.kt
+@@ -106,5 +106,40 @@ enum class KuiklyRenderNativeMethod(val value: Int) {
+ 
+ typealias KuiklyRenderNativeMethodCallback = (methodId: KuiklyRenderNativeMethod, args: List<Any?>) -> Any?
+ 
++internal fun kuiklyNativeMethodRequiresContextThread(
++    method: KuiklyRenderNativeMethod,
++    args: List<Any?>
++): Boolean {
++    if (method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallModuleMethod ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod
++    ) {
++        return (args.getOrNull(5) as? Int ?: 0) == 1
++    }
++    return method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCalculateRenderViewSize ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCreateShadow ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodRemoveShadow ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowForView ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowProp ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetTimeout ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallShadowMethod ||
++        method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSyncFlushUI
++}
++
++internal fun dispatchKuiklyNativeCall(
++    isContextThread: Boolean,
++    requiresContextThread: Boolean,
++    scheduleOnContextThread: (() -> Unit) -> Unit,
++    call: () -> Any?
++): Any? {
++    if (isContextThread) {
++        return call()
++    }
++    check(!requiresContextThread) {
++        "Synchronous Kuikly native calls must run on the context thread"
++    }
++    scheduleOnContextThread { call() }
++    return null
++}
++
+ // 用于记录各个callNative的task的次数
+ internal var nativeMethodCallCounts = IntArray(KuiklyRenderNativeMethod.values().size + 1)
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/KuiklyRenderJvmContextHandler.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/KuiklyRenderJvmContextHandler.kt
+index d810e15cce2caae3be185be80ebe7ed31eefabc7..33b9527b2d7d18bd9f48d8cf949ef518d82c03f3 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/KuiklyRenderJvmContextHandler.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/context/KuiklyRenderJvmContextHandler.kt
+@@ -17,8 +17,10 @@ package com.tencent.kuikly.core.render.android.context
+ 
+ import com.tencent.kuikly.core.IKuiklyCoreEntry
+ import com.tencent.kuikly.core.manager.BridgeManager
++import com.tencent.kuikly.core.nvi.NativeBridge
+ import com.tencent.kuikly.core.render.android.css.ktx.isMainThread
+ import com.tencent.kuikly.core.render.android.exception.ErrorReason
++import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreContextScheduler
+ 
+ /**
+  * 渲染流程在JVM环境执行的处理器
+@@ -74,17 +76,24 @@ class KuiklyRenderJvmContextHandler : KuiklyRenderCommonContextHandler(), IKuikl
+         arg5: Any?
+     ): Any? {
+         assert(!isMainThread())
++        val method = KuiklyRenderNativeMethod.fromInt(methodId)
++        val args = listOf(arg0, arg1, arg2, arg3, arg4, arg5)
++        return dispatchKuiklyNativeCall(
++            isContextThread = NativeBridge.isContextThread,
++            requiresContextThread = kuiklyNativeMethodRequiresContextThread(method, args),
++            scheduleOnContextThread = { task ->
++                KuiklyRenderCoreContextScheduler.scheduleTask(0) { task() }
++            },
++            call = { invokeNativeCallback(method, args) }
++        )
++    }
++
++    private fun invokeNativeCallback(
++        method: KuiklyRenderNativeMethod,
++        args: List<Any?>
++    ): Any? {
+         try {
+-            val result = callNativeCallback?.invoke(
+-                KuiklyRenderNativeMethod.fromInt(methodId), listOf(
+-                    arg0,
+-                    arg1,
+-                    arg2,
+-                    arg3,
+-                    arg4,
+-                    arg5
+-                )
+-            )
++            val result = callNativeCallback?.invoke(method, args)
+             return result?.toKotlinObject()
+         } catch (t: Throwable) {
+             // 这里catch的异常类型是故意设置成Throwable的，因为callKotlinMethod运行的是KTV业务代码
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+index 7d58381a4e908f059fed362a646492eb1ee38883..55ab48c9ebf967b94ae718d92f0ce7e47e6fc357 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+@@ -23,13 +23,13 @@ import com.tencent.kuikly.core.render.android.IKuiklyRenderView
+ import com.tencent.kuikly.core.render.android.IKuiklyRenderViewTreeUpdateListener
+ import com.tencent.kuikly.core.render.android.KuiklyContextParams
+ import com.tencent.kuikly.core.render.android.adapter.KuiklyRenderLog
+-import com.tencent.kuikly.core.render.android.const.KRExtConst
+ import com.tencent.kuikly.core.render.android.context.IKotlinBridgeStatusListener
+ import com.tencent.kuikly.core.render.android.context.KuiklyRenderContextMethod
+ import com.tencent.kuikly.core.render.android.context.KuiklyRenderNativeMethodCallback
+ import com.tencent.kuikly.core.render.android.context.IKuiklyRenderContextHandler
+ import com.tencent.kuikly.core.render.android.context.KuiklyRenderNativeMethod
+ import com.tencent.kuikly.core.render.android.context.KuiklyRenderJvmContextHandler
++import com.tencent.kuikly.core.render.android.context.kuiklyNativeMethodRequiresContextThread
+ import com.tencent.kuikly.core.render.android.context.nativeMethodCallCounts
+ import com.tencent.kuikly.core.render.android.css.ktx.fifthArg
+ import com.tencent.kuikly.core.render.android.css.ktx.fourthArg
+@@ -614,25 +614,7 @@ class KuiklyRenderCore(
+     }
+ 
+     private fun isSyncMethodCall(method: KuiklyRenderNativeMethod, args: List<Any?>): Boolean {
+-        if (method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallModuleMethod ||
+-            method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod
+-        ) {
+-            val fifthArg = if (args.size >= IKuiklyRenderContextHandler.CALL_ARGS_COUNT) {
+-                args[KRExtConst.SIXTH_ARG_INDEX] as? Int ?: KRExtConst.FIRST_ARG_INDEX
+-            } else {
+-                KRExtConst.FIRST_ARG_INDEX
+-            }
+-            return fifthArg == SYNC_CALL_TYPE
+-        }
+-
+-        return method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCalculateRenderViewSize ||
+-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCreateShadow ||
+-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodRemoveShadow ||
+-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowForView ||
+-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetShadowProp ||
+-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetTimeout ||
+-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallShadowMethod ||
+-                method == KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSyncFlushUI
++        return kuiklyNativeMethodRequiresContextThread(method, args)
+     }
+ 
+     /**
+@@ -679,7 +661,6 @@ class KuiklyRenderCore(
+ 
+     companion object {
+         private var instanceIdProducer = 0L
+-        private const val SYNC_CALL_TYPE = 1
+         private const val LAYOUT_VIEW_MAX_LOG_COUNT = 10
+     }
+ 
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/context/NativeCallContextDispatchTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/context/NativeCallContextDispatchTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f6ee01efb078a5b85077e2dcb8a843c77f150c1
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/context/NativeCallContextDispatchTest.kt
+@@ -0,0 +1,123 @@
++package com.tencent.kuikly.core.render.android.context
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertThrows
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class NativeCallContextDispatchTest {
++
++    @Test
++    fun `off-context fire-and-forget calls preserve scheduler FIFO`() {
++        val scheduled = mutableListOf<() -> Unit>()
++        val calls = mutableListOf<Int>()
++        val results = mutableListOf<Any?>()
++
++        Thread {
++            repeat(3) { index ->
++                results +=
++                    dispatchKuiklyNativeCall(
++                        isContextThread = false,
++                        requiresContextThread = false,
++                        scheduleOnContextThread = scheduled::add,
++                        call = { calls += index }
++                    )
++            }
++        }.apply {
++            start()
++            join()
++        }
++
++        assertTrue(calls.isEmpty())
++        assertEquals(listOf(null, null, null), results)
++        scheduled.forEach { it() }
++        assertEquals(listOf(0, 1, 2), calls)
++    }
++
++    @Test
++    fun `context-thread call stays inline and returns result`() {
++        var scheduled = false
++
++        val result = dispatchKuiklyNativeCall(
++            isContextThread = true,
++            requiresContextThread = true,
++            scheduleOnContextThread = { scheduled = true },
++            call = { "result" }
++        )
++
++        assertEquals("result", result)
++        assertFalse(scheduled)
++    }
++
++    @Test
++    fun `off-context synchronous call fails without scheduling`() {
++        var scheduled = false
++
++        assertThrows(IllegalStateException::class.java) {
++            dispatchKuiklyNativeCall(
++                isContextThread = false,
++                requiresContextThread = true,
++                scheduleOnContextThread = { scheduled = true },
++                call = { "unreachable" }
++            )
++        }
++
++        assertFalse(scheduled)
++    }
++
++    @Test
++    fun `native method classification matches renderer inline contract`() {
++        val asyncModuleArgs = listOf(null, null, null, null, null, 0)
++        val syncModuleArgs = listOf(null, null, null, null, null, 1)
++
++        assertFalse(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallModuleMethod,
++                asyncModuleArgs
++            )
++        )
++        assertTrue(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallModuleMethod,
++                syncModuleArgs
++            )
++        )
++        assertFalse(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallViewMethod,
++                emptyList()
++            )
++        )
++        assertTrue(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodSetTimeout,
++                emptyList()
++            )
++        )
++        assertFalse(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod,
++                asyncModuleArgs
++            )
++        )
++        assertTrue(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod,
++                syncModuleArgs
++            )
++        )
++        assertFalse(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodFireFatalException,
++                emptyList()
++            )
++        )
++        assertFalse(
++            kuiklyNativeMethodRequiresContextThread(
++                KuiklyRenderNativeMethod.KuiklyRenderNativeMethodCallTDFNativeMethod,
++                emptyList()
++            )
++        )
++    }
++}
+diff --git a/core-render-ios/Core/KuiklyRenderCore.m b/core-render-ios/Core/KuiklyRenderCore.m
+index 0761774a3ffa4e0c5b22ff5e779986be037c97c6..18a03ee3de2702a0e847cc9cefc7aef5baa1e04a 100644
+--- a/core-render-ios/Core/KuiklyRenderCore.m
++++ b/core-render-ios/Core/KuiklyRenderCore.m
+@@ -234,6 +234,14 @@ NSString *const kCustomFirstScreenTag = @"customFirstScreenTag";
+     KR_WEAK_SELF
+     [_contextHandler registerCallNativeWtihCallback:^id _Nullable(KuiklyRenderNativeMethod method, NSArray *_Nonnull args) {
+         KR_STRONG_SELF_RETURN_NIL
++        if (![KuiklyRenderThreadManager isContextQueue] &&
++            method == KuiklyRenderNativeMethodFireFatalException) {
++            __block id result = nil;
++            [KuiklyRenderThreadManager performOnContextQueueWithBlock:^{
++                result = [strongSelf p_performNativeMethodWithMethod:method args:args];
++            } sync:YES];
++            return result;
++        }
+         [KuiklyRenderThreadManager assertContextQueue]; // 线程断言，保证仅在Context线程回调
+         // 执行KuiklyKotlin侧调用Native侧的事件
+         return [strongSelf p_performNativeMethodWithMethod:method args:args];
+@@ -265,19 +273,7 @@ NSString *const kCustomFirstScreenTag = @"customFirstScreenTag";
+ 
+ // 判断事件是否需要同步调用
+ - (BOOL)p_shouldSyncCallWithWithMethod:(KuiklyRenderNativeMethod)method args:(NSArray *)args {
+-    if (method == KuiklyRenderNativeMethodCallModuleMethod) {
+-        return [FIVE_ARG isKindOfClass:[NSNumber class]] ? [FIVE_ARG boolValue] : NO;  //
+-    }
+-    return method == KuiklyRenderNativeMethodCalculateRenderViewSize ||
+-           method == KuiklyRenderNativeMethodCreateShadow ||
+-           method == KuiklyRenderNativeMethodRemoveShadow ||
+-           method == KuiklyRenderNativeMethodSetShadowForView ||
+-           method == KuiklyRenderNativeMethodSetShadowProp ||
+-           method == KuiklyRenderNativeMethodSetTimeout ||
+-           method == KuiklyRenderNativeMethodCallShadowMethod ||
+-           method == KuiklyRenderNativeMethodFireFatalException ||
+-           method == KuiklyRenderNativeMethodSyncFlushUI ||
+-           method == KuiklyRenderNativeMethodCallTDFModuleMethod;
++    return KRNativeMethodRequiresContextThread(method, args);
+ }
+ 
+ // 执行KuiklyKotlin侧调用Native侧的事件
+diff --git a/core-render-ios/Handler/KuiklyRenderFrameworkContextHandler.m b/core-render-ios/Handler/KuiklyRenderFrameworkContextHandler.m
+index 8e1b7c5ae343c6351e117e0da92a4ed0480da67e..b35b4364e24517faabc40269ff34b3dd2aaae18a 100644
+--- a/core-render-ios/Handler/KuiklyRenderFrameworkContextHandler.m
++++ b/core-render-ios/Handler/KuiklyRenderFrameworkContextHandler.m
+@@ -18,6 +18,7 @@
+ #import "KuiklyRenderThreadManager.h"
+ #import "KRConvertUtil.h"
+ #import <objc/runtime.h>
++#import <stdlib.h>
+ #import "KRLogModule.h"
+ #define MAX_FRAMEWORK_NAME_LENGTH 100
+ 
+@@ -124,12 +125,34 @@
+ #pragma mark - KRCallNativeDelegate
+ 
+ - (id _Nullable)callNativeMethodId:(int32_t)methodId arg0:(id _Nullable)arg0 arg1:(id _Nullable)arg1 arg2:(id _Nullable)arg2 arg3:(id _Nullable)arg3 arg4:(id _Nullable)arg4 arg5:(id _Nullable)arg5 {
++    NSArray *args = @[KRSafeObject(arg1),
++                      KRSafeObject(arg2),
++                      KRSafeObject(arg3),
++                      KRSafeObject(arg4),
++                      KRSafeObject(arg5)];
++    KuiklyRenderNativeMethod method = (KuiklyRenderNativeMethod)methodId;
++    if (![KuiklyRenderThreadManager isContextQueue]) {
++        // Fatal reporting already has a dedicated synchronous context-queue handoff in KuiklyRenderCore.
++        if (method == KuiklyRenderNativeMethodFireFatalException) {
++            id result = _nativeCallback ? _nativeCallback(method, args) : nil;
++            return [KRConvertUtil nativeObjectToKotlinObject:result];
++        }
++        if (KRNativeMethodRequiresContextThread(method, args)) {
++            [KRLogModule logError:[NSString stringWithFormat:
++                @"synchronous native method %ld called off the context queue", (long)method]];
++            abort();
++        }
++        __weak typeof(self) weakSelf = self;
++        [KuiklyRenderThreadManager performOnContextQueueWithBlock:^{
++            __strong typeof(weakSelf) strongSelf = weakSelf;
++            if (strongSelf.nativeCallback) {
++                strongSelf.nativeCallback(method, args);
++            }
++        }];
++        return nil;
++    }
+     if (_nativeCallback) {
+-        id result = _nativeCallback(methodId, @[KRSafeObject(arg1),
+-                                           KRSafeObject(arg2),
+-                                           KRSafeObject(arg3),
+-                                           KRSafeObject(arg4),
+-                                           KRSafeObject(arg5)]);
++        id result = _nativeCallback(method, args);
+         return [KRConvertUtil nativeObjectToKotlinObject:result];
+     }
+     return nil;
+diff --git a/core-render-ios/Protocol/KuiklyRenderContextProtocol.h b/core-render-ios/Protocol/KuiklyRenderContextProtocol.h
+index e2c425d0650aea5eb075e9d6480c58c7d6b0f932..716422b07d353541ca36b63388283759156f42a6 100644
+--- a/core-render-ios/Protocol/KuiklyRenderContextProtocol.h
++++ b/core-render-ios/Protocol/KuiklyRenderContextProtocol.h
+@@ -63,6 +63,23 @@ typedef NS_ENUM(NSUInteger, KuiklyRenderNativeMethod) {
+     KuiklyRenderNativeMethodCallTDFModuleMethod = 17,   /// "callTDFModuleMethod" 方法
+ };
+ 
++NS_INLINE BOOL KRNativeMethodRequiresContextThread(KuiklyRenderNativeMethod method, NSArray *args) {
++    if (method == KuiklyRenderNativeMethodCallModuleMethod) {
++        id syncCall = args.count > 4 ? args[4] : nil;
++        return [syncCall isKindOfClass:[NSNumber class]] ? [syncCall boolValue] : NO;
++    }
++    return method == KuiklyRenderNativeMethodCalculateRenderViewSize ||
++           method == KuiklyRenderNativeMethodCreateShadow ||
++           method == KuiklyRenderNativeMethodRemoveShadow ||
++           method == KuiklyRenderNativeMethodSetShadowForView ||
++           method == KuiklyRenderNativeMethodSetShadowProp ||
++           method == KuiklyRenderNativeMethodSetTimeout ||
++           method == KuiklyRenderNativeMethodCallShadowMethod ||
++           method == KuiklyRenderNativeMethodFireFatalException ||
++           method == KuiklyRenderNativeMethodSyncFlushUI ||
++           method == KuiklyRenderNativeMethodCallTDFModuleMethod;
++}
++
+ 
+ typedef id _Nullable (^KuiklyRenderNativeMethodCallback)(KuiklyRenderNativeMethod method, NSArray *args);
+ 
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/context/IKRRenderNativeContextHandler.h b/core-render-ohos/src/main/cpp/libohos_render/context/IKRRenderNativeContextHandler.h
+index d74f3e6578bec87037499035b255c5c42c4cc065..37c7897e3f2026f10fa23e8097bb401350a45132 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/context/IKRRenderNativeContextHandler.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/context/IKRRenderNativeContextHandler.h
+@@ -54,6 +54,23 @@ enum class KuiklyRenderNativeMethod {
+     KuiklyRenderNativeMethodCallTDFNativeMethod = 17      // "callTDFModuleMethod"
+ };
+ 
++inline bool KRNativeMethodRequiresContextThread(const KuiklyRenderNativeMethod &method,
++                                                const std::shared_ptr<KRRenderValue> &arg5) {
++    if (method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallModuleMethod) {
++        auto sync_call = arg5 ? arg5->toInt() : 0;
++        return sync_call == 1 || sync_call == 3;
++    }
++    return method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCalculateRenderViewSize ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCreateShadow ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodRemoveShadow ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowProp ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowForView ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetTimeout ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallShadowMethod ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSyncFlushUI ||
++           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallTDFNativeMethod;
++}
++
+ class IKRRenderNativeContextHandler;
+ class KRRenderContextParams;
+ 
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.cpp b/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.cpp
+index 88cb32f335d4d4ba1a7ad9e582f30e2b4bd74c37..4b1b66caa5b7837e58190cf2809a9b190e74e8cc 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.cpp
+@@ -15,8 +15,11 @@
+ 
+ #include "libohos_render/context/KRRenderNativeContextHandlerManager.h"
+ 
++#include <cstdlib>
+ #include "libohos_render/core/KRRenderFactories.h"
++#include "libohos_render/manager/KRRenderManager.h"
+ #include "libohos_render/scheduler/KRContextScheduler.h"
++#include "libohos_render/utils/KRRenderLoger.h"
+ 
+ extern CallKotlin callKotlin_;
+ 
+@@ -68,39 +71,52 @@ static inline std::shared_ptr<KRRenderValue> MakeFromCValue(const KRRenderCValue
+ KRRenderCValue KRRenderNativeContextHandlerManager::DispatchCallNative(
+     const std::string &instanceId, int methodId, const KRRenderCValue &arg0, const KRRenderCValue &arg1,
+     const KRRenderCValue &arg2, const KRRenderCValue &arg3, const KRRenderCValue &arg4, const KRRenderCValue &arg5) {
+-    auto handler = context_handler_map_.Get(instanceId);
+-    // 优化：移除冗余的 KRRenderManager::GetInstance().GetRenderView(instanceId) 检查
+-    // context_handler_map_ 中存在 handler 就意味着实例有效（注册/注销是配对的），
+-    // 额外的 GetRenderView 每次都要获取 SpinLock + unordered_map 查找，纯属浪费。
+-    if (!handler) {
+-        // 注意：必须使用值初始化（{}）而非默认初始化。
+-        // KRRenderCValue 是聚合类型，其 union value 的首成员为 int32_t 且无
+-        // 初始化器，size 为 int32_t 无默认值；若写作 `KRRenderCValue null_cv;`
+-        // 则 value / size 均为未初始化的栈上残留字节，随后 return 触发
+-        // 结构体值拷贝会 memcpy 未初始化字节，越 napi C ABI 传给 Kotlin 侧
+-        // 属于未定义行为（MSan/UBSan 必报）。此处 `{}` 会对整个聚合执行
+-        // 值初始化，将 type 归零至 NULL_VALUE、union 首成员归零、size 归零。
+-        return KRRenderCValue{};
+-    }
+-    // 优化：cv0（原 instanceId 槽位）已被 ICallNativeCallback::OnCallNative 的接口契约声明为
+-    // “保留位”，实现方不得依赖其内容；此处直接传入 KRRenderValue::MakeNull() 静态单例，
+-    // 避免每次调用都构造一个 std::string 并分配 shared_ptr。
+-    // 如未来需要恢复 instanceId 传递，请先同步修改 IKRRenderNativeContextHandler.h 中
+-    // ICallNativeCallback::OnCallNative 的契约注释，再改本处构造逻辑，避免形成静默约定。
++    // arg0 is a reserved slot. Keep the task #26 off-context marshal contract,
++    // but use the upstream null singleton and NULL fast path for every value.
+     auto cv0 = KRRenderValue::MakeNull();
+     auto cv1 = MakeFromCValue(arg1);
+     auto cv2 = MakeFromCValue(arg2);
+     auto cv3 = MakeFromCValue(arg3);
+     auto cv4 = MakeFromCValue(arg4);
+     auto cv5 = MakeFromCValue(arg5);
++    auto method = static_cast<KuiklyRenderNativeMethod>(methodId);
++    if (!KRContextScheduler::IsCurrentOnContextThread()) {
++        if (KRNativeMethodRequiresContextThread(method, cv5)) {
++            KR_LOG_ERROR << "Synchronous Kuikly native method " << methodId
++                         << " called off the context thread; aborting";
++            std::abort();
++        }
++        KRContextScheduler::ScheduleTask(0, [this, instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5]() mutable {
++            // The instance may have been torn down between the off-context call
++            // and this deferred run; only dispatch while its render view is alive.
++            if (nullptr == KRRenderManager::GetInstance().GetRenderView(instanceId)) {
++                return;
++            }
++            DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
++        });
++        return KRRenderCValue{};
++    }
+ 
+-    auto return_value =
+-        handler->OnCallNative(static_cast<KuiklyRenderNativeMethod>(methodId), cv0, cv1, cv2, cv3, cv4, cv5);
++    auto return_value = DispatchPreparedCallNative(instanceId, method, cv0, cv1, cv2, cv3, cv4, cv5);
+     if (return_value == nullptr || return_value->isNull()) {
+-        // 同上：值初始化，避免 union value / size 字段残留未初始化字节
+-        // 经 napi C ABI 传出导致 UB。
++        // Value-initialize the aggregate so union value and size never leak
++        // uninitialized stack bytes across the napi C ABI.
+         return KRRenderCValue{};
+     }
+     ScheduleDeallocRenderValues(return_value);
+     return return_value->toCValue();
+ }
++
++std::shared_ptr<KRRenderValue> KRRenderNativeContextHandlerManager::DispatchPreparedCallNative(
++    const std::string &instanceId, const KuiklyRenderNativeMethod &method, std::shared_ptr<KRRenderValue> &arg0,
++    std::shared_ptr<KRRenderValue> &arg1, std::shared_ptr<KRRenderValue> &arg2,
++    std::shared_ptr<KRRenderValue> &arg3, std::shared_ptr<KRRenderValue> &arg4,
++    std::shared_ptr<KRRenderValue> &arg5) {
++    // Upstream contract: a registered handler implies a live instance, so the
++    // context-thread fast path skips the extra GetRenderView lookup.
++    auto handler = context_handler_map_.Get(instanceId);
++    if (!handler) {
++        return nullptr;
++    }
++    return handler->OnCallNative(method, arg0, arg1, arg2, arg3, arg4, arg5);
++}
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.h b/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.h
+index 8206236aa194d553635a2484b583071fb25e25a3..6090fb39cfed80bf83e16c8222dc4c6fd31bf356 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/context/KRRenderNativeContextHandlerManager.h
+@@ -72,6 +72,11 @@ class KRRenderNativeContextHandlerManager {
+ 
+  private:
+     KRRenderNativeContextHandlerManager() {}
++    std::shared_ptr<KRRenderValue>
++    DispatchPreparedCallNative(const std::string &instanceId, const KuiklyRenderNativeMethod &method,
++                               std::shared_ptr<KRRenderValue> &arg0, std::shared_ptr<KRRenderValue> &arg1,
++                               std::shared_ptr<KRRenderValue> &arg2, std::shared_ptr<KRRenderValue> &arg3,
++                               std::shared_ptr<KRRenderValue> &arg4, std::shared_ptr<KRRenderValue> &arg5);
+     void ScheduleDeallocRenderValues(std::shared_ptr<KRRenderValue> will_dealloc_render_value);
+ 
+  private:
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp b/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp
+index d003084544751e57e7ffac7b2ef768445e47d258..22b99037c6a6beba5bb54cfcd2aadb4ba502a4c6 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp
+@@ -229,18 +229,7 @@ KRRenderCore::OnCallNative(const KuiklyRenderNativeMethod &method, std::shared_p
+ 
+ // 判断事件是否需要同步调用
+ bool KRRenderCore::ShouldSyncCallMethod(const KuiklyRenderNativeMethod &method, std::shared_ptr<KRRenderValue> &arg5) {
+-    if (method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallModuleMethod) {
+-        return IsSyncCallback(arg5);
+-    }
+-    return method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCalculateRenderViewSize ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCreateShadow ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodRemoveShadow ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowProp ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetShadowForView ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSetTimeout ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallShadowMethod ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodSyncFlushUI ||
+-           method == KuiklyRenderNativeMethod::KuiklyRenderNativeMethodCallTDFNativeMethod;
++    return KRNativeMethodRequiresContextThread(method, arg5);
+ }
+ 
+ KRAnyValue KRRenderCore::PerformNativeCallback(const KuiklyRenderNativeMethod &method, const KRAnyValue &arg1,

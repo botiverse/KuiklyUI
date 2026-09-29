@@ -1,0 +1,2 @@
+# Patch files carry context lines verbatim; whitespace checks apply to the code, not to the patches.
+*.patch -whitespace

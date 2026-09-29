@@ -1,0 +1,678 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:17:00 +0000
+Subject: [PATCH] fix(compose): defer lazy offset alignment while a scroll is
+ in progress
+
+tryExpandStartSizeNoScroll launched its 150 ms alignment job even while
+Compose still owned a settling scroll, so it could fight the fling. Route
+it through DeferredScrollOffsetAlignmentCoordinator: skip the alignment
+while scrolling (unless forced), retry it on scroll end, re-check after
+the OHOS refresh delay, and invalidate pending jobs when a ScrollerView
+is reused by a different scroll state.
+
+Fork-Patch: compose-lazy-deferred-offset-alignment
+Origin: 14b3a142
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../compose/gestures/KuiklyScrollInfo.kt      |  54 ++-
+ .../compose/layout/SubcomposeLayoutEx.kt      |  17 +-
+ .../compose/scroller/ContentSizeExtensions.kt | 139 ++++++--
+ .../scroller/ScrollableStateExtensions.kt     |  11 +-
+ .../compose/ui/layout/SubcomposeLayout.kt     |   3 +
+ .../scroller/ContentSizeExtensionsTest.kt     | 311 ++++++++++++++++++
+ 6 files changed, 497 insertions(+), 38 deletions(-)
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+index 8e4a2150ca5e093e184d07b23318e7a7be832f45..666bef972f5e96ccf38d3ecc2d5ee6babc0b799f 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+@@ -57,6 +57,51 @@ internal class ScrollViewBindingGate<T : Any> {
+     }
+ }
+ 
++internal class DeferredScrollOffsetAlignmentCoordinator<T>(
++    private val pendingAlignment: () -> T?,
++    private val updatePendingAlignment: (T?) -> Unit
++) {
++    private var generation = 0L
++
++    fun replacePendingAlignment(
++        cancelPendingAlignment: (T) -> Unit,
++        launchAlignment: (DeferredScrollOffsetAlignmentRequest) -> T?
++    ) {
++        val request = DeferredScrollOffsetAlignmentRequest(++generation)
++        pendingAlignment()?.let(cancelPendingAlignment)
++        updatePendingAlignment(launchAlignment(request))
++    }
++
++    fun isCurrent(request: DeferredScrollOffsetAlignmentRequest): Boolean {
++        return request.generation == generation
++    }
++
++    fun cancelAndInvalidate(cancelPendingAlignment: (T) -> Unit) {
++        generation += 1
++        pendingAlignment()?.let(cancelPendingAlignment)
++        updatePendingAlignment(null)
++    }
++
++    fun retryAfterScrollEnd(scheduleAlignment: () -> Unit) {
++        scheduleAlignment()
++    }
++}
++
++internal fun <T> invalidateDeferredScrollOffsetAlignmentOwnersOnReuse(
++    oldCoordinator: DeferredScrollOffsetAlignmentCoordinator<T>?,
++    newCoordinator: DeferredScrollOffsetAlignmentCoordinator<T>,
++    cancelPendingAlignment: (T) -> Unit
++) {
++    oldCoordinator?.cancelAndInvalidate(cancelPendingAlignment)
++    if (newCoordinator !== oldCoordinator) {
++        newCoordinator.cancelAndInvalidate(cancelPendingAlignment)
++    }
++}
++
++internal class DeferredScrollOffsetAlignmentRequest internal constructor(
++    internal val generation: Long
++)
++
+ /**
+  * Scroll information management class, responsible for handling scroll-related state and calculations
+  */
+@@ -200,6 +245,12 @@ class KuiklyScrollInfo {
+      */
+     internal var appleScrollViewOffsetJob: Job? = null
+ 
++    internal val deferredScrollOffsetAlignmentCoordinator =
++        DeferredScrollOffsetAlignmentCoordinator(
++            pendingAlignment = { appleScrollViewOffsetJob },
++            updatePendingAlignment = { appleScrollViewOffsetJob = it }
++        )
++
+     /**
+      * Coroutine scope
+      */
+@@ -296,8 +347,7 @@ class KuiklyScrollInfo {
+      */
+     fun resetForNewScrollView() {
+         // Cancel and clear any pending tasks
+-        appleScrollViewOffsetJob?.cancel()
+-        appleScrollViewOffsetJob = null
++        deferredScrollOffsetAlignmentCoordinator.cancelAndInvalidate { it.cancel() }
+ 
+         // Reset basic offset and scroll state
+         ignoreScrollOffset = null
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt
+index 1709f0689e76cd73c526a5614f077ccf433bfc51..4fc48bcb5a38dbbd6eb2e972002ba238ab954fda 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt
+@@ -22,6 +22,7 @@ import com.tencent.kuikly.compose.foundation.lazy.grid.LazyGridMeasureResult
+ import com.tencent.kuikly.compose.foundation.lazy.staggeredgrid.LazyStaggeredGridMeasureResult
+ import com.tencent.kuikly.compose.foundation.pager.PagerMeasureResult
+ import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
++import com.tencent.kuikly.compose.gestures.invalidateDeferredScrollOffsetAlignmentOwnersOnReuse
+ import com.tencent.kuikly.compose.scroller.kuiklyInfo
+ import com.tencent.kuikly.compose.ui.layout.LayoutNodeSubcompositionsState
+ import com.tencent.kuikly.compose.ui.layout.MeasureResult
+@@ -125,6 +126,20 @@ internal fun transferScrollToTopCallback(old: KuiklyScrollInfo?, new: KuiklyScro
+     }
+ }
+ 
++internal fun invalidateDeferredScrollOffsetAlignmentOnReuse(
++    old: KuiklyScrollInfo?,
++    new: KuiklyScrollInfo
++) {
++    invalidateDeferredScrollOffsetAlignmentOwnersOnReuse(
++        oldCoordinator = old?.deferredScrollOffsetAlignmentCoordinator,
++        newCoordinator = new.deferredScrollOffsetAlignmentCoordinator,
++        cancelPendingAlignment = { it.cancel() }
++    )
++    if (old != null && old !== new) {
++        old.scrollView = null
++    }
++}
++
+ /**
+  * Restore ScrollerView state during the update block (both first creation and reuse).
+  *
+@@ -151,8 +166,6 @@ internal fun restoreScrollerViewOnReuse(
+     sv.prepareForComposeReuse()
+ 
+     kuiklyInfo.ignoreScrollOffset = null
+-    kuiklyInfo.appleScrollViewOffsetJob?.cancel()
+-    kuiklyInfo.appleScrollViewOffsetJob = null
+     kuiklyInfo.realContentSize = null
+ 
+     // Restore contentSize first (UIKit clamps contentOffset to contentSize bounds)
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+index df7a1583701e79be18bda549bee728a14c399a2f..27ca04d072cff9f24ea6c3e2776ae42dbefdce98 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+@@ -27,6 +27,7 @@ import com.tencent.kuikly.compose.foundation.pager.PagerState
+ import com.tencent.kuikly.compose.foundation.pager.ScrollViewOffsetAlignmentCancellation
+ import com.tencent.kuikly.compose.foundation.pager.calculateNewMaxScrollOffset
+ import com.tencent.kuikly.compose.foundation.pager.mainAxisViewportSize
++import com.tencent.kuikly.compose.gestures.DeferredScrollOffsetAlignmentCoordinator
+ import com.tencent.kuikly.compose.scroller.ScrollableStateConstants.DEFAULT_CONTENT_SIZE
+ import com.tencent.kuikly.compose.ui.unit.Dp
+ import com.tencent.kuikly.compose.ui.unit.LayoutDirection
+@@ -333,44 +334,118 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
+ 
+ internal fun ScrollableState.tryExpandStartSizeNoScroll(forceExpand: Boolean = false) {
+     if (this is PagerState || this is DrawerInternalPagerState) return
++    val scrollInProgress = { this@tryExpandStartSizeNoScroll.isScrollInProgress }
+     kuiklyInfo.run {
+-        appleScrollViewOffsetJob?.cancel(ScrollViewOffsetAlignmentCancellation)
+-        appleScrollViewOffsetJob = scope?.launch {
+-            delay(150)
+-            val minDelta = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
+-            val epsilon = 0.5 * getDensity()  // 使用 0.5dp 作为误差值
+-            val reachBtm = contentOffset + viewportSize - currentContentSize >= -epsilon
+-
+-            if (contentOffset <= 0 && !isComposeAtTopForScrollSync() && (forceExpand || scrollView?.isDragging != true)) {
+-                // 整体把offset 加一下
+-                var delta = calculateBackExpandSize(contentOffset)
+-                delta = max(delta ?: minDelta, minDelta)
+-                val maxDelta = currentContentSize - viewportSize - contentOffset
+-                if (delta > maxDelta) {
+-                    // 不够直接扩容offset，先扩容contentSize
+-                    currentContentSize += (delta - maxDelta + minDelta)
++        scheduleDeferredScrollOffsetAlignment(
++            coordinator = deferredScrollOffsetAlignmentCoordinator,
++            forceExpand = forceExpand,
++            isScrollInProgress = scrollInProgress,
++            cancelPendingAlignment = { it.cancel(ScrollViewOffsetAlignmentCancellation) },
++            launchAlignment = { alignment -> scope?.launch { alignment() } },
++            awaitAlignmentWindow = { delay(150) },
++            applyAlignment = applyAlignment@{ isCurrent ->
++                val minDelta = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
++                val epsilon = 0.5 * getDensity()  // 使用 0.5dp 作为误差值
++                val reachBtm = contentOffset + viewportSize - currentContentSize >= -epsilon
++
++                if (contentOffset <= 0 && !isComposeAtTopForScrollSync() && (forceExpand || scrollView?.isDragging != true)) {
++                    // 整体把offset 加一下
++                    var delta = calculateBackExpandSize(contentOffset)
++                    delta = max(delta ?: minDelta, minDelta)
++                    val maxDelta = currentContentSize - viewportSize - contentOffset
++                    if (delta > maxDelta) {
++                        // 不够直接扩容offset，先扩容contentSize
++                        currentContentSize += (delta - maxDelta + minDelta)
++                        updateContentSizeToRender()
++                    }
++                    if (pageData?.isOhOs == true) {
++                        if (!shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
++                                forceExpand = forceExpand,
++                                isScrollInProgress = scrollInProgress,
++                                isCurrent = isCurrent,
++                                awaitRefreshWindow = {
++                                    // 鸿蒙扩容后不会立刻刷新，也没有刷新 API，华为建议添加 delay。
++                                    delay(25)
++                                }
++                            )
++                        ) {
++                            return@applyAlignment
++                        }
++                    }
++                    applyScrollViewOffsetDelta(delta)
++                    offsetDirty = true
++                } else if (contentOffset > 0 && isComposeAtTopForScrollSync()) {
++                    // compose 到顶了，但是scrollview没到顶
++                    applyScrollViewOffsetDelta(-contentOffset)
++                    offsetDirty = false
++                } else if (isAtTop() && realContentSize == null && lastItemVisible() && scrollView?.isDragging != true) {
++                    // 更新当前的contentSize大小
++                    currentContentSize = calculateContentSize()
++                    updateContentSizeToRender()
++                } else if (canScrollForward && reachBtm) {
++                    // 底部无法滑动了，扩容
++                    currentContentSize += minDelta
+                     updateContentSizeToRender()
+                 }
+-                if (pageData?.isOhOs == true) {
+-                    delay(25)   // 鸿蒙扩容后，不会立刻刷新，也没有刷新api，华为建议添加一个delay来处理
++            }
++        )
++    }
++}
++
++internal fun <T> scheduleDeferredScrollOffsetAlignment(
++    coordinator: DeferredScrollOffsetAlignmentCoordinator<T>,
++    forceExpand: Boolean,
++    isScrollInProgress: () -> Boolean,
++    cancelPendingAlignment: (T) -> Unit,
++    launchAlignment: (suspend () -> Unit) -> T?,
++    awaitAlignmentWindow: suspend () -> Unit,
++    applyAlignment: suspend (isCurrent: () -> Boolean) -> Unit
++) {
++    coordinator.replacePendingAlignment(
++        cancelPendingAlignment = cancelPendingAlignment,
++        launchAlignment = { request ->
++            launchAlignment {
++                if (
++                    shouldApplyDeferredScrollOffsetAlignmentAfterWindow(
++                        forceExpand = forceExpand,
++                        isScrollInProgress = isScrollInProgress,
++                        awaitAlignmentWindow = awaitAlignmentWindow
++                    ) && coordinator.isCurrent(request)
++                ) {
++                    applyAlignment { coordinator.isCurrent(request) }
+                 }
+-                applyScrollViewOffsetDelta(delta)
+-                offsetDirty = true
+-            } else if (contentOffset > 0 && isComposeAtTopForScrollSync()) {
+-                // compose 到顶了，但是scrollview没到顶
+-                applyScrollViewOffsetDelta(-contentOffset)
+-                offsetDirty = false
+-            } else if (isAtTop() && realContentSize == null && lastItemVisible() && scrollView?.isDragging != true) {
+-                // 更新当前的contentSize大小
+-                currentContentSize = calculateContentSize()
+-                updateContentSizeToRender()
+-            } else if (canScrollForward && reachBtm) {
+-                // 底部无法滑动了，扩容
+-                currentContentSize += minDelta
+-                updateContentSizeToRender()
+             }
+         }
+-    }
++    )
++}
++
++internal suspend fun shouldApplyDeferredScrollOffsetAlignmentAfterWindow(
++    forceExpand: Boolean,
++    isScrollInProgress: () -> Boolean,
++    awaitAlignmentWindow: suspend () -> Unit
++): Boolean {
++    awaitAlignmentWindow()
++    // Native dragging is already false during settling, while Compose still owns an active
++    // scroll. Scroll end clears that state and schedules alignment again.
++    return shouldApplyDeferredScrollOffsetAlignment(isScrollInProgress(), forceExpand)
++}
++
++internal fun shouldApplyDeferredScrollOffsetAlignment(
++    isScrollInProgress: Boolean,
++    forceExpand: Boolean
++): Boolean = forceExpand || !isScrollInProgress
++
++internal suspend fun shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
++    forceExpand: Boolean,
++    isScrollInProgress: () -> Boolean,
++    isCurrent: () -> Boolean,
++    awaitRefreshWindow: suspend () -> Unit
++): Boolean {
++    awaitRefreshWindow()
++    return isCurrent() && shouldApplyDeferredScrollOffsetAlignment(
++        isScrollInProgress = isScrollInProgress(),
++        forceExpand = forceExpand
++    )
+ }
+ 
+ private fun ScrollableState.isLazyListOrGrid(): Boolean {
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt
+index a734f2affd0c3fedc09fd68eac4b1a1f22d1b2b0..99451f7a816c40c42d0abf9e2c00182f98703568 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt
+@@ -62,7 +62,14 @@ internal fun ScrollableState.kuiklyOnScroll(delta: Float): Float = when (this) {
+ /**
+  * Handle scroll end events
+  */
+-internal fun ScrollableState.kuiklyOnScrollEnd(params: ScrollParams) {
++internal fun ScrollableState.kuiklyOnScrollEnd(
++    params: ScrollParams,
++    retryDeferredAlignment: ScrollableState.() -> Unit = {
++        kuiklyInfo.deferredScrollOffsetAlignmentCoordinator.retryAfterScrollEnd {
++            tryExpandStartSizeNoScroll()
++        }
++    }
++) {
+     when (this) {
+         is LazyListState -> scrollableState.kuiklyOnScrollEnd(params)
+         is PagerState -> {
+@@ -82,7 +89,7 @@ internal fun ScrollableState.kuiklyOnScrollEnd(params: ScrollParams) {
+     }
+     // Pager uses a different scroll-end sync path; skip lazy scroll expansion here.
+     if (this !is PagerState && this !is DrawerInternalPagerState && this !is KuiklyScrollableState) {
+-        tryExpandStartSizeNoScroll()
++        retryDeferredAlignment()
+     }
+ }
+ 
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+index 0b445581c6d9fa8f9e0f0185520f13bdc5fd8f45..38bffc90891506c0d5b7d4fdc96618634929eec9 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+@@ -77,6 +77,7 @@ import com.tencent.kuikly.compose.views.VirtualNodeView
+ import com.tencent.kuikly.compose.layout.bindKuiklyInfo
+ import com.tencent.kuikly.compose.layout.checkOffScreenNode
+ import com.tencent.kuikly.compose.layout.hideOffsetScreenView
++import com.tencent.kuikly.compose.layout.invalidateDeferredScrollOffsetAlignmentOnReuse
+ import com.tencent.kuikly.compose.layout.restoreScrollerViewOnReuse
+ import com.tencent.kuikly.compose.layout.transferScrollToTopCallback
+ import com.tencent.kuikly.compose.scroller.AndroidBackgroundAlignmentEffect
+@@ -472,6 +473,8 @@ fun SubcomposeLayout(
+                 scrollViewRef = sv
+ 
+                 val oldKuiklyInfo = sv.extProps[KuiklyInfoKey] as? KuiklyScrollInfo
++                val newKuiklyInfo = scrollableState.kuiklyInfo
++                invalidateDeferredScrollOffsetAlignmentOnReuse(oldKuiklyInfo, newKuiklyInfo)
+                 val kuiklyInfo = bindKuiklyInfo(sv, scrollableState, orientation)
+                 transferScrollToTopCallback(oldKuiklyInfo, kuiklyInfo)
+                 restoreScrollerViewOnReuse(sv, kuiklyInfo, isPagerView, orientation, oldKuiklyInfo?.contentOffset)
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..782d591911aeece99f43d355edd45e640c234682
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt
+@@ -0,0 +1,311 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2026 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.scroller
++
++import com.tencent.kuikly.compose.foundation.ScrollState
++import com.tencent.kuikly.compose.gestures.DeferredScrollOffsetAlignmentCoordinator
++import com.tencent.kuikly.compose.gestures.invalidateDeferredScrollOffsetAlignmentOwnersOnReuse
++import com.tencent.kuikly.core.views.ScrollParams
++import kotlin.coroutines.Continuation
++import kotlin.coroutines.EmptyCoroutineContext
++import kotlin.coroutines.startCoroutine
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class ContentSizeExtensionsTest {
++
++    @Test
++    fun deferredAlignmentSkipsActiveScrollUnlessForced() {
++        assertFalse(
++            shouldApplyDeferredScrollOffsetAlignment(
++                isScrollInProgress = true,
++                forceExpand = false
++            )
++        )
++        assertTrue(
++            shouldApplyDeferredScrollOffsetAlignment(
++                isScrollInProgress = false,
++                forceExpand = false
++            )
++        )
++        assertTrue(
++            shouldApplyDeferredScrollOffsetAlignment(
++                isScrollInProgress = true,
++                forceExpand = true
++            )
++        )
++    }
++
++    @Test
++    fun deferredAlignmentReadsLatestStateAfterWindow() {
++        val harness = DeferredAlignmentHarness()
++
++        harness.schedule(duringWait = { harness.isScrollInProgress = true }).complete()
++
++        assertEquals(0, harness.appliedActions)
++    }
++
++    @Test
++    fun replacementCancelsPendingAlignmentBeforeLatestAction() {
++        val harness = DeferredAlignmentHarness()
++
++        val first = harness.schedule()
++        val second = harness.schedule()
++        first.complete()
++        second.complete()
++
++        assertEquals(1, harness.appliedActions)
++        assertEquals(1, harness.cancelledAlignments)
++    }
++
++    @Test
++    fun staleCompletionCannotApplyEvenWhenCancellationIsNotObserved() {
++        val harness = DeferredAlignmentHarness()
++
++        val first = harness.schedule()
++        val second = harness.schedule()
++        first.completeIgnoringCancellation()
++        second.complete()
++
++        assertEquals(1, harness.appliedActions)
++    }
++
++    @Test
++    fun invalidationRejectsNonCooperativeLateCompletionWithoutReplacement() {
++        val harness = DeferredAlignmentHarness()
++
++        val pending = harness.schedule()
++        harness.cancelAndInvalidate()
++        pending.completeIgnoringCancellation()
++
++        assertEquals(0, harness.appliedActions)
++        assertEquals(1, harness.cancelledAlignments)
++    }
++
++    @Test
++    fun reuseInvalidatesOldOwnerBeforeNonCooperativeLateCompletion() {
++        val oldOwner = DeferredAlignmentHarness()
++        val newOwner = DeferredAlignmentHarness()
++        val oldPending = oldOwner.schedule()
++        var cancellations = 0
++
++        invalidateDeferredScrollOffsetAlignmentOwnersOnReuse(
++            oldCoordinator = oldOwner.coordinator,
++            newCoordinator = newOwner.coordinator,
++            cancelPendingAlignment = {
++                cancellations += 1
++                it.cancel()
++            }
++        )
++        oldPending.completeIgnoringCancellation()
++
++        assertEquals(0, oldOwner.appliedActions)
++        assertEquals(0, newOwner.appliedActions)
++        assertEquals(1, cancellations)
++    }
++
++    @Test
++    fun reuseInvalidatesSameOwnerOnlyOnce() {
++        val owner = DeferredAlignmentHarness()
++        owner.schedule()
++        var cancellations = 0
++
++        invalidateDeferredScrollOffsetAlignmentOwnersOnReuse(
++            oldCoordinator = owner.coordinator,
++            newCoordinator = owner.coordinator,
++            cancelPendingAlignment = {
++                cancellations += 1
++                it.cancel()
++            }
++        )
++
++        assertEquals(1, cancellations)
++    }
++
++    @Test
++    fun ohosRefreshWindowRejectsFreshGesture() {
++        var isScrollInProgress = false
++
++        val shouldApply = runImmediateSuspend {
++            shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
++                forceExpand = false,
++                isScrollInProgress = { isScrollInProgress },
++                isCurrent = { true },
++                awaitRefreshWindow = { isScrollInProgress = true }
++            )
++        }
++
++        assertFalse(shouldApply)
++    }
++
++    @Test
++    fun ohosRefreshWindowAllowsForcedAlignmentDuringFreshGesture() {
++        var isScrollInProgress = false
++
++        val shouldApply = runImmediateSuspend {
++            shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
++                forceExpand = true,
++                isScrollInProgress = { isScrollInProgress },
++                isCurrent = { true },
++                awaitRefreshWindow = { isScrollInProgress = true }
++            )
++        }
++
++        assertTrue(shouldApply)
++    }
++
++    @Test
++    fun ohosRefreshWindowRejectsInvalidatedRequest() {
++        var isCurrent = true
++
++        val shouldApply = runImmediateSuspend {
++            shouldApplyDeferredScrollOffsetAlignmentAfterOhosRefresh(
++                forceExpand = true,
++                isScrollInProgress = { false },
++                isCurrent = { isCurrent },
++                awaitRefreshWindow = { isCurrent = false }
++            )
++        }
++
++        assertFalse(shouldApply)
++    }
++
++    @Test
++    fun scrollEndRetriesSkippedAlignmentExactlyOnceWhenIdle() {
++        val harness = DeferredAlignmentHarness(isScrollInProgress = true)
++
++        harness.schedule().complete()
++        assertEquals(0, harness.appliedActions)
++
++        harness.isScrollInProgress = false
++        harness.coordinator.retryAfterScrollEnd {
++            harness.schedule().complete()
++        }
++
++        assertEquals(1, harness.appliedActions)
++    }
++
++    @Test
++    fun forcedReplacementAppliesOnceDuringActiveScroll() {
++        val harness = DeferredAlignmentHarness(isScrollInProgress = true)
++
++        val first = harness.schedule(forceExpand = true)
++        val second = harness.schedule(forceExpand = true)
++        first.complete()
++        second.complete()
++
++        assertEquals(1, harness.appliedActions)
++    }
++
++    @Test
++    fun scrollEndInvokesProductionRetryExactlyOnce() {
++        val state = ScrollState(0)
++        var retries = 0
++
++        state.kuiklyOnScrollEnd(
++            params = ScrollParams(
++                offsetX = 0f,
++                offsetY = 0f,
++                contentWidth = 100f,
++                contentHeight = 100f,
++                viewWidth = 100f,
++                viewHeight = 100f,
++                isDragging = false
++            ),
++            retryDeferredAlignment = { retries += 1 }
++        )
++
++        assertEquals(1, retries)
++    }
++
++    private class DeferredAlignmentHarness(
++        var isScrollInProgress: Boolean = false
++    ) {
++        private var pendingAlignment: PendingAlignment? = null
++        var appliedActions: Int = 0
++            private set
++        var cancelledAlignments: Int = 0
++            private set
++
++        val coordinator = DeferredScrollOffsetAlignmentCoordinator(
++            pendingAlignment = { pendingAlignment },
++            updatePendingAlignment = { pendingAlignment = it }
++        )
++
++        fun schedule(
++            forceExpand: Boolean = false,
++            duringWait: () -> Unit = {}
++        ): PendingAlignment {
++            lateinit var scheduledAlignment: PendingAlignment
++            scheduleDeferredScrollOffsetAlignment(
++                coordinator = coordinator,
++                forceExpand = forceExpand,
++                isScrollInProgress = { isScrollInProgress },
++                cancelPendingAlignment = {
++                    cancelledAlignments += 1
++                    it.cancel()
++                },
++                launchAlignment = { alignment ->
++                    PendingAlignment { runImmediateSuspend(alignment) }
++                        .also { scheduledAlignment = it }
++                },
++                awaitAlignmentWindow = { duringWait() },
++                applyAlignment = { appliedActions += 1 }
++            )
++            return scheduledAlignment
++        }
++
++        fun cancelAndInvalidate() {
++            coordinator.cancelAndInvalidate {
++                cancelledAlignments += 1
++                it.cancel()
++            }
++        }
++    }
++
++    private class PendingAlignment(
++        private val action: () -> Unit
++    ) {
++        private var isCancelled = false
++
++        fun cancel() {
++            isCancelled = true
++        }
++
++        fun complete() {
++            if (!isCancelled) action()
++        }
++
++        fun completeIgnoringCancellation() {
++            action()
++        }
++    }
++
++}
++
++private fun <T> runImmediateSuspend(block: suspend () -> T): T {
++    var outcome: Result<T>? = null
++    block.startCoroutine(object : Continuation<T> {
++        override val context = EmptyCoroutineContext
++
++        override fun resumeWith(result: Result<T>) {
++            outcome = result
++        }
++    })
++    return checkNotNull(outcome).getOrThrow()
++}

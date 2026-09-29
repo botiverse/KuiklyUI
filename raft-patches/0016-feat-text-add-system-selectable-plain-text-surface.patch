@@ -1,0 +1,2680 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:10:55 +0000
+Subject: [PATCH] feat(text): add system-selectable plain text surface
+
+Add SelectableText (Compose) and SelectableTextView (core DSL) backed by
+native KRSelectableTextView on Android, iOS and OHOS, giving the system
+selection menu on read-only text. It measures through a lazy-layout-safe
+measure policy, takes touches via a native-dispatch RELEASE policy so the
+native view gets the gesture, exposes truthful a11y text, and dismisses
+the iOS edit menu on detach.
+
+Fork-Patch: selectable-text-native-surface
+Origin: d7941871 725ff185 76d756c6 95e8f98d
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../compose/foundation/text/SelectableText.kt | 305 ++++++++++++++++
+ .../ui/input/pointer/HitPathTracker.kt        |  47 ++-
+ .../ui/input/pointer/NativeDispatchCapture.kt | 137 ++++++-
+ .../ui/node/PointerInputModifierNode.kt       |  20 ++
+ .../text/SelectableTextStylePropsTest.kt      | 333 ++++++++++++++++++
+ .../input/pointer/NativeDispatchPolicyTest.kt | 183 ++++++++++
+ .../android/css/ktx/KRCSSViewExtension.kt     |  92 +++--
+ .../expand/KuiklyRenderViewBaseDelegator.kt   |   3 +
+ .../expand/component/KRSelectableTextView.kt  | 196 +++++++++++
+ .../component/KRSelectableTextViewTest.kt     | 244 +++++++++++++
+ .../component/KRViewSuperTouchDispatchTest.kt | 148 ++++++++
+ .../Components/KRSelectableTextView.h         |  33 ++
+ .../Components/KRSelectableTextView.m         | 171 +++++++++
+ .../include/KRSelectableTextView.h            |   1 +
+ core-render-ohos/src/main/cpp/CMakeLists.txt  |   1 +
+ .../components/ComponentsRegisterEntry.h      |   4 +
+ .../richtext/KRSelectableTextView.cpp         |  91 +++++
+ .../richtext/KRSelectableTextView.h           |  50 +++
+ .../com/tencent/kuikly/core/base/ViewConst.kt |   1 +
+ .../kuikly/core/views/SelectableTextView.kt   | 275 +++++++++++++++
+ docs/API/components/selectable-text.md        |  64 ++++
+ 21 files changed, 2351 insertions(+), 48 deletions(-)
+ create mode 100644 compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableText.kt
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableTextStylePropsTest.kt
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchPolicyTest.kt
+ create mode 100644 core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextView.kt
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextViewTest.kt
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRViewSuperTouchDispatchTest.kt
+ create mode 100644 core-render-ios/Extension/Components/KRSelectableTextView.h
+ create mode 100644 core-render-ios/Extension/Components/KRSelectableTextView.m
+ create mode 120000 core-render-ios/include/KRSelectableTextView.h
+ create mode 100644 core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.cpp
+ create mode 100644 core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.h
+ create mode 100644 core/src/commonMain/kotlin/com/tencent/kuikly/core/views/SelectableTextView.kt
+ create mode 100644 docs/API/components/selectable-text.md
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableText.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableText.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..615b3d1309b8687a3345accd0f69db907504f1ce
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableText.kt
+@@ -0,0 +1,305 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.foundation.text
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
++import com.tencent.kuikly.compose.extension.MakeKuiklyComposeNode
++import com.tencent.kuikly.compose.ui.Modifier
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.graphics.isSpecified
++import com.tencent.kuikly.compose.ui.input.pointer.nativeDispatchRelease
++import com.tencent.kuikly.compose.ui.layout.Measurable
++import com.tencent.kuikly.compose.ui.layout.IntrinsicMeasurable
++import com.tencent.kuikly.compose.ui.layout.IntrinsicMeasureScope
++import com.tencent.kuikly.compose.ui.layout.MeasurePolicy
++import com.tencent.kuikly.compose.ui.layout.MeasureResult
++import com.tencent.kuikly.compose.ui.layout.MeasureScope
++import com.tencent.kuikly.compose.ui.node.KNode
++import com.tencent.kuikly.compose.ui.node.MeasureScopeWithLayoutNode
++import com.tencent.kuikly.compose.ui.platform.LocalDensity
++import com.tencent.kuikly.compose.ui.text.TextStyle
++import com.tencent.kuikly.compose.ui.text.style.TextAlign
++import com.tencent.kuikly.compose.ui.unit.Constraints
++import com.tencent.kuikly.compose.ui.unit.IntSize
++import com.tencent.kuikly.compose.ui.unit.constrain
++import com.tencent.kuikly.compose.ui.unit.isSpecified
++import com.tencent.kuikly.core.views.SelectableTextAttr
++import com.tencent.kuikly.core.views.SelectableTextView
++import com.tencent.kuikly.core.views.TextConst
++import kotlin.math.ceil
++
++/**
++ * System-selectable plain text.
++ *
++ * Renders [text] on the platform's native selectable text surface
++ * (Android `TextView.setTextIsSelectable`, iOS `UITextView` with
++ * `editable = false` / `selectable = true`, OHOS `Text` with the system copy
++ * option). The OS supplies the selection experience anchored to the
++ * selection: the baseline guarantee is word selection, drag handles,
++ * Select all and Copy. Any further actions (e.g. Translate, Look Up, Share,
++ * or PROCESS_TEXT targets on Android) appear only if the current OS version,
++ * locale and installed services provide them — they are platform-supplied
++ * extras, not guarantees of this component. The surface is strictly
++ * read-only: it never opens an IME and text can only change via [text].
++ *
++ * Scrolling is not built in; wrap in a scrollable container for long content.
++ *
++ * Supported [style] fields: color, fontSize, fontWeight, lineHeight,
++ * textAlign. Other fields are ignored by this minimal surface. Unspecified
++ * fields resolve to deterministic defaults (black, 15f, 400, fontSize*4/3,
++ * left) so style changes on a reused node always reset prior values.
++ */
++@Composable
++fun SelectableText(
++    text: String,
++    modifier: Modifier = Modifier,
++    style: TextStyle = TextStyle.Default,
++) {
++    val density = LocalDensity.current
++    // Lazy containers measure items with an unbounded main axis. The generic
++    // Kuikly node policy lays out at constraints.maxHeight directly, which is
++    // Constraints.Infinity for a vertical LazyColumn. Measure this text-backed
++    // native node through its TextShadow instead so the Compose node receives
++    // the finite content height that the native view will render at.
++    val measurePolicy = remember(text, style, density.density) {
++        selectableTextMeasurePolicy()
++    }
++    MakeKuiklyComposeNode<SelectableTextView>(
++        factory = { SelectableTextView() },
++        // The system selection gesture lives in the native view. Release this
++        // region from any ancestor native-dispatch capture (overlay barriers)
++        // so the native text view keeps receiving MotionEvents; the release is
++        // branch-scoped, so barriers still block click-through elsewhere.
++        modifier = modifier.nativeDispatchRelease(),
++        measurePolicy = measurePolicy,
++        viewUpdate = { view ->
++            view.getViewAttr().run {
++                text(text)
++                val densityScale = density.density / getPager().pagerDensity()
++                resolveSelectableTextStyleProps(style, densityScale).applyTo(this)
++            }
++        }
++    )
++}
++
++private const val SELECTABLE_TEXT_UNBOUNDED_WIDTH = 100000f
++private const val SELECTABLE_TEXT_UNBOUNDED_HEIGHT = -1f
++
++internal fun selectableTextShadowConstraint(
++    maxDimension: Int,
++    pagerDensity: Float,
++    unboundedValue: Float,
++): Float =
++    if (maxDimension == Constraints.Infinity) {
++        unboundedValue
++    } else {
++        maxDimension.toFloat() / pagerDensity
++    }
++
++internal fun selectableTextMeasuredSize(
++    constraints: Constraints,
++    measuredWidth: Float,
++    measuredHeight: Float,
++    pagerDensity: Float,
++): IntSize =
++    constraints.constrain(
++        IntSize(
++            width = ceil(measuredWidth * pagerDensity).toInt(),
++            height = ceil(measuredHeight * pagerDensity).toInt(),
++        )
++    )
++
++internal fun selectableTextViewForMeasure(scope: IntrinsicMeasureScope): SelectableTextView {
++    val layoutNode =
++        (scope as? MeasureScopeWithLayoutNode)?.layoutNode
++            ?: error("SelectableText measure scope must expose its layout node")
++    return ((layoutNode as? KNode<*>)?.view as? SelectableTextView)
++        ?: error("SelectableText measure policy must run on a SelectableText KNode")
++}
++
++internal fun selectableTextMeasurePolicy(
++    pagerDensity: (SelectableTextView) -> Float = { it.getPager().pagerDensity() },
++): MeasurePolicy =
++    object : MeasurePolicy {
++        private val placementBlock: com.tencent.kuikly.compose.ui.layout.Placeable.PlacementScope.() -> Unit = {}
++
++        override fun MeasureScope.measure(
++            measurables: List<Measurable>,
++            constraints: Constraints,
++        ): MeasureResult {
++            check(measurables.isEmpty()) { "SelectableText must remain a leaf native node" }
++            // Resolve the native view from the KNode that Compose is actually
++            // measuring. A ReusableComposeNode may retain its KNode while
++            // ordinary remember caches are recreated for replacement content.
++            val view = selectableTextViewForMeasure(this)
++            val pagerDensity = pagerDensity(view)
++            val measured =
++                view.calculateContentSize(
++                    maxWidth =
++                        selectableTextShadowConstraint(
++                            maxDimension = constraints.maxWidth,
++                            pagerDensity = pagerDensity,
++                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_WIDTH,
++                        ),
++                    maxHeight =
++                        selectableTextShadowConstraint(
++                            maxDimension = constraints.maxHeight,
++                            pagerDensity = pagerDensity,
++                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_HEIGHT,
++                        ),
++                )
++            val size =
++                selectableTextMeasuredSize(
++                    constraints = constraints,
++                    measuredWidth = measured?.width ?: 0f,
++                    measuredHeight = measured?.height ?: 0f,
++                    pagerDensity = pagerDensity,
++                )
++            return layout(size.width, size.height, placementBlock = placementBlock)
++        }
++
++        override fun IntrinsicMeasureScope.minIntrinsicWidth(
++            measurables: List<IntrinsicMeasurable>,
++            height: Int,
++        ): Int = intrinsicSize(measurables, Constraints.Infinity, height).width
++
++        override fun IntrinsicMeasureScope.maxIntrinsicWidth(
++            measurables: List<IntrinsicMeasurable>,
++            height: Int,
++        ): Int = intrinsicSize(measurables, Constraints.Infinity, height).width
++
++        override fun IntrinsicMeasureScope.minIntrinsicHeight(
++            measurables: List<IntrinsicMeasurable>,
++            width: Int,
++        ): Int = intrinsicSize(measurables, width, Constraints.Infinity).height
++
++        override fun IntrinsicMeasureScope.maxIntrinsicHeight(
++            measurables: List<IntrinsicMeasurable>,
++            width: Int,
++        ): Int = intrinsicSize(measurables, width, Constraints.Infinity).height
++
++        private fun IntrinsicMeasureScope.intrinsicSize(
++            measurables: List<IntrinsicMeasurable>,
++            maxWidth: Int,
++            maxHeight: Int,
++        ): IntSize {
++            check(measurables.isEmpty()) { "SelectableText must remain a leaf native node" }
++            // Unlike MeasurePolicy's default intrinsic implementation, this
++            // keeps the original coordinator receiver, which exposes the
++            // actual KNode instead of wrapping it in IntrinsicsMeasureScope.
++            val view = selectableTextViewForMeasure(this)
++            val density = pagerDensity(view)
++            val measured =
++                view.calculateContentSize(
++                    maxWidth =
++                        selectableTextShadowConstraint(
++                            maxDimension = maxWidth,
++                            pagerDensity = density,
++                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_WIDTH,
++                        ),
++                    maxHeight =
++                        selectableTextShadowConstraint(
++                            maxDimension = maxHeight,
++                            pagerDensity = density,
++                            unboundedValue = SELECTABLE_TEXT_UNBOUNDED_HEIGHT,
++                        ),
++                )
++            return IntSize(
++                width = ceil((measured?.width ?: 0f) * density).toInt().coerceAtLeast(0),
++                height = ceil((measured?.height ?: 0f) * density).toInt().coerceAtLeast(0),
++            )
++        }
++    }
++
++/**
++ * The resolved native prop values for a [SelectableText] style. Kept as plain
++ * data so the mapping from Compose types is unit-testable.
++ *
++ * Every field is always concrete (never null): the compose node backing
++ * SelectableText is reusable, so a `specified -> TextStyle.Default` update
++ * must actively overwrite every previously written prop on both the native
++ * renderer and the measuring TextShadow. Unspecified style fields therefore
++ * resolve to deterministic defaults instead of "don't write".
++ */
++internal data class SelectableTextStyleProps(
++    val color: String,
++    val fontSize: Float,
++    val fontWeight: String,
++    val lineHeight: Float,
++    val textAlign: String,
++) {
++    fun asPropPairs(): List<Pair<String, Any>> = listOf(
++        TextConst.TEXT_COLOR to color,
++        TextConst.FONT_SIZE to fontSize,
++        TextConst.FONT_WEIGHT to fontWeight,
++        TextConst.LINE_HEIGHT to lineHeight,
++        TextConst.TEXT_ALIGN to textAlign,
++    )
++}
++
++internal const val SELECTABLE_TEXT_DEFAULT_FONT_SIZE = 15f
++internal const val SELECTABLE_TEXT_DEFAULT_LINE_HEIGHT_FACTOR = 4f / 3f
++
++internal fun resolveSelectableTextStyleProps(
++    style: TextStyle,
++    densityScale: Float,
++): SelectableTextStyleProps {
++    val color = if (style.color.isSpecified) {
++        style.color.toKuiklyColor().toString()
++    } else {
++        Color.Black.toKuiklyColor().toString()
++    }
++    val fontSize = if (style.fontSize.isSpecified) {
++        style.fontSize.value * densityScale
++    } else {
++        SELECTABLE_TEXT_DEFAULT_FONT_SIZE
++    }
++    val fontWeight = style.fontWeight?.let { weight ->
++        when {
++            weight.weight >= 700 -> "700"
++            weight.weight >= 600 -> "600"
++            weight.weight >= 500 -> "500"
++            else -> "400"
++        }
++    } ?: "400"
++    // No wire value reliably means "auto" on every consumer (the shared
++    // rich-text shadow converts before comparing to its unset sentinel), so
++    // unspecified lineHeight resolves to a deterministic default derived from
++    // the resolved fontSize.
++    val lineHeight = if (style.lineHeight.isSpecified) {
++        style.lineHeight.value * densityScale
++    } else {
++        fontSize * SELECTABLE_TEXT_DEFAULT_LINE_HEIGHT_FACTOR
++    }
++    // textAlign is non-null in this fork; Unspecified is a sentinel value.
++    val textAlign = when (style.textAlign.value) {
++        TextAlign.Center.value -> "center"
++        TextAlign.Right.value, TextAlign.End.value -> "right"
++        else -> "left"
++    }
++    return SelectableTextStyleProps(
++        color = color,
++        fontSize = fontSize,
++        fontWeight = fontWeight,
++        lineHeight = lineHeight,
++        textAlign = textAlign,
++    )
++}
++
++internal fun SelectableTextStyleProps.applyTo(attr: SelectableTextAttr) {
++    asPropPairs().forEach { (key, value) -> attr.setProp(key, value) }
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt
+index dc52fbeaab6127544c6537e2c46f3a4af8a75345..bf4719829a7a9ce9298ebd50d0be46da494b5b6a 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt
+@@ -22,6 +22,7 @@ import androidx.compose.runtime.collection.mutableVectorOf
+ import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
+ import com.tencent.kuikly.compose.ui.Modifier
+ import com.tencent.kuikly.compose.ui.layout.LayoutCoordinates
++import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy
+ import com.tencent.kuikly.compose.ui.node.Nodes
+ import com.tencent.kuikly.compose.ui.node.dispatchForKind
+ import com.tencent.kuikly.compose.ui.node.layoutCoordinates
+@@ -111,6 +112,8 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
+             return HitPathDispatchResult(dispatched = false, nativeDispatchCaptured = false)
+         }
+         val nativeDispatchCaptured = root.capturesNativeDispatch()
++        // NOTE: capture resolution is branch-scoped (see resolveNativeDispatchPolicy):
++        // a RELEASE node only neutralizes CAPTURE ancestors on its own hit branch.
+         var dispatchHit = root.dispatchMainEventPass(
+             internalPointerEvent.changes,
+             rootCoordinates,
+@@ -159,7 +162,7 @@ internal data class HitPathDispatchResult(
+  */
+ /*@VisibleForTesting*/
+ @OptIn(InternalCoreApi::class, ExperimentalComposeUiApi::class)
+-internal open class NodeParent {
++internal open class NodeParent : NativeDispatchPolicyTreeNode {
+     val children: MutableVector<Node> = mutableVectorOf()
+ 
+     open fun buildCache(
+@@ -226,8 +229,21 @@ internal open class NodeParent {
+         return dispatched
+     }
+ 
+-    open fun capturesNativeDispatch(): Boolean =
+-        children.any { it.capturesNativeDispatch() }
++    fun capturesNativeDispatch(): Boolean =
++        resolveNativeDispatchPolicyTree(this, NativeDispatchPolicy.INHERIT) ==
++            NativeDispatchPolicy.CAPTURE
++
++    /**
++     * The root has no modifiers and therefore no stance of its own; branch
++     * resolution semantics live in [resolveNativeDispatchPolicyTree], which
++     * this tree shares with the policy-tree tests.
++     */
++    override val ownNativeDispatchStance: NativeDispatchPolicy
++        get() = NativeDispatchPolicy.INHERIT
++
++    override fun forEachPolicyChild(action: (NativeDispatchPolicyTreeNode) -> Unit) {
++        children.forEach(action)
++    }
+ 
+     /**
+      * Dispatches the cancel event to all child [Node]s.
+@@ -373,16 +389,23 @@ internal class Node(val modifierNode: Modifier.Node) : NodeParent() {
+         return result
+     }
+ 
+-    override fun capturesNativeDispatch(): Boolean {
+-        if (relevantChanges.isEmpty() || !modifierNode.isAttached) {
+-            return super.capturesNativeDispatch()
+-        }
+-        var captures = false
+-        modifierNode.dispatchForKind(Nodes.PointerInput) {
+-            captures = captures || it.captureNativeDispatch()
++    /**
++     * This node's own stance from its pointer-input modifiers; branch
++     * resolution (top-down inherited stance, deepest-wins per path,
++     * any-capture-wins across siblings) is the shared
++     * resolveNativeDispatchPolicyTree traversal.
++     */
++    override val ownNativeDispatchStance: NativeDispatchPolicy
++        get() {
++            if (relevantChanges.isEmpty() || !modifierNode.isAttached) {
++                return NativeDispatchPolicy.INHERIT
++            }
++            var own = NativeDispatchPolicy.INHERIT
++            modifierNode.dispatchForKind(Nodes.PointerInput) {
++                own = combineSameNodeNativeDispatchPolicies(own, it.resolvedNativeDispatchPolicy())
++            }
++            return own
+         }
+-        return captures || super.capturesNativeDispatch()
+-    }
+ 
+     /**
+      * Calculates cached properties that will be stored in this [Node] for the duration of both
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchCapture.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchCapture.kt
+index bb2edfe44c186175ef4885d2867afb7891903bc7..9b2e7f13623e477bfb49f071fb0d00bd294a8bf9 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchCapture.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchCapture.kt
+@@ -17,6 +17,7 @@ package com.tencent.kuikly.compose.ui.input.pointer
+ 
+ import com.tencent.kuikly.compose.ui.Modifier
+ import com.tencent.kuikly.compose.ui.node.ModifierNodeElement
++import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy
+ import com.tencent.kuikly.compose.ui.node.PointerInputModifierNode
+ import com.tencent.kuikly.compose.ui.unit.IntSize
+ 
+@@ -28,6 +29,35 @@ import com.tencent.kuikly.compose.ui.unit.IntSize
+  */
+ fun Modifier.nativeDispatchCapture(): Modifier = this.then(NativeDispatchCaptureElement)
+ 
++/**
++ * Marks this pointer region as a native-dispatch release boundary: native
++ * views in this region keep receiving MotionEvents even when a hit-path
++ * ancestor (for example an overlay barrier) captures native dispatch.
++ *
++ * Branch-scoped by design: the release only neutralizes capture nodes that
++ * are this region's own hit-path ancestors. Touches that hit a capturing
++ * surface without passing through this region stay captured, so overlay
++ * barriers keep blocking click-through everywhere else.
++ */
++internal fun Modifier.nativeDispatchRelease(): Modifier = this.then(NativeDispatchReleaseElement)
++
++/**
++ * Internal marker: a [PointerInputModifierNode] implementing this releases
++ * native dispatch for its hit branch. Kept internal so the framework's public
++ * ABI stays at [PointerInputModifierNode.captureNativeDispatch].
++ */
++internal interface NativeDispatchReleasingNode
++
++/**
++ * Internal stance resolution for one pointer-input modifier node: the release
++ * marker wins, then the public capture contract, else no stance.
++ */
++internal fun PointerInputModifierNode.resolvedNativeDispatchPolicy(): NativeDispatchPolicy = when {
++    this is NativeDispatchReleasingNode -> NativeDispatchPolicy.RELEASE
++    captureNativeDispatch() -> NativeDispatchPolicy.CAPTURE
++    else -> NativeDispatchPolicy.INHERIT
++}
++
+ private object NativeDispatchCaptureElement : ModifierNodeElement<NativeDispatchCaptureNode>() {
+     override fun create(): NativeDispatchCaptureNode = NativeDispatchCaptureNode()
+ 
+@@ -38,7 +68,7 @@ private object NativeDispatchCaptureElement : ModifierNodeElement<NativeDispatch
+     override fun equals(other: Any?): Boolean = other === this
+ }
+ 
+-private class NativeDispatchCaptureNode : Modifier.Node(), PointerInputModifierNode {
++internal class NativeDispatchCaptureNode : Modifier.Node(), PointerInputModifierNode {
+     override fun captureNativeDispatch(): Boolean = true
+ 
+     override fun onPointerEvent(
+@@ -49,3 +79,108 @@ private class NativeDispatchCaptureNode : Modifier.Node(), PointerInputModifierN
+ 
+     override fun onCancelPointerInput() = Unit
+ }
++
++private object NativeDispatchReleaseElement : ModifierNodeElement<NativeDispatchReleaseNode>() {
++    override fun create(): NativeDispatchReleaseNode = NativeDispatchReleaseNode()
++
++    override fun update(node: NativeDispatchReleaseNode) = Unit
++
++    override fun hashCode(): Int = NativeDispatchReleaseElement::class.hashCode()
++
++    override fun equals(other: Any?): Boolean = other === this
++}
++
++internal class NativeDispatchReleaseNode :
++    Modifier.Node(), PointerInputModifierNode, NativeDispatchReleasingNode {
++
++    override fun onPointerEvent(
++        pointerEvent: PointerEvent,
++        pass: PointerEventPass,
++        bounds: IntSize
++    ) = Unit
++
++    override fun onCancelPointerInput() = Unit
++}
++
++/**
++ * A node in the native-dispatch policy tree. HitPathTracker's real hit tree
++ * implements this so the SAME traversal below runs in production and in the
++ * policy-tree tests (no mirrored re-implementation).
++ */
++internal interface NativeDispatchPolicyTreeNode {
++    /** This node's own stance from its pointer-input modifiers. */
++    val ownNativeDispatchStance: NativeDispatchPolicy
++
++    /** Iterates this node's hit children. */
++    fun forEachPolicyChild(action: (NativeDispatchPolicyTreeNode) -> Unit)
++}
++
++/**
++ * The production resolution: the ancestor stance flows top-down per branch
++ * BEFORE sibling reduction. Each root-to-leaf path resolves to its deepest
++ * non-INHERIT stance (leaves return the effective path stance), then sibling
++ * branches combine with any-capture-wins — so a RELEASE only neutralizes
++ * capture ancestors on its own path, and a shared CAPTURE ancestor keeps
++ * capturing for every branch that does not release it itself.
++ */
++internal fun resolveNativeDispatchPolicyTree(
++    node: NativeDispatchPolicyTreeNode,
++    inherited: NativeDispatchPolicy,
++): NativeDispatchPolicy {
++    val effective = combineChainNativeDispatchPolicies(
++        deeper = node.ownNativeDispatchStance,
++        own = inherited,
++    )
++    var hasChildren = false
++    var combined = NativeDispatchPolicy.INHERIT
++    node.forEachPolicyChild { child ->
++        hasChildren = true
++        combined = combineSiblingNativeDispatchPolicies(
++            combined,
++            resolveNativeDispatchPolicyTree(child, effective)
++        )
++    }
++    return if (hasChildren) combined else effective
++}
++
++/**
++ * Combines two independent sibling hit branches: any capturing branch keeps
++ * the root capturing; a release on one branch never neutralizes a capture on
++ * another branch.
++ */
++internal fun combineSiblingNativeDispatchPolicies(
++    left: NativeDispatchPolicy,
++    right: NativeDispatchPolicy,
++): NativeDispatchPolicy = when {
++    left == NativeDispatchPolicy.CAPTURE || right == NativeDispatchPolicy.CAPTURE ->
++        NativeDispatchPolicy.CAPTURE
++    left == NativeDispatchPolicy.RELEASE || right == NativeDispatchPolicy.RELEASE ->
++        NativeDispatchPolicy.RELEASE
++    else -> NativeDispatchPolicy.INHERIT
++}
++
++/**
++ * Combines stances along one hit branch: the deeper stance wins, so a RELEASE
++ * overrides its capture ancestors (and a deeper CAPTURE symmetrically
++ * overrides a release ancestor).
++ */
++internal fun combineChainNativeDispatchPolicies(
++    deeper: NativeDispatchPolicy,
++    own: NativeDispatchPolicy,
++): NativeDispatchPolicy =
++    if (deeper != NativeDispatchPolicy.INHERIT) deeper else own
++
++/**
++ * Combines stances declared by multiple pointer-input modifiers on the same
++ * layout node: RELEASE dominates because it is the more specific opt-out.
++ */
++internal fun combineSameNodeNativeDispatchPolicies(
++    left: NativeDispatchPolicy,
++    right: NativeDispatchPolicy,
++): NativeDispatchPolicy = when {
++    left == NativeDispatchPolicy.RELEASE || right == NativeDispatchPolicy.RELEASE ->
++        NativeDispatchPolicy.RELEASE
++    left == NativeDispatchPolicy.CAPTURE || right == NativeDispatchPolicy.CAPTURE ->
++        NativeDispatchPolicy.CAPTURE
++    else -> NativeDispatchPolicy.INHERIT
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt
+index 8641a2f106aae82ed054bd1a7b20f9a338650e6f..9820d38633a4662c0231c86f8b5cd54a573a9b3f 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt
+@@ -129,6 +129,26 @@ interface PointerInputModifierNode : DelegatableNode {
+     }
+ }
+ 
++/**
++ * Stance of a [PointerInputModifierNode] on whether the host render root should
++ * capture (withhold) native child dispatch for the current gesture. Internal:
++ * the public contract stays [PointerInputModifierNode.captureNativeDispatch];
++ * RELEASE is only expressible through the internal release marker node.
++ */
++internal enum class NativeDispatchPolicy {
++    /** No stance; defer to other nodes in the hit branch. */
++    INHERIT,
++
++    /** Withhold MotionEvents from native children under the compose root. */
++    CAPTURE,
++
++    /**
++     * Let native children receive MotionEvents even when a hit-path ancestor
++     * captures. Only overrides ancestors within the same hit branch.
++     */
++    RELEASE,
++}
++
+ internal val PointerInputModifierNode.isAttached: Boolean
+     get() = node.isAttached
+ 
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableTextStylePropsTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableTextStylePropsTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f849a8c07f171ee9a114251d14f4ea501425fff
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/SelectableTextStylePropsTest.kt
+@@ -0,0 +1,333 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.foundation.text
++
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.layout.MeasureScope
++import com.tencent.kuikly.compose.ui.node.KNode
++import com.tencent.kuikly.compose.ui.node.LayoutNode
++import com.tencent.kuikly.compose.ui.node.MeasureScopeWithLayoutNode
++import com.tencent.kuikly.compose.ui.text.TextStyle
++import com.tencent.kuikly.compose.ui.text.font.FontWeight
++import com.tencent.kuikly.compose.ui.text.style.TextAlign
++import com.tencent.kuikly.compose.ui.unit.Constraints
++import com.tencent.kuikly.compose.ui.unit.Density
++import com.tencent.kuikly.compose.ui.unit.IntSize
++import com.tencent.kuikly.compose.ui.unit.LayoutDirection
++import com.tencent.kuikly.compose.ui.unit.sp
++import com.tencent.kuikly.core.base.Size
++import com.tencent.kuikly.core.views.SelectableTextAttr
++import com.tencent.kuikly.core.views.SelectableTextView
++import com.tencent.kuikly.core.views.TextConst
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertNotEquals
++import kotlin.test.assertSame
++
++/**
++ * The resolver is the contract between Compose style values and the native
++ * prop wire format shared by all three renderers and the measuring shadow.
++ * Because the backing compose node is reusable, every supported field must
++ * always resolve to a concrete wire value — these teeth pin both the
++ * mapping and the reset-on-reuse behavior.
++ */
++class SelectableTextStylePropsTest {
++
++    @Test
++    fun reusableNodeMeasuresTheActualKNodeViewAfterTextAndStyleChange() {
++        val actualView = RecordingSelectableTextView()
++        val detachedRememberedView = RecordingSelectableTextView()
++        val scope = TestMeasureScope(KNode(actualView))
++        val constraints = Constraints(
++            minWidth = 636,
++            maxWidth = 636,
++            minHeight = 0,
++            maxHeight = Constraints.Infinity,
++        )
++        val policy = selectableTextMeasurePolicy { measuredView ->
++            assertSame(actualView, measuredView)
++            3f
++        }
++
++        actualView.getViewAttr().text("A")
++        resolveSelectableTextStyleProps(
++            TextStyle(color = Color.Red, fontSize = 20.sp),
++            densityScale = 1f,
++        ).applyTo(actualView.getViewAttr())
++        actualView.nextHeight = 24f
++        val first = with(policy) { scope.measure(emptyList(), constraints) }
++        assertEquals(72, first.height)
++
++        // Model a Lazy reusable slot retaining this KNode while an ordinary
++        // remembered object is recreated for the replacement content.
++        actualView.getViewAttr().text("B")
++        resolveSelectableTextStyleProps(TextStyle.Default, densityScale = 1f)
++            .applyTo(actualView.getViewAttr())
++        actualView.nextHeight = 40f
++        val reused = with(policy) { scope.measure(emptyList(), constraints) }
++        assertEquals(120, reused.height)
++        assertEquals(2, actualView.requests.size)
++        assertEquals(0, detachedRememberedView.requests.size)
++        assertSame(actualView, selectableTextViewForMeasure(scope))
++
++        // Explicit intrinsic implementations must keep the original node-aware
++        // receiver instead of re-entering normal measure through a wrapper that
++        // has lost MeasureScopeWithLayoutNode.
++        val intrinsicHeight = with(policy) { scope.minIntrinsicHeight(emptyList(), 636) }
++        assertEquals(120, intrinsicHeight)
++        assertEquals(212f to -1f, actualView.requests.last())
++
++        val intrinsicWidth = with(policy) { scope.maxIntrinsicWidth(emptyList(), 120) }
++        assertEquals(636, intrinsicWidth)
++        assertEquals(100000f to 40f, actualView.requests.last())
++        assertEquals(4, actualView.requests.size)
++        assertEquals(0, detachedRememberedView.requests.size)
++    }
++
++    @Test
++    fun unboundedLazyColumnHeightUsesShadowSentinelAndFiniteContentHeight() {
++        val constraints = Constraints(
++            minWidth = 636,
++            maxWidth = 636,
++            minHeight = 0,
++            maxHeight = Constraints.Infinity,
++        )
++
++        assertEquals(
++            -1f,
++            selectableTextShadowConstraint(
++                maxDimension = constraints.maxHeight,
++                pagerDensity = 3f,
++                unboundedValue = -1f,
++            )
++        )
++        val measured =
++            selectableTextMeasuredSize(
++                constraints = constraints,
++                measuredWidth = 212f,
++                measuredHeight = 24f,
++                pagerDensity = 3f,
++            )
++        assertEquals(IntSize(width = 636, height = 72), measured)
++        assertNotEquals(Constraints.Infinity, measured.height)
++    }
++
++    @Test
++    fun boundedDimensionsAreConvertedToShadowUnitsAndConstrainedBack() {
++        val constraints = Constraints(
++            minWidth = 300,
++            maxWidth = 600,
++            minHeight = 40,
++            maxHeight = 240,
++        )
++
++        assertEquals(
++            200f,
++            selectableTextShadowConstraint(
++                maxDimension = constraints.maxWidth,
++                pagerDensity = 3f,
++                unboundedValue = 100000f,
++            )
++        )
++        assertEquals(
++            80f,
++            selectableTextShadowConstraint(
++                maxDimension = constraints.maxHeight,
++                pagerDensity = 3f,
++                unboundedValue = -1f,
++            )
++        )
++        assertEquals(
++            IntSize(width = 300, height = 240),
++            selectableTextMeasuredSize(
++                constraints = constraints,
++                measuredWidth = 80f,
++                measuredHeight = 100f,
++                pagerDensity = 3f,
++            )
++        )
++    }
++
++    private class RecordingSelectableTextView : SelectableTextView() {
++        var nextWidth = 212f
++        var nextHeight = 0f
++        val requests = mutableListOf<Pair<Float, Float>>()
++
++        override fun calculateContentSize(maxWidth: Float, maxHeight: Float): Size {
++            requests += maxWidth to maxHeight
++            return Size(nextWidth, nextHeight)
++        }
++    }
++
++    private class TestMeasureScope(
++        override val layoutNode: LayoutNode,
++    ) : MeasureScopeWithLayoutNode, Density by Density(1f) {
++        override val layoutDirection: LayoutDirection = LayoutDirection.Ltr
++    }
++
++    private val defaultProps = SelectableTextStyleProps(
++        color = Color.Black.toKuiklyColor().toString(),
++        fontSize = SELECTABLE_TEXT_DEFAULT_FONT_SIZE,
++        fontWeight = "400",
++        lineHeight = SELECTABLE_TEXT_DEFAULT_FONT_SIZE * SELECTABLE_TEXT_DEFAULT_LINE_HEIGHT_FACTOR,
++        textAlign = "left",
++    )
++
++    @Test
++    fun unspecifiedStyleResolvesToConcreteDefaultsForEveryField() {
++        assertEquals(
++            defaultProps,
++            resolveSelectableTextStyleProps(TextStyle.Default, densityScale = 1f)
++        )
++    }
++
++    private val styledStyle = TextStyle(
++        color = Color.Red,
++        fontSize = 20.sp,
++        fontWeight = FontWeight.Bold,
++        lineHeight = 30.sp,
++        textAlign = TextAlign.Right,
++    )
++
++    private fun assertAttrHoldsStyledValues(attr: SelectableTextAttr) {
++        assertEquals(Color.Red.toKuiklyColor().toString(), attr.getProp(TextConst.TEXT_COLOR))
++        assertEquals(20f, attr.getProp(TextConst.FONT_SIZE))
++        assertEquals("700", attr.getProp(TextConst.FONT_WEIGHT))
++        assertEquals(30f, attr.getProp(TextConst.LINE_HEIGHT))
++        assertEquals("right", attr.getProp(TextConst.TEXT_ALIGN))
++    }
++
++    private fun assertAttrHoldsDefaultValues(attr: SelectableTextAttr) {
++        assertEquals(defaultProps.color, attr.getProp(TextConst.TEXT_COLOR))
++        assertEquals(defaultProps.fontSize, attr.getProp(TextConst.FONT_SIZE))
++        assertEquals(defaultProps.fontWeight, attr.getProp(TextConst.FONT_WEIGHT))
++        assertEquals(defaultProps.lineHeight, attr.getProp(TextConst.LINE_HEIGHT))
++        assertEquals(defaultProps.textAlign, attr.getProp(TextConst.TEXT_ALIGN))
++    }
++
++    @Test
++    fun applyToWritesStyledThenDefaultThenStyledThroughTheProductionAttrPath() {
++        // The reusable-node sequence through the REAL write path: the same
++        // SelectableTextAttr receives applyTo for a fully styled update, then
++        // TextStyle.Default, then styled again. Every supported wire key must
++        // be overwritten on each step — a missed key in applyTo fails here.
++        val attr = SelectableTextAttr()
++
++        resolveSelectableTextStyleProps(styledStyle, densityScale = 1f).applyTo(attr)
++        assertAttrHoldsStyledValues(attr)
++
++        resolveSelectableTextStyleProps(TextStyle.Default, densityScale = 1f).applyTo(attr)
++        assertAttrHoldsDefaultValues(attr)
++
++        resolveSelectableTextStyleProps(styledStyle, densityScale = 1f).applyTo(attr)
++        assertAttrHoldsStyledValues(attr)
++    }
++
++    @Test
++    fun propPairSequenceAuxiliaryCheckResetsEveryKey() {
++        // Auxiliary wire-level view of the same sequence (kept in addition to,
++        // not instead of, the attr-path test above).
++        val propStore = mutableMapOf<String, Any>()
++        resolveSelectableTextStyleProps(styledStyle, densityScale = 1f)
++            .asPropPairs().forEach { (key, value) -> propStore[key] = value }
++        resolveSelectableTextStyleProps(TextStyle.Default, densityScale = 1f)
++            .asPropPairs().forEach { (key, value) -> propStore[key] = value }
++
++        val expected: Map<String, Any> = mapOf(
++            TextConst.TEXT_COLOR to defaultProps.color,
++            TextConst.FONT_SIZE to defaultProps.fontSize,
++            TextConst.FONT_WEIGHT to defaultProps.fontWeight,
++            TextConst.LINE_HEIGHT to defaultProps.lineHeight,
++            TextConst.TEXT_ALIGN to defaultProps.textAlign,
++        )
++        assertEquals(expected, propStore)
++    }
++
++    @Test
++    fun propPairsAlwaysCoverTheFullWireContract() {
++        val keys = resolveSelectableTextStyleProps(TextStyle.Default, densityScale = 1f)
++            .asPropPairs().map { it.first }
++        assertEquals(
++            listOf(
++                TextConst.TEXT_COLOR,
++                TextConst.FONT_SIZE,
++                TextConst.FONT_WEIGHT,
++                TextConst.LINE_HEIGHT,
++                TextConst.TEXT_ALIGN,
++            ),
++            keys
++        )
++    }
++
++    @Test
++    fun colorResolvesToKuiklyColorString() {
++        val props = resolveSelectableTextStyleProps(
++            TextStyle(color = Color.Red),
++            densityScale = 1f
++        )
++        assertEquals(Color.Red.toKuiklyColor().toString(), props.color)
++    }
++
++    @Test
++    fun fontSizeAndLineHeightScaleWithDensity() {
++        val props = resolveSelectableTextStyleProps(
++            TextStyle(fontSize = 16.sp, lineHeight = 24.sp),
++            densityScale = 1.5f
++        )
++        assertEquals(24f, props.fontSize)
++        assertEquals(36f, props.lineHeight)
++    }
++
++    @Test
++    fun unspecifiedLineHeightFollowsResolvedFontSize() {
++        val props = resolveSelectableTextStyleProps(
++            TextStyle(fontSize = 18.sp),
++            densityScale = 1f
++        )
++        assertEquals(18f, props.fontSize)
++        assertEquals(18f * SELECTABLE_TEXT_DEFAULT_LINE_HEIGHT_FACTOR, props.lineHeight)
++    }
++
++    @Test
++    fun fontWeightBucketsMatchNativeWeightStrings() {
++        fun weightProp(weight: FontWeight): String = resolveSelectableTextStyleProps(
++            TextStyle(fontWeight = weight),
++            densityScale = 1f
++        ).fontWeight
++
++        assertEquals("400", weightProp(FontWeight.W300))
++        assertEquals("400", weightProp(FontWeight.Normal))
++        assertEquals("500", weightProp(FontWeight.Medium))
++        assertEquals("600", weightProp(FontWeight.SemiBold))
++        assertEquals("700", weightProp(FontWeight.Bold))
++        assertEquals("700", weightProp(FontWeight.W900))
++    }
++
++    @Test
++    fun textAlignMapsToNativeAlignKeywords() {
++        fun alignProp(align: TextAlign): String = resolveSelectableTextStyleProps(
++            TextStyle(textAlign = align),
++            densityScale = 1f
++        ).textAlign
++
++        assertEquals("left", alignProp(TextAlign.Left))
++        assertEquals("left", alignProp(TextAlign.Start))
++        assertEquals("left", alignProp(TextAlign.Justify))
++        assertEquals("center", alignProp(TextAlign.Center))
++        assertEquals("right", alignProp(TextAlign.Right))
++        assertEquals("right", alignProp(TextAlign.End))
++    }
++}
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchPolicyTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchPolicyTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..1eef96a65e87b2f9454e962cb61e2bc77c2e4964
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchPolicyTest.kt
+@@ -0,0 +1,183 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.input.pointer
++
++import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy
++import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy.CAPTURE
++import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy.INHERIT
++import com.tencent.kuikly.compose.ui.node.NativeDispatchPolicy.RELEASE
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++/**
++ * The native-dispatch capture algebra used by HitPathTracker: the ancestor
++ * stance flows top-down per branch BEFORE sibling reduction, each root-to-leaf
++ * path resolves to its deepest non-INHERIT stance, and sibling branches
++ * combine with any-capture-wins. These teeth pin the barrier-vs-selectable
++ * region contract, including shared-prefix trees where a capture ancestor
++ * fans out into release and non-release children.
++ */
++class NativeDispatchPolicyTest {
++
++    /**
++     * A test tree node running the PRODUCTION traversal
++     * (resolveNativeDispatchPolicyTree) — the same function HitPathTracker's
++     * real hit tree executes; nothing is re-implemented here.
++     */
++    private class PolicyNode(
++        private val own: NativeDispatchPolicy,
++        private val children: List<PolicyNode> = emptyList(),
++    ) : NativeDispatchPolicyTreeNode {
++        override val ownNativeDispatchStance: NativeDispatchPolicy get() = own
++
++        override fun forEachPolicyChild(action: (NativeDispatchPolicyTreeNode) -> Unit) {
++            children.forEach(action)
++        }
++    }
++
++    private fun resolve(
++        node: PolicyNode,
++        inherited: NativeDispatchPolicy = INHERIT,
++    ): NativeDispatchPolicy = resolveNativeDispatchPolicyTree(node, inherited)
++
++    private fun rootCaptures(vararg branches: PolicyNode): Boolean =
++        resolveNativeDispatchPolicyTree(
++            PolicyNode(INHERIT, branches.toList()),
++            INHERIT
++        ) == CAPTURE
++
++    @Test
++    fun deeperReleaseOverridesItsOwnAncestorCapture() {
++        // barrier -> plain node -> selectable text release leaf
++        val chain = PolicyNode(CAPTURE, listOf(PolicyNode(INHERIT, listOf(PolicyNode(RELEASE)))))
++        assertEquals(RELEASE, resolve(chain))
++        assertEquals(false, rootCaptures(chain))
++    }
++
++    @Test
++    fun sharedCaptureAncestorKeepsCapturingForItsNonReleaseChildBranch() {
++        // The addHitPath shared-prefix shape: one CAPTURE ancestor fans out
++        // into a RELEASE child branch and an INHERIT child branch. The release
++        // must only neutralize its own path; the sibling path under the same
++        // ancestor still resolves to CAPTURE, so the root captures.
++        val tree = PolicyNode(
++            CAPTURE,
++            listOf(
++                PolicyNode(RELEASE),
++                PolicyNode(INHERIT),
++            )
++        )
++        assertEquals(CAPTURE, resolve(tree))
++        assertEquals(true, rootCaptures(tree))
++    }
++
++    @Test
++    fun sharedCaptureAncestorWithAllBranchesReleasedDoesNotCapture() {
++        val tree = PolicyNode(
++            CAPTURE,
++            listOf(
++                PolicyNode(RELEASE),
++                PolicyNode(INHERIT, listOf(PolicyNode(RELEASE))),
++            )
++        )
++        assertEquals(RELEASE, resolve(tree))
++        assertEquals(false, rootCaptures(tree))
++    }
++
++    @Test
++    fun captureWithoutAnyReleaseStaysCaptured() {
++        val chain = PolicyNode(INHERIT, listOf(PolicyNode(CAPTURE, listOf(PolicyNode(INHERIT)))))
++        assertEquals(CAPTURE, resolve(chain))
++        assertEquals(true, rootCaptures(chain))
++    }
++
++    @Test
++    fun releaseOnOneBranchNeverNeutralizesCaptureOnAnIndependentSiblingBranch() {
++        val overlayBranch = PolicyNode(CAPTURE)
++        val releaseBranch = PolicyNode(RELEASE)
++        assertEquals(true, rootCaptures(overlayBranch, releaseBranch))
++        assertEquals(true, rootCaptures(releaseBranch, overlayBranch))
++    }
++
++    @Test
++    fun releaseAloneDoesNotCapture() {
++        assertEquals(false, rootCaptures(PolicyNode(INHERIT, listOf(PolicyNode(RELEASE)))))
++        assertEquals(false, rootCaptures(PolicyNode(RELEASE)))
++    }
++
++    @Test
++    fun deeperCaptureUnderAReleaseAncestorCapturesSymmetrically() {
++        val chain = PolicyNode(RELEASE, listOf(PolicyNode(CAPTURE)))
++        assertEquals(CAPTURE, resolve(chain))
++        assertEquals(true, rootCaptures(chain))
++    }
++
++    @Test
++    fun inheritOnlyTreeNeitherCapturesNorReleases() {
++        val chain = PolicyNode(INHERIT, listOf(PolicyNode(INHERIT)))
++        assertEquals(INHERIT, resolve(chain))
++        assertEquals(false, rootCaptures(chain))
++    }
++
++    @Test
++    fun realModifierNodesDriveTheResolvedPolicies() {
++        // The actual production nodes, not stand-ins: the barrier node used by
++        // Modifier.nativeDispatchCapture() and the release node installed by
++        // SelectableText's Modifier.nativeDispatchRelease().
++        assertEquals(CAPTURE, NativeDispatchCaptureNode().resolvedNativeDispatchPolicy())
++        assertEquals(RELEASE, NativeDispatchReleaseNode().resolvedNativeDispatchPolicy())
++
++        // Barrier ancestor with the SelectableText release region on its own
++        // path: that path releases, so the root must not capture...
++        val barrierOverText = PolicyNode(
++            NativeDispatchCaptureNode().resolvedNativeDispatchPolicy(),
++            listOf(PolicyNode(NativeDispatchReleaseNode().resolvedNativeDispatchPolicy()))
++        )
++        assertEquals(false, rootCaptures(barrierOverText))
++
++        // ...while the same barrier ancestor fanning out into the release
++        // region AND a sibling hit (shared prefix) keeps capturing for the
++        // non-release branch.
++        val barrierSharedPrefix = PolicyNode(
++            NativeDispatchCaptureNode().resolvedNativeDispatchPolicy(),
++            listOf(
++                PolicyNode(NativeDispatchReleaseNode().resolvedNativeDispatchPolicy()),
++                PolicyNode(INHERIT),
++            )
++        )
++        assertEquals(true, rootCaptures(barrierSharedPrefix))
++    }
++
++    @Test
++    fun sameNodeReleaseDominatesCapture() {
++        assertEquals(
++            RELEASE,
++            combineSameNodeNativeDispatchPolicies(CAPTURE, RELEASE)
++        )
++        assertEquals(
++            RELEASE,
++            combineSameNodeNativeDispatchPolicies(RELEASE, CAPTURE)
++        )
++        assertEquals(
++            CAPTURE,
++            combineSameNodeNativeDispatchPolicies(INHERIT, CAPTURE)
++        )
++        assertEquals(
++            INHERIT,
++            combineSameNodeNativeDispatchPolicies(INHERIT, INHERIT)
++        )
++    }
++}
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
+index 15bb15b47edbc8a09928aa42a1d5077a9894856b..3f0b770955a09f5270a516927970b2351d1a217e 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
+@@ -922,41 +922,7 @@ private fun View.initAccessibilityDelegate() {
+     accessibilityDelegate = object : AccessibilityDelegate() {
+         override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+             super.onInitializeAccessibilityNodeInfo(host, info)
+-            val name = getViewData<String>(KRCssConst.ACCESSIBILITY_ROLE)
+-            if (name != null) {
+-                info.className = name
+-            }
+-            if (name == ROLE_HIDDEN) {
+-                configureHiddenAccessibilityNodeInfo(info)
+-                return
+-            }
+-
+-            getViewData<String>(KRCssConst.ACCESSIBILITY_INFO)?.apply {
+-                val flags = (this as String).split(" ")
+-                info.isClickable = flags[0] == "1"
+-                info.isLongClickable = flags[1] == "1"
+-            }
+-
+-            getViewData<String>(KRCssConst.TEST_TAG)?.apply {
+-                info.viewIdResourceName = this
+-            }
+-
+-            // Expose plain text for canvas-drawn views (e.g. KRRichTextView) only when the
+-            // framework injected debugName (debugUIInspector). Without it, keep legacy a11y.
+-            val a11yText = getViewData<String>(KRCssConst.PLAIN_TEXT_FOR_A11Y)
+-            if (!a11yText.isNullOrEmpty() && hasDebugName()) {
+-                info.text = a11yText
+-            }
+-
+-            if (hasEventListener(KRCSSGestureListener.TYPE_CLICK)) {
+-                info.isClickable = true
+-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
+-            }
+-
+-            if (hasEventListener(KRCSSGestureListener.TYPE_LONG_PRESS)) {
+-                info.isLongClickable = true
+-                info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
+-            }
++            applyKuiklyAccessibilityExtras(info)
+         }
+ 
+         override fun sendAccessibilityEventUnchecked(host: View, event: AccessibilityEvent) {
+@@ -971,6 +937,62 @@ private fun View.initAccessibilityDelegate() {
+     putViewData(KRCssConst.HAD_INIT_ACCESSIBILITY_DELEGATE, true)
+ }
+ 
++/**
++ * Applies the Kuikly-owned accessibility extras (role/className, hidden-role
++ * projection, accessibilityInfo mask, testTag viewId, plain text, gesture
++ * actions) to a node the host has already populated. Single source: the
++ * attached Kuikly accessibility delegate calls exactly this after its super
++ * populate, and behavior tests drive the same function directly.
++ */
++internal fun View.applyKuiklyAccessibilityExtras(info: AccessibilityNodeInfo) {
++    val name = getViewData<String>(KRCssConst.ACCESSIBILITY_ROLE)
++    if (name != null) {
++        info.className = name
++    }
++    if (name == ROLE_HIDDEN) {
++        configureHiddenAccessibilityNodeInfo(info)
++        return
++    }
++
++    getViewData<String>(KRCssConst.ACCESSIBILITY_INFO)?.apply {
++        val flags = (this as String).split(" ")
++        info.isClickable = flags[0] == "1"
++        info.isLongClickable = flags[1] == "1"
++    }
++
++    accessibilityTestTagProjection()?.apply {
++        info.viewIdResourceName = this
++    }
++
++    // Expose plain text for canvas-drawn views (e.g. KRRichTextView) only when the
++    // framework injected debugName (debugUIInspector). Without it, keep legacy a11y.
++    val a11yText = getViewData<String>(KRCssConst.PLAIN_TEXT_FOR_A11Y)
++    if (!a11yText.isNullOrEmpty() && hasDebugName()) {
++        info.text = a11yText
++    }
++
++    if (hasEventListener(KRCSSGestureListener.TYPE_CLICK)) {
++        info.isClickable = true
++        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK)
++    }
++
++    if (hasEventListener(KRCSSGestureListener.TYPE_LONG_PRESS)) {
++        info.isLongClickable = true
++        info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
++    }
++}
++
++/**
++ * The production projection from the stored testTag prop to the value the
++ * accessibility delegate writes into AccessibilityNodeInfo.viewIdResourceName.
++ * Single source: applyKuiklyAccessibilityExtras applies exactly this value,
++ * and host tests certify it because Robolectric's ShadowAccessibilityNodeInfo
++ * does not implement viewIdResourceName storage; the final native-node
++ * readout is a device (uiautomator) gate.
++ */
++internal fun View.accessibilityTestTagProjection(): String? =
++    getViewData<String>(KRCssConst.TEST_TAG)
++
+ internal fun configureHiddenAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+     info.isVisibleToUser = false
+     info.isFocusable = false
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt
+index 60f5217e92caba3c2ec40dc689a831b3ed486f1b..353fdb95b710a05bb5acb75d6597577a4b982c32 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt
+@@ -445,6 +445,9 @@ open class KuiklyRenderViewBaseDelegator(private val delegate: KuiklyRenderViewB
+             renderViewExport(KRTextAreaView.VIEW_NAME, { context ->
+                 KRTextAreaView(context, delegate.softInputMode())
+             })
++            renderViewExport(KRSelectableTextView.VIEW_NAME, { context ->
++                KRSelectableTextView(context)
++            })
+             renderViewExport(KRCanvasView.VIEW_NAME, { context ->
+                 KRCanvasView(context)
+             })
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextView.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextView.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b1dcd53d04be1e57e1c024e422689695cd51ba8
+--- /dev/null
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextView.kt
+@@ -0,0 +1,196 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component
++
++import android.content.Context
++import android.graphics.Color
++import android.text.Spannable
++import android.text.SpannableString
++import android.util.TypedValue
++import android.view.Gravity
++import android.view.accessibility.AccessibilityNodeInfo
++import android.widget.TextView
++import com.tencent.kuikly.core.render.android.const.KRCssConst
++import com.tencent.kuikly.core.render.android.css.ktx.spToPxI
++import com.tencent.kuikly.core.render.android.css.ktx.toColor
++import com.tencent.kuikly.core.render.android.css.ktx.toPxF
++import com.tencent.kuikly.core.render.android.css.ktx.toPxI
++import com.tencent.kuikly.core.render.android.expand.component.text.FontWeightSpan
++import com.tencent.kuikly.core.render.android.expand.component.text.HRLineHeightSpan
++import com.tencent.kuikly.core.render.android.export.IKuiklyRenderViewExport
++
++/**
++ * System-selectable plain text: a read-only [TextView] with
++ * [setTextIsSelectable] enabled so the platform ActionMode appears anchored
++ * to the selection. Baseline guarantee: Select all / Copy. Additional items
++ * (e.g. Translate or other PROCESS_TEXT targets) appear only when the OS
++ * version, locale and installed services provide them. Never editable,
++ * never shows an IME; text changes only through the "text" prop.
++ */
++class KRSelectableTextView(context: Context) : TextView(context), IKuiklyRenderViewExport {
++
++    private var rawText: String = ""
++    private var lineHeightPx: Int? = null
++    private var useDpFontSizeDim = false
++    private var rawFontSize: Float? = null
++    private var rawLineHeight: Float? = null
++
++    init {
++        setTextIsSelectable(true)
++        gravity = Gravity.LEFT or Gravity.TOP
++        includeFontPadding = false
++        setTextColor(Color.BLACK)
++        background = null
++        setPadding(0, 0, 0, 0)
++    }
++
++    // Selection state must never leak across cells/pages.
++    override val reusable: Boolean
++        get() = false
++
++    override fun setProp(propKey: String, propValue: Any): Boolean {
++        return when (propKey) {
++            PROP_TEXT -> {
++                rawText = propValue as? String ?: ""
++                applyText()
++                true
++            }
++            PROP_FONT_SIZE -> {
++                rawFontSize = (propValue as Number).toFloat()
++                applyFontSize()
++                true
++            }
++            PROP_FONT_WEIGHT -> {
++                FontWeightSpan(propValue as String).updateDrawState(paint)
++                applyText()
++                true
++            }
++            PROP_COLOR -> {
++                setTextColor((propValue as String).toColor())
++                true
++            }
++            PROP_LINE_HEIGHT -> {
++                rawLineHeight = (propValue as Number).toFloat()
++                applyLineHeight()
++                true
++            }
++            PROP_TEXT_ALIGN -> {
++                applyTextAlign(propValue as String)
++                true
++            }
++            PROP_USE_DP_FONT_SIZE_DIM -> {
++                useDpFontSizeDim = (propValue as Int) == 1
++                applyFontSize()
++                applyLineHeight()
++                true
++            }
++            // View capability: this surface's clickable/long-clickable a11y
++            // truth comes from the system TextView selection semantics. The
++            // compose semantics bridge derives its boolean mask from compose
++            // click semantics (absent here) and would report the view as not
++            // long-clickable, breaking a11y ACTION_LONG_CLICK and automation
++            // readouts. Decline only this mask; every other a11y prop (role,
++            // testTag, plain text, state description) still applies normally.
++            KRCssConst.ACCESSIBILITY_INFO -> true
++            else -> super.setProp(propKey, propValue)
++        }
++    }
++
++    /**
++     * Final-layer accessibility truth: whatever delegates or masked props ran
++     * upstream, the exposed node info derives clickable/long-clickable from
++     * the real view flags and advertises the system selection actions.
++     */
++    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
++        super.onInitializeAccessibilityNodeInfo(info)
++        info.isClickable = isClickable
++        info.isLongClickable = isLongClickable
++        if (isLongClickable) {
++            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
++        }
++        if (isTextSelectable) {
++            info.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION)
++        }
++    }
++
++    private fun applyFontSize() {
++        val fontSize = rawFontSize ?: return
++        setTextSize(
++            TypedValue.COMPLEX_UNIT_PX,
++            if (useDpFontSizeDim) {
++                kuiklyRenderContext.toPxF(fontSize)
++            } else {
++                kuiklyRenderContext.spToPxI(fontSize).toFloat()
++            }
++        )
++    }
++
++    private fun applyLineHeight() {
++        val lineHeight = rawLineHeight ?: return
++        lineHeightPx = if (useDpFontSizeDim) {
++            kuiklyRenderContext.toPxI(lineHeight)
++        } else {
++            kuiklyRenderContext.spToPxI(lineHeight)
++        }
++        applyText()
++    }
++
++    private fun applyTextAlign(align: String) {
++        val horizontal = when (align) {
++            "center" -> Gravity.CENTER_HORIZONTAL
++            "right" -> Gravity.RIGHT
++            else -> Gravity.LEFT
++        }
++        gravity = (gravity and Gravity.HORIZONTAL_GRAVITY_MASK.inv()) or horizontal
++    }
++
++    private fun applyText() {
++        val content = SpannableString(rawText)
++        lineHeightPx?.takeIf { it > 0 }?.also { height ->
++            if (content.isNotEmpty()) {
++                content.setSpan(
++                    HRLineHeightSpan(height),
++                    0,
++                    content.length,
++                    Spannable.SPAN_INCLUSIVE_INCLUSIVE
++                )
++            }
++        }
++        setText(content, BufferType.SPANNABLE)
++    }
++
++    companion object {
++        const val VIEW_NAME = "KRSelectableTextView"
++
++        internal const val PROP_TEXT = "text"
++        internal const val PROP_FONT_SIZE = "fontSize"
++        internal const val PROP_FONT_WEIGHT = "fontWeight"
++        internal const val PROP_COLOR = "color"
++        internal const val PROP_LINE_HEIGHT = "lineHeight"
++        internal const val PROP_TEXT_ALIGN = "textAlign"
++        internal const val PROP_USE_DP_FONT_SIZE_DIM = "useDpFontSizeDim"
++
++        internal val HANDLED_PROPS = setOf(
++            PROP_TEXT,
++            PROP_FONT_SIZE,
++            PROP_FONT_WEIGHT,
++            PROP_COLOR,
++            PROP_LINE_HEIGHT,
++            PROP_TEXT_ALIGN,
++            PROP_USE_DP_FONT_SIZE_DIM
++        )
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextViewTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextViewTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..c32e2dbffbad716e66bc72e2bd4ce547039a4b61
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRSelectableTextViewTest.kt
+@@ -0,0 +1,244 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component
++
++import android.app.Activity
++import android.content.Context
++import android.graphics.Color
++import android.os.Looper
++import android.os.SystemClock
++import android.view.Gravity
++import android.view.MotionEvent
++import android.view.ViewConfiguration
++import android.view.accessibility.AccessibilityNodeInfo
++import com.tencent.kuikly.core.render.android.KuiklyRenderView
++import com.tencent.kuikly.core.render.android.const.KRCssConst
++import com.tencent.kuikly.core.render.android.css.ktx.accessibilityTestTagProjection
++import com.tencent.kuikly.core.render.android.css.ktx.applyKuiklyAccessibilityExtras
++import com.tencent.kuikly.core.render.android.css.ktx.getViewData
++import java.time.Duration
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.Robolectric
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.RuntimeEnvironment
++import org.robolectric.Shadows.shadowOf
++import org.robolectric.annotation.Config
++
++/**
++ * Behavior contract of the system-selectable plain text surface:
++ * always selectable (system ActionMode source), never editable, truthful
++ * accessibility, and props arrive over the shared wire keys.
++ */
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [29])
++class KRSelectableTextViewTest {
++
++    // putViewData/getViewData only operate when view.context is an
++    // IKuiklyRenderContext; a bare Application context silently no-ops them.
++    // Build the view on a real KuiklyRenderView-owned context so testTag
++    // storage and the a11y projection run the true production path.
++    private fun createView(): KRSelectableTextView {
++        val renderView = KuiklyRenderView(RuntimeEnvironment.getApplication())
++        return KRSelectableTextView(renderView.kuiklyRenderContext as Context)
++    }
++
++    @Test
++    fun selectableAndReadOnlyByConstruction() {
++        val view = createView()
++        assertTrue(view.isTextSelectable)
++        // TextView (not EditText): no input connection, no IME surface.
++        assertFalse(view.onCheckIsTextEditor())
++        // Selection must not leak across cell reuse.
++        assertFalse(view.reusable)
++    }
++
++    @Test
++    fun textPropRendersAndStaysSelectable() {
++        val view = createView()
++        assertTrue(view.setProp(KRSelectableTextView.PROP_TEXT, "hello selectable"))
++        assertEquals("hello selectable", view.text.toString())
++        assertTrue(view.isTextSelectable)
++    }
++
++    @Test
++    fun colorPropParsesKuiklyColorString() {
++        val view = createView()
++        // 4278255360 == 0xFF00FF00 (opaque green) in the Kuikly wire format.
++        assertTrue(view.setProp(KRSelectableTextView.PROP_COLOR, "4278255360"))
++        assertEquals(Color.GREEN, view.currentTextColor)
++    }
++
++    @Test
++    fun textAlignPropUpdatesHorizontalGravityOnly() {
++        val view = createView()
++        assertTrue(view.setProp(KRSelectableTextView.PROP_TEXT_ALIGN, "center"))
++        assertEquals(
++            Gravity.CENTER_HORIZONTAL,
++            view.gravity and Gravity.HORIZONTAL_GRAVITY_MASK
++        )
++        assertEquals(Gravity.TOP, view.gravity and Gravity.VERTICAL_GRAVITY_MASK)
++
++        assertTrue(view.setProp(KRSelectableTextView.PROP_TEXT_ALIGN, "right"))
++        assertEquals(Gravity.RIGHT, view.gravity and Gravity.HORIZONTAL_GRAVITY_MASK)
++
++        assertTrue(view.setProp(KRSelectableTextView.PROP_TEXT_ALIGN, "left"))
++        assertEquals(Gravity.LEFT, view.gravity and Gravity.HORIZONTAL_GRAVITY_MASK)
++    }
++
++    private fun assertTruthfulSelectionNodeInfo(view: KRSelectableTextView) {
++        assertTrue(view.isLongClickable)
++        assertTrue(view.isClickable)
++        assertTrue(view.isTextSelectable)
++
++        val info = view.createAccessibilityNodeInfo()
++        // Final-layer truth: the node info derives from the real view flags
++        // regardless of the declined compose boolean mask.
++        assertTrue(info.isLongClickable)
++        assertTrue(info.isClickable)
++        assertTrue(
++            info.actionList.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK)
++        )
++        assertTrue(
++            info.actionList.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_SELECTION)
++        )
++    }
++
++    /**
++     * Robolectric's createAccessibilityNodeInfo does not route through the
++     * attached View.AccessibilityDelegate (host-model limitation), so the
++     * composed output is certified by reproducing the real framework order on
++     * one node: the host populates it first (View/TextView internal state via
++     * onInitializeAccessibilityNodeInfo, which also runs this view's
++     * final-layer correction), then the SAME attached production delegate
++     * applies its extras. No flag is hand-written; every value flows from the
++     * real view state through real production methods. Real uiautomator
++     * testTag + long-clickable readouts stay part of the fresh Alpha
++     * blind-test contract.
++     */
++    private fun nodeInfoThroughRealHostAndDelegate(view: KRSelectableTextView): AccessibilityNodeInfo {
++        // The Kuikly delegate must be attached; its onInitializeAccessibility-
++        // NodeInfo is super-populate + applyKuiklyAccessibilityExtras (single
++        // source, see KRCSSViewExtension).
++        assertNotNull("Kuikly a11y delegate must be attached", view.accessibilityDelegate)
++        val info = AccessibilityNodeInfo.obtain()
++        // Host population first — the same step createAccessibilityNodeInfo
++        // performs before delegate extras on a real device.
++        view.onInitializeAccessibilityNodeInfo(info)
++        // Then the SAME production extras logic the attached delegate runs.
++        // Robolectric's node-info plumbing does not reliably route the
++        // delegate's own invocation, so the shared production helper is
++        // executed directly — execution evidence for the extras branch.
++        view.applyKuiklyAccessibilityExtras(info)
++        return info
++    }
++
++    private fun assertDelegateOutputKeepsContract(view: KRSelectableTextView) {
++        // The declined mask must not resurface through the delegate, and the
++        // delegate-owned props must still be produced on a host-populated node.
++        val delegateInfo = nodeInfoThroughRealHostAndDelegate(view)
++        assertTrue(delegateInfo.isLongClickable)
++        assertTrue(delegateInfo.isClickable)
++        assertTrue(
++            delegateInfo.actionList.contains(
++                AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK
++            )
++        )
++        // The production testTag -> viewIdResourceName projection: the extras
++        // helper (executed above) applies exactly this value. Robolectric's
++        // ShadowAccessibilityNodeInfo does not implement viewIdResourceName
++        // storage, so the final native-node readout stays a device
++        // (uiautomator) hard gate in the fresh Alpha blind test.
++        assertEquals("selectable_text_tag", view.accessibilityTestTagProjection())
++        // TEST_TAG storage feeding the projection is present.
++        assertEquals(
++            "selectable_text_tag",
++            view.getViewData<String>(KRCssConst.TEST_TAG)
++        )
++    }
++
++    @Test
++    fun accessibilityMaskDeclinedWhenItArrivesAfterOtherA11yProps() {
++        val view = createView()
++        assertTrue(view.setProp(KRCssConst.TEST_TAG, "selectable_text_tag"))
++        assertTrue(view.setProp(KRCssConst.ACCESSIBILITY_INFO, "0 0"))
++
++        assertTruthfulSelectionNodeInfo(view)
++        assertDelegateOutputKeepsContract(view)
++    }
++
++    @Test
++    fun accessibilityMaskDeclinedWhenItArrivesBeforeOtherA11yProps() {
++        val view = createView()
++        assertTrue(view.setProp(KRCssConst.ACCESSIBILITY_INFO, "0 0"))
++        assertTrue(view.setProp(KRCssConst.TEST_TAG, "selectable_text_tag"))
++
++        assertTruthfulSelectionNodeInfo(view)
++        assertDelegateOutputKeepsContract(view)
++    }
++
++    @Test
++    fun directLongPressStreamStartsSystemWordSelection() {
++        // Base capability tooth: the view itself turns a raw DOWN ->
++        // long-press timeout -> UP stream into system word selection. The
++        // superTouch/native-capture wiring is covered separately by
++        // KRViewSuperTouchDispatchTest.
++        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
++        val view = createView()
++        view.setProp(KRSelectableTextView.PROP_TEXT, "selectable body text")
++        activity.setContentView(view)
++        shadowOf(Looper.getMainLooper()).idle()
++
++        val downTime = SystemClock.uptimeMillis()
++        val x = view.width / 2f
++        val y = view.height / 2f
++        assertTrue(
++            view.dispatchTouchEvent(
++                MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
++            )
++        )
++        shadowOf(Looper.getMainLooper())
++            .idleFor(Duration.ofMillis(ViewConfiguration.getLongPressTimeout() + 100L))
++        view.dispatchTouchEvent(
++            MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0)
++        )
++        shadowOf(Looper.getMainLooper()).idle()
++
++        // Certifies dispatch/state only (Robolectric cannot host the real OS
++        // ActionMode): the stream reached the view and word selection started.
++        assertTrue(view.hasSelection())
++    }
++
++    @Test
++    fun handledPropsPinTheSharedWireContract() {
++        assertEquals(
++            setOf(
++                "text",
++                "fontSize",
++                "fontWeight",
++                "color",
++                "lineHeight",
++                "textAlign",
++                "useDpFontSizeDim"
++            ),
++            KRSelectableTextView.HANDLED_PROPS
++        )
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRViewSuperTouchDispatchTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRViewSuperTouchDispatchTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ca814a9aead7abf2cbbfcb073a4f4b7f1f69bb1
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRViewSuperTouchDispatchTest.kt
+@@ -0,0 +1,148 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component
++
++import android.app.Activity
++import android.os.Looper
++import android.os.SystemClock
++import android.view.MotionEvent
++import android.view.ViewConfiguration
++import android.view.ViewGroup
++import java.time.Duration
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.Robolectric
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.Shadows.shadowOf
++import org.robolectric.annotation.Config
++
++/**
++ * Wiring contract of the failure found on device (task #69 runtime reopen):
++ * a compose-hosted root (KRView with superTouch) either withholds the whole
++ * MotionEvent stream from native children (barrier resolved: capture) or
++ * delivers it completely (SelectableText region resolved: release). The
++ * capture decision is latched at ACTION_DOWN and stays sticky per gesture.
++ *
++ * The compose side of the seam — real release/capture modifier nodes
++ * resolving to the boolean this test drives — is pinned by
++ * NativeDispatchPolicyTest in compose commonTest.
++ */
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [28])
++class KRViewSuperTouchDispatchTest {
++
++    private class TouchRecorder {
++        var dispatchCount = 0
++        var lastAction = -1
++    }
++
++    private fun buildTree(): Triple<TouchRecorder, KRView, KRSelectableTextView> {
++        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
++        val root = KRView(activity)
++        root.setProp(SUPER_TOUCH_PROP, true)
++        val child = KRSelectableTextView(activity)
++        val recorder = TouchRecorder()
++        // Observes the stream without subclassing the production class; the
++        // listener returns false so the TextView's real selection handling
++        // (long-press etc.) still runs.
++        child.setOnTouchListener { _, event ->
++            recorder.dispatchCount++
++            recorder.lastAction = event.actionMasked
++            false
++        }
++        child.setProp(KRSelectableTextView.PROP_TEXT, "selectable body text")
++        root.addView(
++            child,
++            ViewGroup.LayoutParams(
++                ViewGroup.LayoutParams.MATCH_PARENT,
++                ViewGroup.LayoutParams.MATCH_PARENT
++            )
++        )
++        activity.setContentView(root)
++        shadowOf(Looper.getMainLooper()).idle()
++        return Triple(recorder, root, child)
++    }
++
++    private fun motion(downTime: Long, action: Int, x: Float = 5f, y: Float = 5f): MotionEvent =
++        MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
++
++    @Test
++    fun captureRequestedWithholdsTheEntireStreamFromTheNativeChild() {
++        val (recorder, root, _) = buildTree()
++        // What SuperTouchManager writes when HitPathTracker resolves CAPTURE
++        // (barrier hit outside any release region).
++        root.setProp(NATIVE_DISPATCH_CAPTURE_PROP, true)
++
++        val downTime = SystemClock.uptimeMillis()
++        assertTrue(root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_DOWN)))
++        root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_MOVE))
++        root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_UP))
++
++        assertEquals(0, recorder.dispatchCount)
++    }
++
++    @Test
++    fun captureDecisionIsStickyForTheWholeGesture() {
++        val (recorder, root, _) = buildTree()
++        root.setProp(NATIVE_DISPATCH_CAPTURE_PROP, true)
++
++        val downTime = SystemClock.uptimeMillis()
++        root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_DOWN))
++        // A mid-gesture request change must not leak events into this gesture.
++        root.setProp(NATIVE_DISPATCH_CAPTURE_PROP, false)
++        root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_MOVE))
++        root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_UP))
++        assertEquals(0, recorder.dispatchCount)
++
++        // The next gesture consumes the updated (released) decision.
++        val secondDown = SystemClock.uptimeMillis()
++        root.dispatchTouchEvent(motion(secondDown, MotionEvent.ACTION_DOWN))
++        assertTrue(recorder.dispatchCount > 0)
++        root.dispatchTouchEvent(motion(secondDown, MotionEvent.ACTION_UP))
++    }
++
++    @Test
++    fun releaseResolvedDeliversTheFullStreamAndLongPressStartsSelection() {
++        val (recorder, root, child) = buildTree()
++        // What SuperTouchManager writes when the SelectableText release region
++        // is on the hit branch (HitPathTracker resolves no capture).
++        root.setProp(NATIVE_DISPATCH_CAPTURE_PROP, false)
++
++        val downTime = SystemClock.uptimeMillis()
++        root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_DOWN))
++        assertTrue(recorder.dispatchCount > 0)
++        assertEquals(MotionEvent.ACTION_DOWN, recorder.lastAction)
++
++        shadowOf(Looper.getMainLooper())
++            .idleFor(Duration.ofMillis(ViewConfiguration.getLongPressTimeout() + 100L))
++        root.dispatchTouchEvent(motion(downTime, MotionEvent.ACTION_UP))
++        shadowOf(Looper.getMainLooper()).idle()
++
++        assertEquals(MotionEvent.ACTION_UP, recorder.lastAction)
++        // Dispatch/state certification only: the complete stream reached the
++        // native child through the superTouch root and word selection started.
++        assertTrue(child.hasSelection())
++    }
++
++    private companion object {
++        // Wire keys consumed by KRView.setProp (companion consts are private
++        // in KRView; the wire strings are the cross-layer contract).
++        const val SUPER_TOUCH_PROP = "superTouch"
++        const val NATIVE_DISPATCH_CAPTURE_PROP = "nativeDispatchCapture"
++    }
++}
+diff --git a/core-render-ios/Extension/Components/KRSelectableTextView.h b/core-render-ios/Extension/Components/KRSelectableTextView.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..180a58b5ebf9edeb61cb1d879b8fb9a9698018a0
+--- /dev/null
++++ b/core-render-ios/Extension/Components/KRSelectableTextView.h
+@@ -0,0 +1,33 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#import "KRUIKit.h" // [macOS]
++#import "KuiklyRenderViewExportProtocol.h"
++NS_ASSUME_NONNULL_BEGIN
++
++/*
++ * @brief System-selectable read-only plain text.
++ *
++ * A UITextView with editable=NO / selectable=YES so the system edit menu
++ * appears anchored to the selection. Baseline guarantee: Select All / Copy.
++ * Further items (Look Up / Translate / Share, etc.) appear only when the OS
++ * version, locale and installed services provide them. Never becomes an
++ * input surface: no IME, no text mutation except through the "text" prop.
++ */
++@interface KRSelectableTextView : UITextView<KuiklyRenderViewExportProtocol>
++
++@end
++
++NS_ASSUME_NONNULL_END
+diff --git a/core-render-ios/Extension/Components/KRSelectableTextView.m b/core-render-ios/Extension/Components/KRSelectableTextView.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9058fac95c9e4d3b00e10d9f21ad431dc47289a
+--- /dev/null
++++ b/core-render-ios/Extension/Components/KRSelectableTextView.m
+@@ -0,0 +1,171 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#import "KRSelectableTextView.h"
++#import "KRComponentDefine.h"
++#import "KRConvertUtil.h"
++#import "UIView+CSS.h"
++
++@interface KRSelectableTextView()
++/** attr is text */
++@property (nonatomic, copy) NSString *KUIKLY_PROP(text);
++/** attr is fontSize */
++@property (nonatomic, strong) NSNumber *KUIKLY_PROP(fontSize);
++/** attr is fontWeight */
++@property (nonatomic, strong) NSString *KUIKLY_PROP(fontWeight);
++/** attr is color */
++@property (nonatomic, strong) NSString *KUIKLY_PROP(color);
++/** attr is lineHeight */
++@property (nonatomic, strong) NSNumber *KUIKLY_PROP(lineHeight);
++/** attr is textAlign */
++@property (nonatomic, strong) NSString *KUIKLY_PROP(textAlign);
++@end
++
++@implementation KRSelectableTextView
++
++@synthesize hr_rootView;
++#if TARGET_OS_OSX
++@synthesize css_clipPath = _css_clipPath;
++#endif
++
++#pragma mark - init
++
++- (instancetype)init {
++    if (self = [super init]) {
++#if TARGET_OS_OSX // [macOS]
++        self.textContainerInset = NSZeroSize;
++        self.editable = NO;
++        self.selectable = YES;
++        [self setDrawsBackground:NO];
++        [self setFocusRingType:NSFocusRingTypeNone];
++#else // [macOS]
++        self.editable = NO;
++        self.selectable = YES;
++        self.scrollEnabled = NO;
++        self.textContainerInset = UIEdgeInsetsZero;
++        self.dataDetectorTypes = UIDataDetectorTypeNone;
++#endif // [macOS]
++        self.textContainer.lineFragmentPadding = 0;
++        self.backgroundColor = [UIColor clearColor];
++    }
++    return self;
++}
++
++#pragma mark - KuiklyRenderViewExportProtocol
++
++- (void)hrv_setPropWithKey:(NSString *)propKey propValue:(id)propValue {
++    KUIKLY_SET_CSS_COMMON_PROP;
++}
++
++- (void)hrv_callWithMethod:(NSString *)method params:(NSString *)params callback:(KuiklyRenderCallback)callback {
++    KUIKLY_CALL_CSS_METHOD;
++}
++
++- (void)hrv_removeFromSuperview {
++#if !TARGET_OS_OSX
++    // A non-editable UITextView can remain first responder while its system
++    // edit menu is visible. End that native selection session before Kuikly
++    // detaches the view; otherwise the menu can outlive a dismissed modal.
++    self.selectedTextRange = nil;
++    [self resignFirstResponder];
++#endif
++    [super hrv_removeFromSuperview];
++}
++
++#pragma mark - setter (css property)
++
++// View capability: this surface's accessibility truth comes from the system
++// UITextView selection semantics. The compose semantics bridge derives its
++// clickable/long-clickable mask from compose click semantics (absent here);
++// applying it would overwrite the text view's native traits. Decline only
++// this mask — every other accessibility prop applies normally.
++- (void)setCss_accessibilityInfo:(NSString *)css_accessibilityInfo {
++    // Intentionally ignored.
++}
++
++- (void)setCss_text:(NSString *)css_text {
++    if (_css_text != css_text) {
++        _css_text = css_text;
++        [self p_applyContent];
++    }
++}
++
++- (void)setCss_fontSize:(NSNumber *)css_fontSize {
++    if (_css_fontSize != css_fontSize) {
++        _css_fontSize = css_fontSize;
++        [self p_applyContent];
++    }
++}
++
++- (void)setCss_fontWeight:(NSString *)css_fontWeight {
++    if (_css_fontWeight != css_fontWeight) {
++        _css_fontWeight = css_fontWeight;
++        [self p_applyContent];
++    }
++}
++
++- (void)setCss_color:(NSString *)css_color {
++    if (_css_color != css_color) {
++        _css_color = css_color;
++        [self p_applyContent];
++    }
++}
++
++- (void)setCss_lineHeight:(NSNumber *)css_lineHeight {
++    if (_css_lineHeight != css_lineHeight) {
++        _css_lineHeight = css_lineHeight;
++        [self p_applyContent];
++    }
++}
++
++- (void)setCss_textAlign:(NSString *)css_textAlign {
++    if (_css_textAlign != css_textAlign) {
++        _css_textAlign = css_textAlign;
++        [self p_applyContent];
++    }
++}
++
++#pragma mark - private
++
++- (UIFont *)p_font {
++    return [KRConvertUtil UIFont:@{
++        @"fontSize": _css_fontSize ?: @(15),
++        @"fontWeight": _css_fontWeight ?: @"400"
++    }];
++}
++
++- (void)p_applyContent {
++    NSString *content = _css_text ?: @"";
++    UIFont *font = [self p_font];
++    UIColor *textColor = _css_color ? [UIView css_color:_css_color] : [UIColor blackColor];
++
++    NSMutableDictionary<NSAttributedStringKey, id> *attributes = [NSMutableDictionary dictionary];
++    attributes[NSFontAttributeName] = font;
++    attributes[NSForegroundColorAttributeName] = textColor;
++
++    NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
++    paragraphStyle.alignment = [KRConvertUtil NSTextAlignment:_css_textAlign];
++    if (_css_lineHeight.floatValue > FLT_EPSILON) {
++        paragraphStyle.minimumLineHeight = [_css_lineHeight floatValue];
++        paragraphStyle.maximumLineHeight = [_css_lineHeight floatValue];
++        CGFloat baselineOffset = ([_css_lineHeight floatValue] - font.pointSize) / 2;
++        attributes[NSBaselineOffsetAttributeName] = @(baselineOffset);
++    }
++    attributes[NSParagraphStyleAttributeName] = paragraphStyle;
++
++    self.attributedText = [[NSAttributedString alloc] initWithString:content attributes:attributes];
++}
++
++@end
+diff --git a/core-render-ios/include/KRSelectableTextView.h b/core-render-ios/include/KRSelectableTextView.h
+new file mode 120000
+index 0000000000000000000000000000000000000000..09597b1d2e02e1fc85de7961362153d19e3d1640
+--- /dev/null
++++ b/core-render-ios/include/KRSelectableTextView.h
+@@ -0,0 +1 @@
++../Extension/Components/KRSelectableTextView.h
+\ No newline at end of file
+diff --git a/core-render-ohos/src/main/cpp/CMakeLists.txt b/core-render-ohos/src/main/cpp/CMakeLists.txt
+index 2cc02edbf53e24bfce00015437135628d3cf6fa9..7053fa77d7b9406d8c2317b3236d474a54c7b9b2 100644
+--- a/core-render-ohos/src/main/cpp/CMakeLists.txt
++++ b/core-render-ohos/src/main/cpp/CMakeLists.txt
+@@ -58,6 +58,7 @@ set(SOURCE_SET
+         libohos_render/expand/components/richtext/KRCustomEmojiPixmapCache.cpp
+         libohos_render/expand/components/scroller/KRScrollerView.cpp
+         libohos_render/expand/components/richtext/KRRichTextView.cpp
++        libohos_render/expand/components/richtext/KRSelectableTextView.cpp
+         libohos_render/expand/components/richtext/KRParagraph.cpp
+         libohos_render/utils/KRLinearGradientParser.cpp
+         libohos_render/expand/components/richtext/gradient_richtext/KRGradientRichTextShadow.cpp
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/ComponentsRegisterEntry.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/ComponentsRegisterEntry.h
+index 125c744b69ece9b557e2d3a155c14c2c9a02bf5b..020ccf8e22f703677a320bc074646a6ba76fb362 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/ComponentsRegisterEntry.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/ComponentsRegisterEntry.h
+@@ -35,6 +35,7 @@
+ #include "libohos_render/expand/components/modal/KRModalView.h"
+ #include "libohos_render/expand/components/richtext/KRRichTextShadow.h"
+ #include "libohos_render/expand/components/richtext/KRRichTextView.h"
++#include "libohos_render/expand/components/richtext/KRSelectableTextView.h"
+ #include "libohos_render/expand/components/richtext/gradient_richtext/KRGradientRichTextShadow.h"
+ #include "libohos_render/expand/components/richtext/gradient_richtext/KRGradientRichTextView.h"
+ #include "libohos_render/expand/components/scroller/KRScrollerView.h"
+@@ -58,6 +59,9 @@ static void ComponentsRegisterEntry() {
+ 
+     IKRRenderViewExport::RegisterViewCreator("KRRichTextView", [] { return std::make_shared<KRRichTextView>(); });
+ 
++    IKRRenderViewExport::RegisterViewCreator("KRSelectableTextView",
++                                             [] { return std::make_shared<KRSelectableTextView>(); });
++
+     IKRRenderShadowExport::RegisterShadowCreator("KRRichTextView",
+                                                  [] { return std::make_shared<KRGradientRichTextShadow>(); });
+ 
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2212ef0a1a88364b8e9487fac85142fba00c68a
+--- /dev/null
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.cpp
+@@ -0,0 +1,91 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "libohos_render/expand/components/richtext/KRSelectableTextView.h"
++
++#include "libohos_render/utils/KRConvertUtil.h"
++#include "libohos_render/utils/KRViewUtil.h"
++
++static constexpr const char *kSelectableTextPropText = "text";
++static constexpr const char *kSelectableTextPropFontSize = "fontSize";
++static constexpr const char *kSelectableTextPropFontWeight = "fontWeight";
++static constexpr const char *kSelectableTextPropColor = "color";
++static constexpr const char *kSelectableTextPropLineHeight = "lineHeight";
++static constexpr const char *kSelectableTextPropTextAlign = "textAlign";
++
++ArkUI_NodeHandle KRSelectableTextView::CreateNode() {
++    return kuikly::util::GetNodeApi()->createNode(ARKUI_NODE_TEXT);
++}
++
++void KRSelectableTextView::DidInit() {
++    IKRRenderViewExport::DidInit();
++    // Enable the system selection/copy menu; keeps the surface read-only.
++    ArkUI_NumberValue copy_option = {.i32 = ARKUI_COPY_OPTIONS_LOCAL_DEVICE};
++    ArkUI_AttributeItem copy_item = {&copy_option, 1};
++    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_COPY_OPTION, &copy_item);
++    UpdateFont();
++}
++
++bool KRSelectableTextView::SetProp(const std::string &prop_key, const KRAnyValue &prop_value,
++                                   const KRRenderCallback event_call_back) {
++    if (kuikly::util::isEqual(prop_key, kSelectableTextPropText)) {
++        auto text = prop_value->toString();
++        ArkUI_AttributeItem item = {.string = text.c_str()};
++        kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_CONTENT, &item);
++        return true;
++    }
++    if (kuikly::util::isEqual(prop_key, kSelectableTextPropFontSize)) {
++        font_size_ = prop_value->toFloat();
++        UpdateFont();
++        return true;
++    }
++    if (kuikly::util::isEqual(prop_key, kSelectableTextPropFontWeight)) {
++        float scale = 1.0;
++        if (auto root = GetRootView().lock()) {
++            scale = root->GetContext()->Config()->GetFontWeightScale();
++        }
++        font_weight_ = kuikly::util::ConvertArkUIFontWeight(prop_value->toInt(), scale);
++        UpdateFont();
++        return true;
++    }
++    if (kuikly::util::isEqual(prop_key, kSelectableTextPropColor)) {
++        kuikly::util::UpdateInputNodeColor(GetNode(), kuikly::util::ConvertToHexColor(prop_value->toString()));
++        return true;
++    }
++    if (kuikly::util::isEqual(prop_key, kSelectableTextPropLineHeight)) {
++        auto line_height = prop_value->toFloat();
++        if (line_height > 0) {
++            kuikly::util::UpdateTextAreaNodeLineHeight(GetNode(), line_height);
++        } else {
++            kuikly::util::GetNodeApi()->resetAttribute(GetNode(), NODE_TEXT_LINE_HEIGHT);
++        }
++        return true;
++    }
++    if (kuikly::util::isEqual(prop_key, kSelectableTextPropTextAlign)) {
++        kuikly::util::UpdateInputNodeTextAlign(GetNode(), prop_value->toString());
++        return true;
++    }
++    return IKRRenderViewExport::SetProp(prop_key, prop_value, event_call_back);
++}
++
++void KRSelectableTextView::UpdateFont() {
++    ArkUI_NumberValue size_value[] = {{.f32 = font_size_}};
++    ArkUI_AttributeItem size_item = {size_value, 1};
++    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_FONT_SIZE, &size_item);
++
++    ArkUI_NumberValue weight_value[] = {{.i32 = font_weight_}};
++    ArkUI_AttributeItem weight_item = {weight_value, 1};
++    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_FONT_WEIGHT, &weight_item);
++}
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..517ceca364e5911ca21e6d6375419f5d7e20eced
+--- /dev/null
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRSelectableTextView.h
+@@ -0,0 +1,50 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef CORE_RENDER_OHOS_KRSELECTABLETEXTVIEW_H
++#define CORE_RENDER_OHOS_KRSELECTABLETEXTVIEW_H
++
++#include "libohos_render/export/IKRRenderViewExport.h"
++
++/**
++ * System-selectable read-only plain text.
++ *
++ * An ArkUI Text node with the system copy option enabled
++ * (ARKUI_COPY_OPTIONS_LOCAL_DEVICE guarantees local-device copy scope) so
++ * long-press brings up the platform's native selection menu. Baseline
++ * guarantee: select / select-all / copy. Any additional menu items are
++ * whatever the OS selection menu actually offers on the running system
++ * version — they must not be assumed from the copy option. Never an input
++ * surface: no IME, no mutation except through the "text" prop.
++ */
++class KRSelectableTextView : public IKRRenderViewExport {
++ public:
++    ArkUI_NodeHandle CreateNode() override;
++    void DidInit() override;
++    bool SetProp(const std::string &prop_key, const KRAnyValue &prop_value,
++                 const KRRenderCallback event_call_back = nullptr) override;
++    bool ReuseEnable() override {
++        // Selection state must never leak across reuse.
++        return false;
++    }
++
++ private:
++    void UpdateFont();
++
++    float font_size_ = 15;
++    ArkUI_FontWeight font_weight_ = ARKUI_FONT_WEIGHT_NORMAL;
++};
++
++#endif  // CORE_RENDER_OHOS_KRSELECTABLETEXTVIEW_H
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/ViewConst.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/ViewConst.kt
+index b497e5da34985a3589a54ca42fb3b3d1621c6758..3849c84405dcc5bd7542ef0a272c4839c31cc433 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/ViewConst.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/ViewConst.kt
+@@ -43,6 +43,7 @@ object ViewConst {
+     const val TYPE_TEXT_FIELD = "KRTextFieldView"
+     const val TYPE_MASK = "KRMaskView"
+     const val TYPE_TEXT_AREA = "KRTextAreaView"
++    const val TYPE_SELECTABLE_TEXT = "KRSelectableTextView"
+     const val TYPE_SCROLL_CONTENT_VIEW = "KRScrollContentView"
+     const val TYPE_BLUR_VIEW = "KRBlurView"
+     
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/SelectableTextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/SelectableTextView.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9f5e7a7bec75bbcae2c8bb842eea568e40de6a2
+--- /dev/null
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/SelectableTextView.kt
+@@ -0,0 +1,275 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.views
++
++import com.tencent.kuikly.core.base.Attr
++import com.tencent.kuikly.core.base.Color
++import com.tencent.kuikly.core.base.DeclarativeBaseView
++import com.tencent.kuikly.core.base.ViewConst
++import com.tencent.kuikly.core.base.ViewContainer
++import com.tencent.kuikly.core.base.event.Event
++import com.tencent.kuikly.core.base.toInt
++import com.tencent.kuikly.core.layout.FlexAlign
++import com.tencent.kuikly.core.layout.FlexDirection
++import com.tencent.kuikly.core.layout.FlexNode
++import com.tencent.kuikly.core.layout.FlexPositionType
++import com.tencent.kuikly.core.layout.MeasureFunction
++import com.tencent.kuikly.core.layout.MeasureOutput
++import com.tencent.kuikly.core.layout.isUndefined
++import com.tencent.kuikly.core.views.shadow.TextShadow
++
++/**
++ * System-selectable plain text surface.
++ *
++ * Renders immutable plain text on each platform's native text view so the OS
++ * selection experience is available anchored to the selection. The baseline
++ * guarantee is: word selection, drag handles, Select all and Copy. Any
++ * further menu actions (for example Translate, Look Up, Share, or Android
++ * PROCESS_TEXT targets) appear only when the current OS version, locale and
++ * installed services provide them — they are platform-supplied extras, not
++ * guarantees of this component. The surface is read-only by construction —
++ * it never participates in text input, never shows an IME, and exposes no
++ * way for the user or the program to mutate text except through the
++ * [SelectableTextAttr.text] prop.
++ *
++ * Platform mapping:
++ * - Android: `TextView` with `setTextIsSelectable(true)` (system ActionMode)
++ * - iOS: `UITextView` with `editable = NO`, `selectable = YES` (system edit menu)
++ * - OHOS: ArkUI `Text` node with the system copy option enabled; the copy
++ *   option guarantees local-device copy scope, and the visible menu items are
++ *   whatever the platform's selection menu offers on that OS version
++ *
++ * Layout: content is measured with the shared rich-text shadow (same approach
++ * as [TextAreaView]); scrolling is the caller's responsibility (wrap in a
++ * scroller for long content).
++ */
++open class SelectableTextView : DeclarativeBaseView<SelectableTextAttr, Event>(), MeasureFunction {
++
++    companion object {
++        private val NON_SHADOW_PROPS by lazy(LazyThreadSafetyMode.NONE) {
++            setOf(
++                Attr.StyleConst.TRANSFORM,
++                Attr.StyleConst.OPACITY,
++                Attr.StyleConst.VISIBILITY,
++                Attr.StyleConst.BACKGROUND_COLOR,
++                TextConst.TEXT_COLOR
++            )
++        }
++    }
++
++    private var shadow: TextShadow? = null
++
++    override fun willInit() {
++        super.willInit()
++        shadow = TextShadow(pagerId, nativeRef, ViewConst.TYPE_RICH_TEXT)
++        getViewAttr().fontSize(15f)
++    }
++
++    override fun createAttr(): SelectableTextAttr {
++        return SelectableTextAttr()
++    }
++
++    override fun createEvent(): Event {
++        return Event()
++    }
++
++    override fun viewName(): String {
++        return ViewConst.TYPE_SELECTABLE_TEXT
++    }
++
++    override fun createFlexNode() {
++        super.createFlexNode()
++        flexNode.measureFunction = this
++    }
++
++    override fun didRemoveFromParentView() {
++        super.didRemoveFromParentView()
++        flexNode.measureFunction = null
++        shadow?.removeFromParentComponent()
++        shadow = null
++    }
++
++    override fun didSetProp(propKey: String, propValue: Any) {
++        super.didSetProp(propKey, propValue)
++        if (propKey !in NON_SHADOW_PROPS) {
++            shadow?.setProp(propKey, propValue)
++            flexNode.markDirty()
++        }
++    }
++
++    override fun measure(
++        node: FlexNode,
++        width: Float,
++        height: Float,
++        measureOutput: MeasureOutput
++    ) {
++        node.layoutDimensions.run {
++            if (!this[0].isUndefined() && !this[1].isUndefined()) {
++                measureOutput.width = this[0]
++                measureOutput.height = this[1]
++                return
++            }
++        }
++        val cWidth = if (width.isUndefined()) 100000f else width
++        val cHeight = if (height.isUndefined()) -1f else height
++        val size = shadow?.calculateRenderViewSize(cWidth, cHeight)
++        var outWidth = size?.width ?: 0f
++        var outHeight = size?.height ?: 0f
++        if (!width.isUndefined() && outWidth < width && node.stretchWidth()) {
++            outWidth = width
++        }
++        if (!height.isUndefined() && outHeight < height && node.stretchHeight()) {
++            outHeight = height
++        }
++        node.styleMinWidth.also {
++            if (!it.isUndefined() && outWidth < it) {
++                outWidth = it
++            }
++        }
++        node.styleMaxHeight.also {
++            if (!it.isUndefined() && outHeight > it) {
++                outHeight = it
++            }
++        }
++        node.styleMinHeight.also {
++            if (!it.isUndefined() && outHeight < it) {
++                outHeight = it
++            }
++        }
++        measureOutput.width = outWidth
++        measureOutput.height = outHeight
++    }
++
++    /**
++     * Measures the native selectable text through the same [TextShadow] used
++     * by the core flex path. Compose wrappers call this when their parent uses
++     * an unbounded main-axis constraint (for example a vertical LazyColumn),
++     * where the generic native-node measure policy cannot use maxHeight as an
++     * actual layout dimension.
++     */
++    open fun calculateContentSize(maxWidth: Float, maxHeight: Float) =
++        shadow?.calculateRenderViewSize(maxWidth, maxHeight)
++
++    private fun FlexNode.stretchWidth(): Boolean {
++        if (positionType != FlexPositionType.RELATIVE) {
++            return false
++        }
++        val direction = parent?.flexDirection
++        return if (direction == FlexDirection.ROW || direction == FlexDirection.ROW_REVERSE) {
++            stretchMainAxis
++        } else {
++            parent?.layoutWidth?.isUndefined() == false && stretchCrossAxis
++        }
++    }
++
++    private fun FlexNode.stretchHeight(): Boolean {
++        if (positionType != FlexPositionType.RELATIVE) {
++            return false
++        }
++        val direction = parent?.flexDirection
++        return if (direction == FlexDirection.ROW || direction == FlexDirection.ROW_REVERSE) {
++            parent?.layoutHeight?.isUndefined() == false && stretchCrossAxis
++        } else {
++            stretchMainAxis
++        }
++    }
++
++    private inline val FlexNode.stretchMainAxis: Boolean get() = flex != 0f
++
++    private inline val FlexNode.stretchCrossAxis: Boolean
++        get() = alignSelf == FlexAlign.STRETCH ||
++                (alignSelf == FlexAlign.AUTO && parent?.alignItems == FlexAlign.STRETCH)
++}
++
++/**
++ * Attributes for [SelectableTextView]. Prop keys reuse [TextConst] so the
++ * shared rich-text shadow measures with exactly the same values the native
++ * view renders.
++ */
++open class SelectableTextAttr : Attr() {
++
++    open fun text(text: String): SelectableTextAttr {
++        TextConst.VALUE with text
++        return this
++    }
++
++    open fun color(color: Color): SelectableTextAttr {
++        TextConst.TEXT_COLOR with color.toString()
++        return this
++    }
++
++    open fun color(color: Long): SelectableTextAttr {
++        TextConst.TEXT_COLOR with Color(color).toString()
++        return this
++    }
++
++    open fun fontSize(size: Float): SelectableTextAttr {
++        TextConst.FONT_SIZE with size
++        return this
++    }
++
++    open fun fontWeightNormal(): SelectableTextAttr {
++        TextConst.FONT_WEIGHT with FontWeight.NORMAL.value
++        return this
++    }
++
++    open fun fontWeightMedium(): SelectableTextAttr {
++        TextConst.FONT_WEIGHT with FontWeight.MEDIUM.value
++        return this
++    }
++
++    open fun fontWeightSemiBold(): SelectableTextAttr {
++        TextConst.FONT_WEIGHT with FontWeight.SEMIBOLD.value
++        return this
++    }
++
++    open fun fontWeightBold(): SelectableTextAttr {
++        TextConst.FONT_WEIGHT with FontWeight.BOLD.value
++        return this
++    }
++
++    open fun lineHeight(lineHeight: Float): SelectableTextAttr {
++        TextConst.LINE_HEIGHT with lineHeight
++        return this
++    }
++
++    open fun useDpFontSizeDim(useDp: Boolean = true): SelectableTextAttr {
++        TextConst.TEXT_USE_DP_FONT_SIZE_DIM with useDp.toInt()
++        return this
++    }
++
++    open fun textAlignLeft(): SelectableTextAttr {
++        TextConst.TEXT_ALIGN with "left"
++        return this
++    }
++
++    open fun textAlignCenter(): SelectableTextAttr {
++        TextConst.TEXT_ALIGN with "center"
++        return this
++    }
++
++    open fun textAlignRight(): SelectableTextAttr {
++        TextConst.TEXT_ALIGN with "right"
++        return this
++    }
++}
++
++/**
++ * Adds a system-selectable plain text view. See [SelectableTextView].
++ */
++fun ViewContainer<*, *>.SelectableText(init: SelectableTextView.() -> Unit) {
++    addChild(SelectableTextView(), init)
++}
+diff --git a/docs/API/components/selectable-text.md b/docs/API/components/selectable-text.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf95a50e86528050d9179801648797c0661d4f17
+--- /dev/null
++++ b/docs/API/components/selectable-text.md
+@@ -0,0 +1,64 @@
++# SelectableText(系统可选择纯文本)
++
++只读纯文本组件，使用各平台**系统原生文本视图**渲染，因此长按/选择时出现的是系统选择菜单，菜单锚定在选区旁。
++
++**能力边界（重要）**：本组件的基线保证是**选词、拖动选择柄、全选、复制**。其余菜单动作（如翻译、查询、分享；Android 上的 PROCESS_TEXT 目标是一个例子）**由系统按当前 OS 版本、语言区域与已安装服务决定是否出现**，属于平台附赠能力，不是本组件的承诺；不同平台、不同系统版本出现的项可能不同（例如 HarmonyOS 的 copyOption 只保证本机复制范围，不能由此推断出现翻译/分享）。
++
++与 `Text`（自绘富文本）的区别：`SelectableText` 不支持富文本/Span，但换来系统原生的选择交互；它**永远只读**——不会弹出输入法，用户与程序都无法通过交互修改文本，文本只能通过 `text` 属性更新。
++
++平台实现：
++
++| 平台 | 实现 |
++|:----|:----|
++| Android | `TextView.setTextIsSelectable(true)`（系统 ActionMode 菜单） |
++| iOS | `UITextView`，`editable=false`、`selectable=true`（系统 Edit Menu） |
++| HarmonyOS | ArkUI `Text` 节点开启系统 copyOption=LOCAL_DEVICE（原生选择/复制菜单） |
++
++滚动不内建：长文本请自行包裹在滚动容器中。
++
++## 属性
++
++支持所有[基础属性](basic-attr-event.md#基础属性)，以及：
++
++<div class="table-01">
++
++| 方法 | 描述 | 参数类型 |
++|:----|:-------|:--|
++| text | 文本内容 | String |
++| color | 文字颜色 | Color / Long |
++| fontSize | 字体大小 | Float |
++| fontWeightNormal / fontWeightMedium / fontWeightSemiBold / fontWeightBold | 字重 | - |
++| lineHeight | 行高 | Float |
++| textAlignLeft / textAlignCenter / textAlignRight | 对齐 | - |
++| useDpFontSizeDim | 字体大小使用 dp 单位（不跟随系统字体缩放） | Boolean |
++
++</div>
++
++:::tabs
++
++@tab:active 示例
++
++```kotlin
++SelectableText {
++    attr {
++        text("可以长按选择并使用系统菜单的文本")
++        fontSize(16f)
++        color(Color.BLACK)
++        lineHeight(24f)
++    }
++}
++```
++
++:::
++
++## Compose API
++
++```kotlin
++SelectableText(
++    text = message.body,
++    modifier = Modifier.fillMaxWidth(),
++    style = TextStyle(fontSize = 16.sp, lineHeight = 24.sp)
++)
++```
++
++`style` 支持 color、fontSize、fontWeight、lineHeight、textAlign；其余字段在该最小 surface 上忽略。未指定的字段会解析为确定性默认值（黑色、15f、400、fontSize×4/3、left）——由于 Compose 节点可复用，每次更新都会主动写入全部字段，保证样式从「已指定」切回「默认」时旧值被重置。

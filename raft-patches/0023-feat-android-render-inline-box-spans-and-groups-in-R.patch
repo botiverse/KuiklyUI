@@ -1,0 +1,1367 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:14:41 +0000
+Subject: [PATCH] feat(android): render inline-box spans and groups in RichText
+
+Parse inlineBox* props and InlineBoxGroupSpan children in KRRichTextBuilder.
+Single-run boxes become one atomic ReplacementSpan so the token wraps as an
+inline-block; multi-child groups get edge-advance spans plus word joiners and
+keep each child's own styling. The drawer paints one fill/border fragment per
+visual line, hit-testing resolves the owning span at atomic boundaries, and
+selection/copy map back to the group's semantic text. Placeholder rects are
+addressable by "index child" paths.
+
+Fork-Patch: android-richtext-inline-box
+Origin: 73fc777a e50bcefb c0cbd304 428b19f5 588ecd3d
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../expand/component/KRRichTextView.kt        |  86 +++-
+ .../component/text/KRRichTextBuilder.kt       | 402 ++++++++++++++++--
+ .../component/text/KRRichTextViewDrawer.kt    | 189 +++++++-
+ .../component/text/KRInlineBoxChromeTest.kt   | 289 +++++++++++++
+ .../text/KRInlineBoxSpanStyleTest.kt          | 191 +++++++++
+ 5 files changed, 1115 insertions(+), 42 deletions(-)
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxChromeTest.kt
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxSpanStyleTest.kt
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt
+index 2eb00c0b6d4211502ebe39744b17c2f8921e8986..9c180632dfa08adaca9b1daa2d6bce353e26977a 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt
+@@ -195,24 +195,80 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
+ 
+         // 2. 计算spanIndex
+         var spanIndex = -1
+-        val textLayout = textDrawer?.textLayout
+-        val line = textLayout?.getLineForVertical(y) ?: 0
+-        val lineLeft: Float = textLayout?.getLineLeft(line) ?: Float.MIN_VALUE
+-        val lineRight: Float = textLayout?.getLineRight(line) ?: Float.MAX_VALUE
++        val textLayout = textDrawer?.textLayout ?: return spanIndex
++        val line = textLayout.getLineForVertical(y)
++        val lineLeft = textLayout.getLineLeft(line)
++        val lineRight = textLayout.getLineRight(line)
+ 
+         if (x < lineLeft || x > lineRight) { // 点击区域超出文本区域
+             spanIndex = -1
+         } else {
+-            val off = textLayout?.getOffsetForHorizontal(line, x) ?: 0
+-            (textLayout?.text as? Spanned)?.getSpans(off, off, FontWeightSpan::class.java)?.also {
+-                if (it.isNotEmpty()) {
+-                    spanIndex = it[0].index
+-                }
++            val off = textLayout.getOffsetForHorizontal(line, x)
++            (textLayout.text as? Spanned)?.also { spanned ->
++                spanIndex =
++                    textLayout.findSpanIndexAtBoundary(spanned, off, line, x)
++                        ?: spanIndex
+             }
+         }
+         return spanIndex
+     }
+ 
++    private fun Layout.findSpanIndexAtBoundary(
++        spanned: Spanned,
++        offset: Int,
++        touchedLine: Int,
++        touchX: Float,
++    ): Int? {
++        val selectionPath = Path()
++        val lineClipPath = Path()
++        val selectionBounds = RectF()
++        val ranges =
++            spanned.getSpans(offset, offset, KRInlineBoxAtomicTextSpan::class.java)
++                .mapNotNull { atomicSpan ->
++                    val start = spanned.getSpanStart(atomicSpan)
++                    val end = spanned.getSpanEnd(atomicSpan)
++                    if (start < 0 || end <= start) return@mapNotNull null
++                    val owner =
++                        spanned.getSpans(start, end, FontWeightSpan::class.java)
++                            .firstOrNull { weightSpan ->
++                                spanned.getSpanStart(weightSpan) <= start &&
++                                    spanned.getSpanEnd(weightSpan) >= end
++                            }
++                            ?: return@mapNotNull null
++                    val atomicLine = getLineForOffset(start + (end - start - 1) / 2)
++                    selectionPath.reset()
++                    getSelectionPath(start, end, selectionPath)
++                    lineClipPath.reset()
++                    lineClipPath.addRect(
++                        0f,
++                        getLineTop(atomicLine).toFloat(),
++                        width.toFloat(),
++                        getLineBottom(atomicLine).toFloat(),
++                        Path.Direction.CW,
++                    )
++                    if (!selectionPath.op(lineClipPath, Path.Op.INTERSECT)) {
++                        return@mapNotNull null
++                    }
++                    selectionPath.computeBounds(selectionBounds, true)
++                    if (selectionBounds.isEmpty) return@mapNotNull null
++                    KRInlineBoxAtomicHitRange(
++                        line = atomicLine,
++                        left = selectionBounds.left,
++                        right = selectionBounds.right,
++                        spanIndex = owner.index,
++                    )
++                }
++        val fallbackSpanIndices =
++            spanned.getSpans(offset, offset, FontWeightSpan::class.java)
++                .map(FontWeightSpan::index)
++        return resolveKRInlineBoxBoundaryHit(
++            touchedLine = touchedLine,
++            touchX = touchX,
++            ranges = ranges,
++            fallbackSpanIndices = fallbackSpanIndices,
++        )
++    }
++
+     private fun initTextLayout(richTextShadow: KRRichTextShadow?) {
+         val textShadow = richTextShadow ?: return
+         val newTextDrawer = tryReMeasureTextLayout(textShadow, layoutParams)
+@@ -604,8 +660,10 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper
+     override fun call(methodName: String, params: String): Any? {
+         when(methodName) {
+             METHOD_GET_PLACEHOLDER_SPAN_RECT -> {
+-                val index = params.toInt()
+-                val spanRect = getPlaceholderSpanRect(index)
++                val path = params.split(" ")
++                val index = path.firstOrNull()?.toIntOrNull() ?: -1
++                val childIndex = path.getOrNull(1)?.toIntOrNull()
++                val spanRect = getPlaceholderSpanRect(index, childIndex)
+                 return "${spanRect.left} ${spanRect.top} ${spanRect.width()} ${spanRect.height()}"
+             }
+             METHOD_IS_LINE_BREAK_MARGIN -> {
+@@ -618,10 +676,12 @@ class KRRichTextShadow : IKuiklyRenderShadowExport, IKuiklyRenderContextWrapper
+     /**
+      * 根据 index 获取 PlaceholderSpan 的绘制区域
+      */
+-    private fun getPlaceholderSpanRect(index: Int) : Rect {
++    private fun getPlaceholderSpanRect(index: Int, childIndex: Int? = null) : Rect {
+         var rect = Rect(0, 0, 0, 0)
+         textDrawer?.textLayout?.let { layout ->
+-            var phSpanTextRange: SpanTextRange? = spanTextRanges.find { it.index == index }
++            val phSpanTextRange: SpanTextRange? = spanTextRanges.find {
++                it.index == index && it.childIndex == childIndex
++            }
+ 
+             if (phSpanTextRange != null) {
+ 
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+index 0e4c45f3755a13f0a3994d494119948f3e92855a..8f447b0b5fb70733708e161a847eee225544a8f8 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+@@ -57,6 +57,12 @@ import kotlin.math.ceil
+ import kotlin.math.floor
+ import kotlin.math.max
+ 
++internal const val INLINE_BOX_LAYOUT_JOINER = '\u2060'
++private const val INLINE_BOX_LAYOUT_EDGE = '\uFFFC'
++
++internal fun CharSequence.isInlineBoxGroupAtLineStart(): Boolean =
++    isEmpty() || this[lastIndex] == '\n'
++
+ /**
+  * 富文本构造器
+  */
+@@ -84,30 +90,22 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+                 spannedBuilder.isEmpty() || spannedBuilder[spannedBuilder.lastIndex] == '\n'
+             val spanValue = spanValues.optJSONObject(index) ?: JSONObject()
+             val spanProps = parseSpanProps(spanValue, textProps, isStart)
+-            val spans = createSpans(spanProps, index, layoutSizeGetter)
+-            if (spans.isNotEmpty()) {
+-                if (spanProps is TextSpanProps && spanProps.adjustNewline) {
+-                    // 对齐iOS、鸿蒙端表现，非空行的换行符不撑开行高
+-                    spannedBuilder.append(
+-                        "\n",
+-                        AbsoluteSizeSpan(1),
+-                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+-                    )
+-                }
+-                spannedBuilder.append(buildSpannedString {
+-                    // 记录 Span 对应的文字范围
+-                    spanTextRanges.add(
+-                        SpanTextRange(
+-                            index,
+-                            spannedBuilder.length,
+-                            spannedBuilder.length + spanProps.text.length
+-                        )
+-                    )
+-                    inSpans(spans) {
+-                        append(spanProps.text)
+-                    }
+-                })
+-
++            if (spanProps is InlineBoxGroupSpanProps) {
++                spannedBuilder.appendInlineBoxGroup(
++                    groupProps = spanProps,
++                    index = index,
++                    defaultTextProps = textProps,
++                    spanTextRanges = spanTextRanges,
++                    layoutSizeGetter = layoutSizeGetter,
++                )
++            } else {
++                spannedBuilder.appendSpan(
++                    spanProps = spanProps,
++                    index = index,
++                    childIndex = null,
++                    spanTextRanges = spanTextRanges,
++                    layoutSizeGetter = layoutSizeGetter,
++                )
+             }
+         }
+         if (textProps.richTextHeadIndent != 0) {
+@@ -129,6 +127,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+         defaultTextProps: KRTextProps,
+         isStart: Boolean
+     ): SpanProps {
++        if (spanValue.has(InlineBoxGroupSpanProps.PROP_KEY_CHILDREN)) {
++            return InlineBoxGroupSpanProps(spanValue, defaultTextProps, kuiklyContext)
++        }
+         if (isPlaceHolderSpan(spanValue)) {
+             return PlaceholderSpanProps(spanValue, kuiklyContext)
+         }
+@@ -196,7 +197,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+ 
+         // 修饰相关
+         textSpans.add(ForegroundColorSpan(spanProps.color))
+-        if (spanProps.backgroundColor != Color.TRANSPARENT) {
++        if (spanProps.backgroundColor != Color.TRANSPARENT &&
++            spanProps.inlineBoxStyle == null
++        ) {
+             textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
+         }
+         if (spanProps.textDecoration.isNotEmpty()) {
+@@ -221,6 +224,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+         if (spanProps.backgroundImage.isNotEmpty()) {
+             textSpans.add(LinearGradientForegroundSpan(spanProps.backgroundImage, layoutSizeGetter))
+         }
++        spanProps.inlineBoxStyle?.let { style ->
++            textSpans.add(KRInlineBoxSpan(style))
++        }
+ 
+         spanProps.textShadow?.let {
+             if (!it.isEmpty()) {
+@@ -245,8 +251,147 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+         return textSpans
+     }
+ 
++    private fun SpannableStringBuilder.appendSpan(
++        spanProps: SpanProps,
++        index: Int,
++        childIndex: Int?,
++        spanTextRanges: MutableList<SpanTextRange>,
++        layoutSizeGetter: () -> SizeF,
++    ) {
++        val spans = createSpans(spanProps, index, layoutSizeGetter)
++        if (spans.isEmpty()) return
++        if (spanProps is TextSpanProps && spanProps.adjustNewline) {
++            append("\n", AbsoluteSizeSpan(1), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++        }
++        val spanStart = length
++        val spanText = spanProps.text
++        val spanEnd = spanStart + spanText.length
++        spanTextRanges.add(SpanTextRange(index, childIndex, spanStart, spanEnd))
++        append(buildSpannedString {
++            inSpans(spans) { append(spanText) }
++        })
++        if (spanProps is TextSpanProps && spanProps.inlineBoxStyle != null) {
++            applyInlineBoxAtomicTextSpan(spanStart, spanEnd, spanProps.inlineBoxStyle)
++        }
++    }
++
++    private fun SpannableStringBuilder.appendInlineBoxGroup(
++        groupProps: InlineBoxGroupSpanProps,
++        index: Int,
++        defaultTextProps: KRTextProps,
++        spanTextRanges: MutableList<SpanTextRange>,
++        layoutSizeGetter: () -> SizeF,
++    ) {
++        val children = buildList {
++            for (childIndex in 0 until groupProps.children.length()) {
++                val childValue = groupProps.children.optJSONObject(childIndex) ?: continue
++                val childProps = parseSpanProps(
++                    childValue,
++                    defaultTextProps,
++                    // buildList adds a List receiver here. Using its isEmpty()/lastIndex
++                    // against the SpannableStringBuilder crashes when the group already has a
++                    // child but the rich-text builder is still empty (charAt(0) on length 0).
++                    isStart = this@appendInlineBoxGroup.isInlineBoxGroupAtLineStart(),
++                )
++                if (childProps.text.isNotEmpty()) add(childIndex to childProps)
++            }
++        }
++        val atomicChild = children.singleOrNull()
++        if (
++            shouldAppendInlineBoxGroupAtomically(
++                childCount = children.size,
++                onlyChildIsText = atomicChild?.second is TextSpanProps,
++                onlyChildAdjustsNewline = (atomicChild?.second as? TextSpanProps)?.adjustNewline == true,
++            )
++        ) {
++            val (childIndex, childProps) = checkNotNull(atomicChild)
++            val groupStart = length
++            appendSpan(
++                spanProps = childProps,
++                index = index,
++                childIndex = childIndex,
++                spanTextRanges = spanTextRanges,
++                layoutSizeGetter = layoutSizeGetter,
++            )
++            val groupEnd = length
++            if (groupEnd > groupStart) {
++                // A one-run inline box is an inline-block. Keeping it as one
++                // ReplacementSpan makes Android move the whole token to the next
++                // line instead of splitting the invisible group edges away from
++                // its text and painting chrome over adjacent content.
++                applyInlineBoxAtomicTextSpan(groupStart, groupEnd, groupProps.style)
++                setSpan(
++                    KRInlineBoxSpan(groupProps.style),
++                    groupStart,
++                    groupEnd,
++                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++                )
++                setSpan(
++                    KRInlineBoxSemanticSpan(groupProps.semanticText),
++                    groupStart,
++                    groupEnd,
++                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++                )
++                spanTextRanges.add(SpanTextRange(index, null, groupStart, groupEnd))
++            }
++            return
++        }
++        val groupStart = length
++        append(
++            INLINE_BOX_LAYOUT_EDGE.toString(),
++            KRInlineBoxEdgeAdvanceSpan(
++                advance = groupProps.style.leadingAdvance,
++                paddingTop = groupProps.style.paddingTop,
++                paddingBottom = groupProps.style.paddingBottom,
++            ),
++            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++        )
++        children.forEachIndexed { position, (childIndex, childProps) ->
++            append(INLINE_BOX_LAYOUT_JOINER)
++            appendSpan(
++                spanProps = childProps,
++                index = index,
++                childIndex = childIndex,
++                spanTextRanges = spanTextRanges,
++                layoutSizeGetter = layoutSizeGetter,
++            )
++        }
++        append(INLINE_BOX_LAYOUT_JOINER)
++        append(
++            INLINE_BOX_LAYOUT_EDGE.toString(),
++            KRInlineBoxEdgeAdvanceSpan(
++                advance = groupProps.style.trailingAdvance,
++                paddingTop = groupProps.style.paddingTop,
++                paddingBottom = groupProps.style.paddingBottom,
++            ),
++            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++        )
++        val groupEnd = length
++        if (groupEnd > groupStart) {
++            setSpan(
++                KRInlineBoxSpan(groupProps.style),
++                groupStart,
++                groupEnd,
++                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++            )
++            setSpan(
++                KRInlineBoxSemanticSpan(groupProps.semanticText),
++                groupStart,
++                groupEnd,
++                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++            )
++            spanTextRanges.add(SpanTextRange(index, null, groupStart, groupEnd))
++        }
++    }
++
+ }
+ 
++internal fun shouldAppendInlineBoxGroupAtomically(
++    childCount: Int,
++    onlyChildIsText: Boolean,
++    onlyChildAdjustsNewline: Boolean,
++): Boolean = childCount == 1 && onlyChildIsText && !onlyChildAdjustsNewline
++
+ abstract class SpanProps(spanValue: JSONObject) {
+     protected val _text: String = spanValue.optString(KRTextProps.PROP_KEY_TEXT, "")
+     open val text: String get() = _text
+@@ -273,6 +418,7 @@ class TextSpanProps(
+     val lineHeight: Float
+     val backgroundImage: String
+     val backgroundColor: Int
++    val inlineBoxStyle: KRInlineBoxSpanStyle?
+     var textShadow: BoxShadow? = null
+     var useDpFontSizeDim = false
+ 
+@@ -338,6 +484,7 @@ class TextSpanProps(
+                 .takeIf { it.isNotEmpty() }
+                 ?.toColor()
+                 ?: Color.TRANSPARENT
++        inlineBoxStyle = KRInlineBoxSpanStyle.from(spanValue, kuiklyContext)
+         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
+         textShadow = BoxShadow(textShadowStr, kuiklyContext)
+         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
+@@ -365,12 +512,123 @@ class PlaceholderSpanProps(spanValue: JSONObject, private val kuiklyContext: IKu
+ /**
+  * 用于记录 DSL Span 对应的 Text Range
+  */
+-data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
++data class SpanTextRange(
++    val index: Int,
++    val childIndex: Int?,
++    val start: Int,
++    val end: Int,
++) {
+     override fun toString(): String {
+         return "{$index, $start, $end}"
+     }
+ }
+ 
++class InlineBoxGroupSpanProps(
++    spanValue: JSONObject,
++    defaultProps: KRTextProps,
++    kuiklyContext: IKuiklyRenderContext?,
++) : SpanProps(spanValue) {
++    companion object {
++        const val PROP_KEY_CHILDREN = "inlineBoxChildren"
++        private const val PROP_KEY_SEMANTIC_TEXT = "inlineBoxSemanticText"
++    }
++
++    val children = spanValue.optJSONArray(PROP_KEY_CHILDREN) ?: org.json.JSONArray()
++    val semanticText = spanValue.optString(PROP_KEY_SEMANTIC_TEXT, "")
++    val style = checkNotNull(KRInlineBoxSpanStyle.from(spanValue, kuiklyContext))
++}
++
++data class KRInlineBoxSpanStyle(
++    val backgroundColor: Int?,
++    val borderColor: Int?,
++    val borderWidth: Float,
++    val paddingStart: Float,
++    val paddingEnd: Float,
++    val paddingTop: Float,
++    val paddingBottom: Float,
++    val marginStart: Float,
++    val marginEnd: Float,
++    val cornerRadius: Float,
++) {
++    val leadingAdvance: Float
++        get() = marginStart + borderWidth + paddingStart
++
++    val trailingAdvance: Float
++        get() = paddingEnd + borderWidth + marginEnd
++
++    companion object {
++        fun from(value: JSONObject, context: IKuiklyRenderContext?): KRInlineBoxSpanStyle? {
++            val hasStyle = value.has(TextConst.INLINE_BOX_BACKGROUND_COLOR) ||
++                value.has(TextConst.INLINE_BOX_BORDER_COLOR) ||
++                value.has(TextConst.INLINE_BOX_BORDER_WIDTH) ||
++                value.has(TextConst.INLINE_BOX_PADDING_START) ||
++                value.has(TextConst.INLINE_BOX_PADDING_END) ||
++                value.has(TextConst.INLINE_BOX_PADDING_TOP) ||
++                value.has(TextConst.INLINE_BOX_PADDING_BOTTOM) ||
++                value.has(TextConst.INLINE_BOX_MARGIN_START) ||
++                value.has(TextConst.INLINE_BOX_MARGIN_END) ||
++                value.has(TextConst.INLINE_BOX_CORNER_RADIUS)
++            if (!hasStyle) return null
++            fun color(key: String): Int? = value.optString(key).takeIf { it.isNotEmpty() }?.toColor()
++            fun dimension(key: String): Float {
++                val logicalPx = value.optDouble(key, 0.0).toFloat()
++                return if (logicalPx == 0f) 0f else context.toPxF(logicalPx)
++            }
++            return KRInlineBoxSpanStyle(
++                backgroundColor = color(TextConst.INLINE_BOX_BACKGROUND_COLOR),
++                borderColor = color(TextConst.INLINE_BOX_BORDER_COLOR),
++                borderWidth = dimension(TextConst.INLINE_BOX_BORDER_WIDTH),
++                paddingStart = dimension(TextConst.INLINE_BOX_PADDING_START),
++                paddingEnd = dimension(TextConst.INLINE_BOX_PADDING_END),
++                paddingTop = dimension(TextConst.INLINE_BOX_PADDING_TOP),
++                paddingBottom = dimension(TextConst.INLINE_BOX_PADDING_BOTTOM),
++                marginStart = dimension(TextConst.INLINE_BOX_MARGIN_START),
++                marginEnd = dimension(TextConst.INLINE_BOX_MARGIN_END),
++                cornerRadius = dimension(TextConst.INLINE_BOX_CORNER_RADIUS),
++            )
++        }
++    }
++}
++
++class KRInlineBoxSpan(val style: KRInlineBoxSpanStyle)
++class KRInlineBoxSemanticSpan(val text: String)
++
++private class KRInlineBoxEdgeAdvanceSpan(
++    private val advance: Float,
++    private val paddingTop: Float = 0f,
++    private val paddingBottom: Float = 0f,
++) : ReplacementSpan() {
++    override fun getSize(
++        paint: Paint,
++        text: CharSequence?,
++        start: Int,
++        end: Int,
++        fm: Paint.FontMetricsInt?,
++    ): Int {
++        fm?.let {
++            it.ascent -= ceil(paddingTop).toInt()
++            it.top -= ceil(paddingTop).toInt()
++            it.descent += ceil(paddingBottom).toInt()
++            it.bottom += ceil(paddingBottom).toInt()
++        }
++        return ceil(advance).toInt()
++    }
++
++    override fun draw(
++        canvas: Canvas,
++        text: CharSequence?,
++        start: Int,
++        end: Int,
++        x: Float,
++        top: Int,
++        y: Int,
++        bottom: Int,
++        paint: Paint,
++    ) {
++        Unit
++    }
++}
++
+ /**
+  * Uses a marker [CharacterStyle] whenever the caller customizes underline color, thickness, and/or
+  * offset.
+@@ -406,6 +664,98 @@ internal class KRSkipInkCustomUnderlineSpan(
+     }
+ }
+ 
++private fun SpannableStringBuilder.applyInlineBoxAtomicTextSpan(
++    start: Int,
++    end: Int,
++    style: KRInlineBoxSpanStyle,
++) {
++    if (start < end) {
++        setSpan(
++            KRInlineBoxAtomicTextSpan(style),
++            start,
++            end,
++            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
++        )
++    }
++}
++
++internal class KRInlineBoxAtomicTextSpan(
++    private val style: KRInlineBoxSpanStyle,
++) : ReplacementSpan() {
++    internal var measuredWidth: Int = 0
++        private set
++
++    override fun getSize(
++        paint: Paint,
++        text: CharSequence?,
++        start: Int,
++        end: Int,
++        fm: Paint.FontMetricsInt?
++    ): Int {
++        if (text == null || start >= end) {
++            measuredWidth = 0
++            return 0
++        }
++        fm?.let {
++            it.ascent -= ceil(style.paddingTop).toInt()
++            it.top -= ceil(style.paddingTop).toInt()
++            it.descent += ceil(style.paddingBottom).toInt()
++            it.bottom += ceil(style.paddingBottom).toInt()
++        }
++        val edgeStart = style.marginStart + style.borderWidth + style.paddingStart
++        val edgeEnd = style.paddingEnd + style.borderWidth + style.marginEnd
++        measuredWidth =
++            ceil((paint.measureText(text, start, end) + edgeStart + edgeEnd).toDouble()).toInt()
++        return measuredWidth
++    }
++
++    override fun draw(
++        canvas: Canvas,
++        text: CharSequence?,
++        start: Int,
++        end: Int,
++        x: Float,
++        top: Int,
++        y: Int,
++        bottom: Int,
++        paint: Paint
++    ) {
++        if (text != null && start < end) {
++            val textX = x + style.marginStart + style.borderWidth + style.paddingStart
++            canvas.drawText(text, start, end, textX, y.toFloat(), paint)
++        }
++    }
++}
++
++internal data class KRInlineBoxAtomicHitRange(
++    val line: Int,
++    val left: Float,
++    val right: Float,
++    val spanIndex: Int,
++)
++
++internal fun resolveKRInlineBoxAtomicHit(
++    touchedLine: Int,
++    touchX: Float,
++    ranges: List<KRInlineBoxAtomicHitRange>,
++): Int? =
++    ranges.firstOrNull { range ->
++        range.line == touchedLine &&
++            touchX >= minOf(range.left, range.right) &&
++            touchX <= maxOf(range.left, range.right)
++    }?.spanIndex
++
++internal fun resolveKRInlineBoxBoundaryHit(
++    touchedLine: Int,
++    touchX: Float,
++    ranges: List<KRInlineBoxAtomicHitRange>,
++    fallbackSpanIndices: List<Int>,
++): Int? {
++    resolveKRInlineBoxAtomicHit(touchedLine, touchX, ranges)?.let { return it }
++    val atomicOwnerIndices = ranges.mapTo(mutableSetOf(), KRInlineBoxAtomicHitRange::spanIndex)
++    return fallbackSpanIndices.firstOrNull { it !in atomicOwnerIndices }
++}
++
+ /**
+  * 字重span
+  * @param fontWeight 字重
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt
+index c787c43b16e6d38b099b2a8c3e1e742e2c50f812..0e117d79c53ed0abc8aa9b2e31ff775d5cd7ddb8 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt
+@@ -51,6 +51,16 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+     private var selectionStart = -1
+     private var selectionEnd = -1
+     internal val hasSelection: Boolean get() = 0 <= selectionStart && selectionStart < selectionEnd
++    private val inlineBoxFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.FILL
++    }
++    private val inlineBoxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.STROKE
++    }
++    private val inlineBoxRect = RectF()
++    private val inlineBoxSelectionPath = Path()
++    private val inlineBoxLineClipPath = Path()
++    private val inlineBoxSelectionBounds = RectF()
+     private val customUnderlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+         style = Paint.Style.STROKE
+     }
+@@ -86,8 +96,10 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+      * 将文本内容绘制到 [canvas]，对接到 [Layout.draw]。
+      */
+     fun draw(canvas: Canvas) {
++        drawInlineBoxChrome(canvas, drawFill = true, drawBorder = false)
+         textLayout.draw(canvas)
+         drawCustomUnderlines(canvas)
++        drawInlineBoxChrome(canvas, drawFill = false, drawBorder = true)
+     }
+ 
+     private fun drawCustomUnderlines(canvas: Canvas) {
+@@ -233,6 +245,144 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+             (paint.textSize / 9f).coerceAtLeast(1f)
+         }
+ 
++    private fun drawInlineBoxChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
++        val spanned = textLayout.text as? Spanned ?: return
++        val spans = spanned.getSpans(0, spanned.length, KRInlineBoxSpan::class.java)
++        if (spans.isEmpty()) return
++
++        val layoutLeft = 0f
++        val layoutRight = textLayout.width.toFloat()
++        val metrics = textLayout.paint.fontMetrics
++        spans.forEach { span ->
++            val start = spanned.getSpanStart(span)
++            val end = spanned.getSpanEnd(span)
++            if (start < 0 || end <= start) return@forEach
++            val style = span.style
++            val atomicSpan =
++                spanned.getSpans(start, end, KRInlineBoxAtomicTextSpan::class.java)
++                    .firstOrNull { atomicSpan ->
++                        spanned.getSpanStart(atomicSpan) == start &&
++                            spanned.getSpanEnd(atomicSpan) == end
++                    }
++            val startLine = textLayout.getLineForOffset((start + 1).coerceAtMost(end - 1))
++            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
++            for (line in startLine..endLine) {
++                val lineStart = textLayout.getLineStart(line)
++                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
++                val segmentStart = max(start, lineStart)
++                val segmentEnd = min(end, lineVisibleEnd)
++                if (segmentEnd <= segmentStart) continue
++                val atomicBounds =
++                    atomicSpan?.let { atomicInlineBoxBounds(start, end, line, it) }
++                val clipToSelectionPath = atomicBounds == null
++                val segmentLeft: Float
++                val segmentRight: Float
++                if (atomicBounds != null) {
++                    // ReplacementSpan caret affinity can still resolve to adjacent
++                    // text. The selection path keeps the visual anchor, while the
++                    // span's measured width avoids line-end selection expansion.
++                    segmentLeft = atomicBounds.left
++                    segmentRight = atomicBounds.right
++                } else {
++                    val segmentBounds = inlineBoxSelectionBounds(segmentStart, segmentEnd, line)
++                        ?: continue
++                    segmentLeft = segmentBounds.left
++                    segmentRight = segmentBounds.right
++                }
++                val left = (
++                    segmentLeft + if (segmentStart == start) style.marginStart else 0f
++                    )
++                    .coerceAtLeast(layoutLeft)
++                val right = (
++                    segmentRight - if (segmentEnd == end) style.marginEnd else 0f
++                    )
++                    .coerceAtMost(layoutRight)
++                if (right <= left) continue
++
++                val baseline = textLayout.getLineBaseline(line).toFloat()
++                val top = baseline + metrics.ascent - style.paddingTop - style.borderWidth
++                val bottom = baseline + metrics.descent + style.paddingBottom + style.borderWidth
++                if (bottom <= top) continue
++                inlineBoxRect.set(left, top, right, bottom)
++                val saveCount =
++                    if (clipToSelectionPath) {
++                        canvas.save().also { canvas.clipPath(inlineBoxSelectionPath) }
++                    } else {
++                        null
++                    }
++                if (drawFill && style.backgroundColor != null) {
++                    inlineBoxFillPaint.color = style.backgroundColor
++                    canvas.drawRoundRect(
++                        inlineBoxRect,
++                        style.cornerRadius,
++                        style.cornerRadius,
++                        inlineBoxFillPaint
++                    )
++                }
++                if (drawBorder && style.borderColor != null && style.borderWidth > 0f) {
++                    inlineBoxBorderPaint.color = style.borderColor
++                    inlineBoxBorderPaint.strokeWidth = style.borderWidth
++                    val inset = style.borderWidth / 2f
++                    inlineBoxRect.inset(inset, inset)
++                    canvas.drawRoundRect(
++                        inlineBoxRect,
++                        max(0f, style.cornerRadius - inset),
++                        max(0f, style.cornerRadius - inset),
++                        inlineBoxBorderPaint
++                    )
++                }
++                if (saveCount != null) canvas.restoreToCount(saveCount)
++            }
++        }
++    }
++
++    private fun atomicInlineBoxBounds(
++        start: Int,
++        end: Int,
++        line: Int,
++        atomicSpan: KRInlineBoxAtomicTextSpan,
++    ): RectF? {
++        val measuredWidth = atomicSpan.measuredWidth.toFloat()
++        if (measuredWidth <= 0f) return null
++        val bounds = inlineBoxSelectionBounds(start, end, line) ?: return null
++        if (textLayout.getParagraphDirection(line) >= 0) {
++            bounds.right = min(textLayout.width.toFloat(), bounds.left + measuredWidth)
++        } else {
++            bounds.left = max(0f, bounds.right - measuredWidth)
++        }
++        return bounds
++    }
++
++    private fun inlineBoxSelectionBounds(start: Int, end: Int, line: Int): RectF? {
++        inlineBoxSelectionPath.reset()
++        textLayout.getSelectionPath(start, end, inlineBoxSelectionPath)
++        inlineBoxLineClipPath.reset()
++        val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
++        val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
++        inlineBoxLineClipPath.addRect(
++            lineLeft,
++            textLayout.getLineTop(line).toFloat(),
++            lineRight,
++            textLayout.getLineBottom(line).toFloat(),
++            Path.Direction.CW,
++        )
++        if (!inlineBoxSelectionPath.op(inlineBoxLineClipPath, Path.Op.INTERSECT)) {
++            return null
++        }
++        inlineBoxSelectionPath.computeBounds(inlineBoxSelectionBounds, true)
++        if (inlineBoxSelectionBounds.isEmpty) return null
++        return inlineBoxSelectionBounds
++    }
++
++    private fun Layout.slockInlineCodeVisibleEnd(line: Int): Int {
++        val lineStart = getLineStart(line)
++        val ellipsisCount = getEllipsisCount(line)
++        if (ellipsisCount > 0) {
++            return (lineStart + getEllipsisStart(line)).coerceAtLeast(lineStart)
++        }
++        return getLineVisibleEnd(line)
++    }
++
+     internal fun setSelectionByCoordinate(
+         x: Float,
+         y: Float,
+@@ -357,7 +507,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+ 
+     internal fun getSelectionText(): String? {
+         return if (hasSelection) {
+-            textLayout.text.substring(selectionStart, selectionEnd)
++            textLayout.text.inlineBoxSemanticSubstring(selectionStart, selectionEnd)
+         } else {
+             null
+         }
+@@ -365,7 +515,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+ 
+     internal fun getPreSelectionText(): String? {
+         return if (hasSelection && selectionStart > 0) {
+-            textLayout.text.substring(0, selectionStart)
++            textLayout.text.inlineBoxSemanticSubstring(0, selectionStart)
+         } else {
+             null
+         }
+@@ -374,7 +524,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+     internal fun getPostSelectionText(): String? {
+         val length = textLayout.text.length
+         return if (hasSelection && selectionEnd < length) {
+-            textLayout.text.substring(selectionEnd, length)
++            textLayout.text.inlineBoxSemanticSubstring(selectionEnd, length)
+         } else {
+             null
+         }
+@@ -625,4 +775,37 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+ 
+     }
+ 
++}
++
++private fun String.withoutInlineBoxLayoutCharacters(): String =
++    replace("\uFFFC", "").replace(INLINE_BOX_LAYOUT_JOINER.toString(), "")
++
++private fun CharSequence.inlineBoxSemanticSubstring(start: Int, end: Int): String {
++    if (start >= end) return ""
++    val spanned = this as? Spanned
++        ?: return substring(start, end).withoutInlineBoxLayoutCharacters()
++    val semanticSpans = spanned.getSpans(start, end, KRInlineBoxSemanticSpan::class.java)
++    if (semanticSpans.isEmpty()) return substring(start, end).withoutInlineBoxLayoutCharacters()
++
++    val result = StringBuilder()
++    var cursor = start
++    semanticSpans.sortedBy(spanned::getSpanStart).forEach { span ->
++        val spanStart = spanned.getSpanStart(span)
++        val spanEnd = spanned.getSpanEnd(span)
++        if (spanStart > cursor) {
++            result.append(substring(cursor, min(spanStart, end)).withoutInlineBoxLayoutCharacters())
++        }
++        val overlapStart = max(cursor, spanStart)
++        val overlapEnd = min(end, spanEnd)
++        if (overlapEnd > overlapStart) {
++            if (overlapStart == spanStart && overlapEnd == spanEnd && span.text.isNotEmpty()) {
++                result.append(span.text)
++            } else {
++                result.append(substring(overlapStart, overlapEnd).withoutInlineBoxLayoutCharacters())
++            }
++            cursor = overlapEnd
++        }
++    }
++    if (cursor < end) result.append(substring(cursor, end).withoutInlineBoxLayoutCharacters())
++    return result.toString()
+ }
+\ No newline at end of file
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxChromeTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxChromeTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..68cf0def0eac3819b09a2021d916c580de609073
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxChromeTest.kt
+@@ -0,0 +1,289 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI.
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component.text
++
++import android.graphics.Bitmap
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.Path
++import android.graphics.RectF
++import android.graphics.Region
++import android.text.Layout
++import android.text.Spannable
++import android.text.SpannableString
++import android.text.StaticLayout
++import android.text.TextPaint
++import android.text.style.ReplacementSpan
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++import org.robolectric.annotation.GraphicsMode
++
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [34])
++@GraphicsMode(GraphicsMode.Mode.NATIVE)
++class KRInlineBoxChromeTest {
++
++    @Test
++    fun wrappedGroupChromeDoesNotPaintAdjacentPlainText() {
++        val prefix = "Long path without ellipsis: "
++        val code = "reply/channel-markdown/message-inline-visual/owner-key-consumes-thread-route"
++        val suffix = " suffix"
++        val leadingEdge = '\uFFFC'
++        val joiner = INLINE_BOX_LAYOUT_JOINER
++        val value = prefix + leadingEdge + joiner + code + joiner + leadingEdge + suffix
++        val groupStart = prefix.length
++        val groupEnd = value.length - suffix.length
++        val text = SpannableString(value).apply {
++            setSpan(FixedAdvanceSpan(8), groupStart, groupStart + 1, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            setSpan(FixedAdvanceSpan(8), groupEnd - 1, groupEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            setSpan(
++                KRInlineBoxSpan(
++                    KRInlineBoxSpanStyle(
++                        backgroundColor = Color.RED,
++                        borderColor = null,
++                        borderWidth = 0f,
++                        paddingStart = 8f,
++                        paddingEnd = 8f,
++                        paddingTop = 0f,
++                        paddingBottom = 0f,
++                        marginStart = 0f,
++                        marginEnd = 0f,
++                        cornerRadius = 0f,
++                    )
++                ),
++                groupStart,
++                groupEnd,
++                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++            )
++        }
++        val layout = buildLayout(text, width = 320)
++        val bitmap = render(layout)
++
++        assertTrue("fixture must start the group after plain text", groupStart > layout.getLineStart(0))
++        assertTrue("fixture must wrap the inline group", layout.getLineForOffset(groupEnd - 1) > 0)
++        for (line in layout.getLineForOffset(groupStart)..layout.getLineForOffset(groupEnd - 1)) {
++            val segmentStart = maxOf(groupStart, layout.getLineStart(line))
++            val segmentEnd = minOf(groupEnd, layout.getLineVisibleEnd(line))
++            if (segmentEnd <= segmentStart) continue
++            val bounds = selectionBounds(layout, segmentStart, segmentEnd, line)
++            var redPixels = 0
++            for (y in layout.getLineTop(line) until layout.getLineBottom(line)) {
++                for (x in 0 until bitmap.width) {
++                    if (bitmap.getPixel(x, y) != Color.RED) continue
++                    redPixels++
++                    assertTrue(
++                        "inline-box fill escaped line $line selection at $x,$y; bounds=$bounds",
++                        x >= bounds.left.toInt() && x < kotlin.math.ceil(bounds.right).toInt(),
++                    )
++                }
++            }
++            assertTrue("line $line must contain inline-box fill", redPixels > 0)
++        }
++
++        val firstLine = layout.getLineForOffset(groupStart)
++        val prefixRight = layout.getPrimaryHorizontal(groupStart).toInt()
++        val redOverPrefix =
++            (layout.getLineTop(firstLine) until layout.getLineBottom(firstLine)).sumOf { y ->
++                (0 until prefixRight).count { x -> bitmap.getPixel(x, y) == Color.RED }
++            }
++        assertEquals("plain prefix must never receive inline-box fill", 0, redOverPrefix)
++    }
++
++    @Test
++    fun mixedBidirectionalGroupChromeClipsDisjointSelection() {
++        val prefix = "prefix "
++        val code = "abc אב"
++        val suffix = "ג xyz suffix"
++        val value = prefix + code + suffix
++        val groupStart = prefix.length
++        val groupEnd = groupStart + code.length
++        val text = SpannableString(value).apply {
++            setSpan(
++                KRInlineBoxSpan(
++                    KRInlineBoxSpanStyle(
++                        backgroundColor = Color.RED,
++                        borderColor = null,
++                        borderWidth = 0f,
++                        paddingStart = 0f,
++                        paddingEnd = 0f,
++                        paddingTop = 0f,
++                        paddingBottom = 0f,
++                        marginStart = 0f,
++                        marginEnd = 0f,
++                        cornerRadius = 0f,
++                    )
++                ),
++                groupStart,
++                groupEnd,
++                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++            )
++        }
++        val layout = buildLayout(text, width = 640)
++        val line = layout.getLineForOffset(groupStart)
++        assertEquals(line, layout.getLineForOffset(groupEnd - 1))
++        val selection = selectionPath(layout, groupStart, groupEnd, line)
++        val selectionRegion = selectionRegion(layout, selection, line)
++        val sampleY = (layout.getLineTop(line) + layout.getLineBottom(line)) / 2
++        assertTrue(
++            "fixture must produce a disjoint bidi selection",
++            horizontalRunCount(selectionRegion, sampleY, layout.width) > 1,
++        )
++
++        val bitmap = render(layout)
++        var redPixels = 0
++        for (y in layout.getLineTop(line) until layout.getLineBottom(line)) {
++            for (x in 0 until bitmap.width) {
++                if (bitmap.getPixel(x, y) != Color.RED) continue
++                redPixels++
++                assertTrue(
++                    "inline-box fill escaped bidi selection at $x,$y",
++                    selectionRegion.contains(x, y),
++                )
++            }
++        }
++        assertTrue("bidi selection must contain inline-box fill", redPixels > 0)
++    }
++
++    @Test
++    fun wrappedGroupChromeStopsAtShortFirstFragment() {
++        val prefix = "Command: "
++        val code = "./\u200Bgradlew\u200B:shared:testDebugUnitTest"
++        val value = prefix + code
++        val groupStart = prefix.length
++        val groupEnd = value.length
++        val text = SpannableString(value).apply {
++            setSpan(
++                KRInlineBoxSpan(
++                    KRInlineBoxSpanStyle(
++                        backgroundColor = Color.RED,
++                        borderColor = null,
++                        borderWidth = 0f,
++                        paddingStart = 0f,
++                        paddingEnd = 0f,
++                        paddingTop = 0f,
++                        paddingBottom = 0f,
++                        marginStart = 0f,
++                        marginEnd = 0f,
++                        cornerRadius = 0f,
++                    )
++                ),
++                groupStart,
++                groupEnd,
++                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++            )
++        }
++        val paint = testPaint()
++        val width = kotlin.math.ceil(paint.measureText(prefix + "./") + 2f).toInt()
++        val layout = buildLayout(text, width = width, paint = paint)
++        val firstLine = layout.getLineForOffset(groupStart)
++        assertTrue("fixture must wrap after the short ./ fragment", layout.lineCount > firstLine + 1)
++        assertTrue(
++            "first line must end before gradlew",
++            layout.getLineEnd(firstLine) <= groupStart + "./\u200B".length,
++        )
++
++        val bitmap = render(layout)
++        val contentRight = kotlin.math.ceil(layout.getLineRight(firstLine).toDouble()).toInt()
++        assertTrue("fixture must leave an unused first-line tail", contentRight < bitmap.width)
++        val redTailPixels =
++            (layout.getLineTop(firstLine) until layout.getLineBottom(firstLine)).sumOf { y ->
++                (contentRight until bitmap.width).count { x -> bitmap.getPixel(x, y) == Color.RED }
++            }
++        assertEquals("chrome after ./ must not fill the unused line tail", 0, redTailPixels)
++    }
++
++    private fun selectionBounds(layout: Layout, start: Int, end: Int, line: Int): RectF {
++        val selection = selectionPath(layout, start, end, line)
++        return RectF().also { selection.computeBounds(it, true) }
++    }
++
++    private fun selectionPath(layout: Layout, start: Int, end: Int, line: Int): Path {
++        val selection = Path().also { layout.getSelectionPath(start, end, it) }
++        val lineLeft = minOf(layout.getLineLeft(line), layout.getLineRight(line))
++        val lineRight = maxOf(layout.getLineLeft(line), layout.getLineRight(line))
++        val lineClip = Path().apply {
++            addRect(
++                lineLeft,
++                layout.getLineTop(line).toFloat(),
++                lineRight,
++                layout.getLineBottom(line).toFloat(),
++                Path.Direction.CW,
++            )
++        }
++        assertTrue(selection.op(lineClip, Path.Op.INTERSECT))
++        return selection
++    }
++
++    private fun selectionRegion(layout: Layout, selection: Path, line: Int): Region =
++        Region().apply {
++            setPath(
++                selection,
++                Region(0, layout.getLineTop(line), layout.width, layout.getLineBottom(line)),
++            )
++        }
++
++    private fun horizontalRunCount(region: Region, y: Int, width: Int): Int {
++        var runs = 0
++        var inside = false
++        for (x in 0 until width) {
++            val nextInside = region.contains(x, y)
++            if (nextInside && !inside) runs++
++            inside = nextInside
++        }
++        return runs
++    }
++
++    private fun buildLayout(
++        text: CharSequence,
++        width: Int,
++        paint: TextPaint = testPaint(),
++    ): StaticLayout =
++        StaticLayout.Builder
++            .obtain(text, 0, text.length, paint, width)
++            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
++            .setIncludePad(false)
++            .build()
++
++    private fun render(layout: StaticLayout): Bitmap =
++        Bitmap.createBitmap(layout.width, layout.height, Bitmap.Config.ARGB_8888).also { bitmap ->
++            KRRichTextViewDrawer(layout).draw(Canvas(bitmap))
++        }
++
++    private fun testPaint(): TextPaint =
++        TextPaint().apply {
++            color = Color.BLACK
++            textSize = 40f
++            isAntiAlias = false
++        }
++
++    private class FixedAdvanceSpan(private val width: Int) : ReplacementSpan() {
++        override fun getSize(
++            paint: android.graphics.Paint,
++            text: CharSequence?,
++            start: Int,
++            end: Int,
++            fm: android.graphics.Paint.FontMetricsInt?,
++        ): Int = width
++
++        override fun draw(
++            canvas: Canvas,
++            text: CharSequence?,
++            start: Int,
++            end: Int,
++            x: Float,
++            top: Int,
++            y: Int,
++            bottom: Int,
++            paint: android.graphics.Paint,
++        ) = Unit
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxSpanStyleTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxSpanStyleTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..9390154d60041e9b13e97630ce96e1e4b4075aad
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRInlineBoxSpanStyleTest.kt
+@@ -0,0 +1,191 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component.text
++
++import android.util.SizeF
++import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
++import org.json.JSONArray
++import org.json.JSONObject
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertNull
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++
++@RunWith(RobolectricTestRunner::class)
++class KRInlineBoxSpanStyleTest {
++
++    @Test
++    fun inlineBoxGroupLineStartReadsTheRichTextBuilderReceiver() {
++        assertEquals(true, "".isInlineBoxGroupAtLineStart())
++        assertEquals(true, "prefix\n".isInlineBoxGroupAtLineStart())
++        assertEquals(false, "prefix".isInlineBoxGroupAtLineStart())
++    }
++
++    @Test
++    fun twoChildInlineBoxBuildDoesNotReadPastAnEmptyRichTextBuilder() {
++        val children = JSONArray()
++            .put(JSONObject().put(KRTextProps.PROP_KEY_TEXT, "first"))
++            // Still runs parseSpanProps after the first child has entered buildList, which is
++            // the exact receiver-shadowing state, while keeping the successful path atomic.
++            .put(JSONObject().put(KRTextProps.PROP_KEY_TEXT, ""))
++        val group = JSONObject()
++            .put(InlineBoxGroupSpanProps.PROP_KEY_CHILDREN, children)
++            .put("inlineBoxBorderWidth", 0)
++        val textProps = KRTextProps(null).apply {
++            values = JSONArray().put(group)
++        }
++
++        val result = KRRichTextBuilder(null).build(textProps, mutableListOf()) { SizeF(0f, 0f) }
++
++        assertNotNull(result)
++        assertEquals("first", result.toString())
++    }
++
++    @Test
++    fun absentStyleDoesNotCreateRendererDecoration() {
++        assertNull(KRInlineBoxSpanStyle.from(JSONObject(), null))
++    }
++
++    @Test
++    fun rendererReadsStyleValuesWithoutSemanticKind() {
++        val value = JSONObject()
++            .put("inlineBoxBorderWidth", 0)
++            .put("inlineBoxPaddingStart", 0)
++            .put("inlineBoxPaddingEnd", 0)
++
++        val style = KRInlineBoxSpanStyle.from(value, null)
++
++        assertNotNull(style)
++        assertEquals(0f, style!!.borderWidth)
++        assertEquals(0f, style.paddingStart)
++        assertEquals(0f, style.paddingEnd)
++    }
++
++    @Test
++    fun singleTextChildUsesAtomicInlineBoxLayout() {
++        assertEquals(
++            true,
++            shouldAppendInlineBoxGroupAtomically(
++                childCount = 1,
++                onlyChildIsText = true,
++                onlyChildAdjustsNewline = false,
++            ),
++        )
++        assertEquals(
++            false,
++            shouldAppendInlineBoxGroupAtomically(
++                childCount = 2,
++                onlyChildIsText = true,
++                onlyChildAdjustsNewline = false,
++            ),
++        )
++        assertEquals(
++            false,
++            shouldAppendInlineBoxGroupAtomically(
++                childCount = 1,
++                onlyChildIsText = false,
++                onlyChildAdjustsNewline = false,
++            ),
++        )
++        assertEquals(
++            false,
++            shouldAppendInlineBoxGroupAtomically(
++                childCount = 1,
++                onlyChildIsText = true,
++                onlyChildAdjustsNewline = true,
++            ),
++        )
++    }
++
++    @Test
++    fun atomicInlineBoxHitKeepsClickableIndexAcrossBothHalves() {
++        val precedingNormalSpanIndex = 0
++        val chip = KRInlineBoxAtomicHitRange(line = 1, left = 100f, right = 200f, spanIndex = 1)
++        val followingNormalSpanIndex = 2
++
++        assertEquals(
++            1,
++            resolveKRInlineBoxBoundaryHit(
++                touchedLine = chip.line,
++                touchX = 110f,
++                ranges = listOf(chip),
++                fallbackSpanIndices = listOf(precedingNormalSpanIndex, chip.spanIndex),
++            ),
++        )
++        assertEquals(
++            precedingNormalSpanIndex,
++            resolveKRInlineBoxBoundaryHit(
++                touchedLine = chip.line,
++                touchX = 90f,
++                ranges = listOf(chip),
++                fallbackSpanIndices = listOf(precedingNormalSpanIndex, chip.spanIndex),
++            ),
++        )
++        assertEquals(
++            1,
++            resolveKRInlineBoxBoundaryHit(
++                touchedLine = chip.line,
++                touchX = 190f,
++                ranges = listOf(chip),
++                fallbackSpanIndices = listOf(chip.spanIndex, followingNormalSpanIndex),
++            ),
++        )
++        assertEquals(
++            followingNormalSpanIndex,
++            resolveKRInlineBoxBoundaryHit(
++                touchedLine = chip.line,
++                touchX = 210f,
++                ranges = listOf(chip),
++                fallbackSpanIndices = listOf(chip.spanIndex, followingNormalSpanIndex),
++            ),
++        )
++    }
++
++    @Test
++    fun wrappedAtomicInlineBoxDoesNotStealPreviousLineBoundary() {
++        val precedingNormalSpanIndex = 0
++        val chip = KRInlineBoxAtomicHitRange(line = 1, left = 0f, right = 100f, spanIndex = 1)
++
++        assertEquals(
++            precedingNormalSpanIndex,
++            resolveKRInlineBoxBoundaryHit(
++                touchedLine = 0,
++                touchX = 300f,
++                ranges = listOf(chip),
++                fallbackSpanIndices = listOf(precedingNormalSpanIndex, chip.spanIndex),
++            ),
++        )
++    }
++
++    @Test
++    fun adjacentAtomicInlineBoxesResolveTheTouchedSideOfSharedBoundary() {
++        val left = KRInlineBoxAtomicHitRange(line = 0, left = 0f, right = 100f, spanIndex = 0)
++        val right = KRInlineBoxAtomicHitRange(line = 0, left = 100f, right = 200f, spanIndex = 1)
++
++        assertEquals(
++            0,
++            resolveKRInlineBoxBoundaryHit(
++                touchedLine = 0,
++                touchX = 95f,
++                ranges = listOf(left, right),
++                fallbackSpanIndices = listOf(left.spanIndex, right.spanIndex),
++            ),
++        )
++        assertEquals(
++            1,
++            resolveKRInlineBoxBoundaryHit(
++                touchedLine = 0,
++                touchX = 105f,
++                ranges = listOf(left, right),
++                fallbackSpanIndices = listOf(left.spanIndex, right.spanIndex),
++            ),
++        )
++    }
++}

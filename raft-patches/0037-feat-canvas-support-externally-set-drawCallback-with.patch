@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:09:41 +0000
+Subject: [PATCH] feat(canvas): support externally-set drawCallback with public
+ redraw()
+
+A CanvasView whose drawCallback is set after creation had no way to trigger
+a draw, and draw() bailed out while flex layout had not produced a frame.
+Add public redraw() and isLayoutFrameDefault(), fall back to the last frame
+sent to the native view for the draw size, and stop Compose KuiklyCanvas
+from sending an orphan "reset" that wiped drawCallback output.
+
+Fork-Patch: canvas-drawcallback-redraw
+Origin: a4b60bd9 67602f91 68552342 418d2389
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../tencent/kuikly/compose/ui/KuiklyCanvas.kt |  6 ++-
+ .../tencent/kuikly/core/views/CanvasView.kt   | 37 +++++++++++++++++--
+ 2 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
+index 37b7d727af34dcd7607949ba41fee052a0361501..db519f2d9e1a7586e72e3fd9238cb2f50b8fedc0 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
+@@ -76,7 +76,11 @@ internal class KuiklyCanvas : Canvas {
+             if (value is CanvasView) {
+                 context = CanvasContext(value.renderView!!, value.pagerId, value.nativeRef)
+                 densityValue = value.getPager().pagerDensity()
+-                value.renderView?.callMethod("reset", "")
++                // 已注册 drawCallback 的 CanvasView 由自身 draw 流程管理 reset 与重填；
++                // 此处补发裸 reset 而无后续指令，会把其已下发的绘制指令清掉（白屏回归）。
++                if (value.drawCallback == null) {
++                    value.renderView?.callMethod("reset", "")
++                }
+                 strokeCap = StrokeCap.Butt
+             } else {
+                 context = null
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/CanvasView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/CanvasView.kt
+index 4f9df7ee9ff968d34feafdbe179baa514e206428..f062599621db9e6e9e29c1a8abbb6b67b20e3f1b 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/CanvasView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/CanvasView.kt
+@@ -37,6 +37,8 @@ import kotlin.math.PI
+ class CanvasView : DeclarativeBaseView<Attr, Event>() {
+     var drawCallback: CanvasDrawCallback? = null
+     private var reactiveObserverOwner = BaseObject()
++    // 最近一次下发给 native renderView 的 frame，作为 layoutFrame 缺省时的兜底尺寸来源
++    private var lastRenderFrame = Frame.zero
+ 
+     override fun createAttr(): Attr {
+         return Attr()
+@@ -59,27 +61,56 @@ class CanvasView : DeclarativeBaseView<Attr, Event>() {
+     }
+ 
+     override fun setFrameToRenderView(frame: Frame) {
++        lastRenderFrame = frame
+         super.setFrameToRenderView(frame)
+         draw()
+     }
+ 
++    /**
++     * 显式触发一次重绘。供外部在动态设置 drawCallback 后主动调用
++     * （createRenderView/setFrameToRenderView 之外的路径不会自动触发 draw）。
++     */
++    fun redraw() {
++        draw()
++    }
++
++    /**
++     * flex 布局是否尚未产出 layoutFrame（缺省值）。
++     * 供外部在动态设置 drawCallback 后判断 draw 守卫的放行条件：
++     * 缺省时 draw 会回退使用最近一次下发 native 的 frame 作为尺寸来源。
++     */
++    fun isLayoutFrameDefault(): Boolean {
++        return flexNode.layoutFrame.isDefaultValue()
++    }
++
+     private fun draw() {
+-        if (renderView == null || flexNode.layoutFrame.isDefaultValue()) {
++        if (renderView == null || noDrawableSize()) {
+             return
+         }
+         ReactiveObserver.unbindValueChange(reactiveObserverOwner)
+         ReactiveObserver.bindValueChange(reactiveObserverOwner) {
+-            if (renderView == null || flexNode.layoutFrame.isDefaultValue()) {
++            if (renderView == null || noDrawableSize()) {
+             } else if (drawCallback != null){
+                 val context = CanvasContext(renderView!!, pagerId, nativeRef)
+                 context.reset()
+-                drawCallback!!(context, flexNode.layoutFrame.width, flexNode.layoutFrame.height)
++                // layoutFrame 缺省时使用已下发给 native 的 frame 兜底，避免绘制命令拿不到有效尺寸
++                val w = if (flexNode.layoutFrame.isDefaultValue()) lastRenderFrame.width else flexNode.layoutFrame.width
++                val h = if (flexNode.layoutFrame.isDefaultValue()) lastRenderFrame.height else flexNode.layoutFrame.height
++                drawCallback!!(context, w, h)
+                 // 将本帧所有绘制命令一次性发送给 native，减少 bridge 调用次数
+                 context.flush()
+             }
+         }
+     }
+ 
++    // layoutFrame 为缺省值（尚未由 flex 布局产出）且 native 侧也没有可用 frame 时，视为没有可绘制尺寸
++    private fun noDrawableSize(): Boolean {
++        if (!flexNode.layoutFrame.isDefaultValue()) {
++            return false
++        }
++        return lastRenderFrame.width <= 0f || lastRenderFrame.height <= 0f
++    }
++
+     override fun didRemoveFromParentView() {
+         super.didRemoveFromParentView()
+         ReactiveObserver.unbindValueChange(reactiveObserverOwner)

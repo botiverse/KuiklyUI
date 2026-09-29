@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:10:13 +0000
+Subject: [PATCH] fix(ohos): fire loadFailure when the image adapter reports a
+ failed load
+
+An image adapter that handled a src but failed to load it (null descriptor
+and empty new_src) only produced an info log, so the Image never received
+loadFailure and callers could not show a fallback. Treat that combination
+as an explicit failure and fire loadFailure with errorCode -1; document
+the contract in Kuikly.h.
+
+Fork-Patch: ohos-image-adapter-failure-event
+Origin: f31bf820
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../cpp/libohos_render/api/include/Kuikly/Kuikly.h |  3 ++-
+ .../expand/components/image/KRImageView.cpp        | 14 ++++++++++++--
+ .../expand/components/image/KRImageView.h          |  1 +
+ 3 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/api/include/Kuikly/Kuikly.h b/core-render-ohos/src/main/cpp/libohos_render/api/include/Kuikly/Kuikly.h
+index 57a5e5ecbd0c667e2bc00e06a7b897cc3ac66e1b..ec3b36d69909028b2cc70e708d96d42373fff9fc 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/api/include/Kuikly/Kuikly.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/api/include/Kuikly/Kuikly.h
+@@ -213,7 +213,8 @@ typedef char *(*KRImageAdapter)(const char *imageSrc, ArkUI_DrawableDescriptor *
+  * @param src src image组件设置的src属性
+  * @param image_descriptor 解码好的图片
+  * @param new_src 新的src地址，比如从原src映射到一个新的src路径
+- * @discuss 当image_descriptor非空时，kuikly优先用image_descriptor，其次再使用new_src
++ * @discuss 当image_descriptor非空时，kuikly优先用image_descriptor；否则使用非空new_src。
++ *          image_descriptor和new_src都为空时，表示adapter已处理但加载失败，Kuikly会触发loadFailure。
+  */
+ typedef void (*KRSetImageCallback)(const void* context,
+                                    const char *src,
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
+index 483f390c9a4599ddba1afd3c0b5c012fc9a8a9a1..e001579a7dbcfbe144c7aadf386df9e47d4683ec 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
+@@ -68,6 +68,7 @@ constexpr char kEventNameLoadSuccess[] = "loadSuccess";
+ constexpr char kEventNameLoadResolution[] = "loadResolution";
+ constexpr char kEventNameLoadFailure[] = "loadFailure";
+ constexpr char kEventNameLoadErrorCode[] = "errorCode";
++constexpr int32_t kAdapterImageLoadErrorCode = -1;
+ constexpr char kParamKeyImageWidth[] = "imageWidth";
+ constexpr char kParamKeyImageHeight[] = "imageHeight";
+ constexpr char kPropNameMaskLinearGradient[] = "maskLinearGradient";
+@@ -247,10 +248,10 @@ void KRImageView::AdapterSetImageCallback(const void* context,
+ 
+             if (imageDescriptor) {
+                 kuikly::util::SetArkUIImageSrc(image_view->GetNode(), imageDescriptor);
+-            } else if (new_src) {
++            } else if (new_src && new_src[0] != '\0') {
+                 image_view->LoadFromSrc(std::string(new_src));
+             } else {
+-                KR_LOG_INFO << "Neither image descriptor nor new_src is returned";
++                image_view->FireAdapterImageErrorEvent();
+             }
+         }
+     }
+@@ -634,6 +635,15 @@ void KRImageView::FireOnImageErrorEvent(ArkUI_NodeEvent *event) {
+     }
+ }
+ 
++void KRImageView::FireAdapterImageErrorEvent() {
++    if (load_failure_callback_) {
++        KRRenderValueMap map;
++        map[kPropNameSrc] = NewKRRenderValue(image_src_);
++        map[kEventNameLoadErrorCode] = NewKRRenderValue(kAdapterImageLoadErrorCode);
++        load_failure_callback_(NewKRRenderValue(map));
++    }
++}
++
+ void KRImageView::FireOnImageCompleteEvent(ArkUI_NodeEvent *event) {
+     if (!kuikly::util::IsImageLoadSuccessStatus(event)) {
+         return;
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.h
+index 3848f2298ee7aed7d18f07e3249d14c5d0151574..a4fbbb0c8f95300d7067c4737b406681ff308354 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.h
+@@ -77,6 +77,7 @@ class KRImageView : public IKRRenderViewExport {
+     bool RegisterLoadFailureCallback(const KRRenderCallback &event_callback);
+     void FireOnImageCompleteEvent(ArkUI_NodeEvent *event);
+     void FireOnImageErrorEvent(ArkUI_NodeEvent *event);
++    void FireAdapterImageErrorEvent();
+     std::shared_ptr<KRImageLoadOption> ToImageLoadOption(const std::string &src);
+     void LoadFromSrc(const std::string image_src);
+     void LoadFromNetwork(const std::shared_ptr<KRImageLoadOption> image_option);

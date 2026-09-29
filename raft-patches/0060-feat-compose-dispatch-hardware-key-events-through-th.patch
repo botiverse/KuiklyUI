@@ -1,0 +1,1182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:16:15 +0000
+Subject: [PATCH] feat(compose): dispatch hardware key events through the focus
+ tree
+
+Route hardware key events from render hosts into Compose: a `keyEvent`
+pager event feeds ComposeScene.sendKeyEvent, which dispatches through
+FocusOwner (preview handlers root-to-focused, then onKeyEvent back up), so
+Modifier.onPreviewKeyEvent/onKeyEvent work (e.g. Tab traversal). Adds host
+entry points on Android (KuiklyRenderViewBaseDelegator.sendKeyEvent), iOS
+(sendKeyEventWithKeyCode:) and OHOS (KRNativeRenderController.sendKeyEvent).
+
+Fork-Patch: compose-hardware-key-events
+Origin: f980261f, c1d4192b
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../compose/ui/input/key/KeyEvent.android.kt  |  37 ++++
+ .../kuikly/compose/ComposeContainer.kt        |  53 ++++++
+ .../kuikly/compose/ComposeSceneMediator.kt    |   4 +
+ .../kuikly/compose/ui/focus/FocusOwner.kt     |  30 +--
+ .../kuikly/compose/ui/focus/FocusOwnerImpl.kt | 138 +++++++-------
+ .../kuikly/compose/ui/input/key/KeyEvent.kt   | 173 +++++++-----------
+ .../compose/ui/input/key/KeyInputModifier.kt  |  75 ++++----
+ .../kuikly/compose/ui/node/NodeKind.kt        |  11 +-
+ .../compose/ui/scene/BaseComposeScene.kt      |   7 +
+ .../kuikly/compose/ui/scene/ComposeScene.kt   |   9 +
+ .../compose/ui/scene/KuiklyComposeScene.kt    |   5 +-
+ .../compose/ui/input/key/KeyEvent.native.kt   |  65 +++++++
+ .../core/render/android/KuiklyRenderView.kt   |  33 +++-
+ .../expand/KuiklyRenderViewBaseDelegator.kt   |  13 +-
+ .../KuiklyRenderViewControllerBaseDelegator.h |  14 +-
+ .../KuiklyRenderViewControllerBaseDelegator.m |  20 +-
+ core-render-ios/View/KuiklyRenderView.h       |  14 +-
+ core-render-ios/View/KuiklyRenderView.m       |  21 ++-
+ .../src/main/ets/IKuiklyRenderView.ets        |  15 ++
+ .../src/main/ets/KRNativeRenderController.ets |  15 +-
+ 20 files changed, 518 insertions(+), 234 deletions(-)
+ create mode 100644 compose/src/androidMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.android.kt
+ create mode 100644 compose/src/nativeMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.native.kt
+
+diff --git a/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.android.kt b/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.android.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc0d32ef2bd23a5f5ee25adaec67d2726c9a5204
+--- /dev/null
++++ b/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.android.kt
+@@ -0,0 +1,37 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.input.key
++
++import android.view.KeyEvent as AndroidKeyEvent
++
++/**
++ * Convert an Android hardware key event into the Kuikly Compose key event model.
++ */
++fun AndroidKeyEvent.toComposeKeyEvent(): KeyEvent =
++    KeyEvent(
++        key = Key(keyCode.toLong()),
++        type = when (action) {
++            AndroidKeyEvent.ACTION_UP -> KeyEventType.KeyUp
++            AndroidKeyEvent.ACTION_DOWN -> KeyEventType.KeyDown
++            else -> KeyEventType.Unknown
++        },
++        utf16CodePoint = unicodeChar,
++        isAltPressed = isAltPressed,
++        isCtrlPressed = isCtrlPressed,
++        isMetaPressed = isMetaPressed,
++        isShiftPressed = isShiftPressed,
++        nativeKeyEvent = this,
++    )
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt
+index 6eca9296cf770a18a374745d85d5d1848934e561..a4b0eda9ff8f448ec4c7b22b21974d2ae164f820 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt
+@@ -38,6 +38,9 @@ import com.tencent.kuikly.core.module.FileModule
+ import com.tencent.kuikly.core.module.Module
+ import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
+ import com.tencent.kuikly.compose.ui.InternalComposeUiApi
++import com.tencent.kuikly.compose.ui.input.key.Key
++import com.tencent.kuikly.compose.ui.input.key.KeyEvent
++import com.tencent.kuikly.compose.ui.input.key.KeyEventType
+ import com.tencent.kuikly.compose.ui.platform.WindowInfoImpl
+ import com.tencent.kuikly.compose.ui.scene.ComposeScene
+ import com.tencent.kuikly.compose.ui.scene.KuiklyComposeScene
+@@ -90,6 +93,21 @@ open class ComposeContainer :
+          */
+         private const val OHOS_NATIVE_VSYNC_MIN_BUILD = 3
+ 
++        /**
++         * Pager event name that render hosts can use to send hardware key events to Compose.
++         */
++        const val PAGER_EVENT_KEY_EVENT = "keyEvent"
++
++        const val KEY_EVENT_KEY_CODE = "keyCode"
++        const val KEY_EVENT_TYPE = "type"
++        const val KEY_EVENT_TYPE_UNKNOWN = KeyEventType.UnknownValue
++        const val KEY_EVENT_TYPE_UP = KeyEventType.KeyUpValue
++        const val KEY_EVENT_TYPE_DOWN = KeyEventType.KeyDownValue
++        const val KEY_EVENT_UTF16_CODE_POINT = "utf16CodePoint"
++        const val KEY_EVENT_ALT_PRESSED = "altPressed"
++        const val KEY_EVENT_CTRL_PRESSED = "ctrlPressed"
++        const val KEY_EVENT_META_PRESSED = "metaPressed"
++        const val KEY_EVENT_SHIFT_PRESSED = "shiftPressed"
+     }
+ 
+     override var ignoreLayout = true
+@@ -300,6 +318,15 @@ open class ComposeContainer :
+         return mediator
+     }
+ 
++    /**
++     * Dispatch a hardware key event into the Compose focus tree.
++     *
++     * Platform render hosts can normalize their native key event into [KeyEvent] and call this
++     * method to drive [Modifier.onPreviewKeyEvent] and [Modifier.onKeyEvent] handlers.
++     */
++    fun sendKeyEvent(keyEvent: KeyEvent): Boolean =
++        mediator?.sendKeyEvent(keyEvent) ?: false
++
+     override fun onReceivePagerEvent(pagerEvent: String, eventData: JSONObject) {
+         super.onReceivePagerEvent(pagerEvent, eventData)
+         if (pagerEvent == PAGER_EVENT_ROOT_VIEW_SIZE_CHANGED) {
+@@ -322,9 +349,35 @@ open class ComposeContainer :
+             val fontWeightScale = eventData.optDouble("fontWeightScale", 1.0)
+             val fontSizeScale = eventData.optDouble("fontSizeScale", 1.0)
+             configuration?.onFontConfigChange(fontSizeScale, fontWeightScale)
++        } else if (pagerEvent == PAGER_EVENT_KEY_EVENT) {
++            sendKeyEvent(eventData.toKeyEvent())
+         }
+     }
+ 
++    private fun JSONObject.toKeyEvent(): KeyEvent =
++        KeyEvent(
++            key = Key(optLong(KEY_EVENT_KEY_CODE, Key.Unknown.keyCode)),
++            type = optKeyEventType(),
++            utf16CodePoint = optInt(KEY_EVENT_UTF16_CODE_POINT, 0),
++            isAltPressed = optBoolean(KEY_EVENT_ALT_PRESSED, false),
++            isCtrlPressed = optBoolean(KEY_EVENT_CTRL_PRESSED, false),
++            isMetaPressed = optBoolean(KEY_EVENT_META_PRESSED, false),
++            isShiftPressed = optBoolean(KEY_EVENT_SHIFT_PRESSED, false),
++        )
++
++    private fun JSONObject.optKeyEventType(): KeyEventType =
++        when (optInt(KEY_EVENT_TYPE, KEY_EVENT_TYPE_UNKNOWN)) {
++            KEY_EVENT_TYPE_UP -> KeyEventType.KeyUp
++            KEY_EVENT_TYPE_DOWN -> KeyEventType.KeyDown
++            else -> {
++                when (optString(KEY_EVENT_TYPE, "")) {
++                    "KeyUp", "keyUp", "up" -> KeyEventType.KeyUp
++                    "KeyDown", "keyDown", "down" -> KeyEventType.KeyDown
++                    else -> KeyEventType.Unknown
++                }
++            }
++        }
++
+     private fun updateWindowContainer(frame: Frame) {
+         windowInfo.containerSize = IntSize(
+             (frame.width * pagerDensity()).fastRoundToInt(),
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeSceneMediator.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeSceneMediator.kt
+index 176c6e560ded96e7a8cc61dd17897848c589f9d8..072b1aba018f5f2bc5238fa5c7d911974aef5b60 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeSceneMediator.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeSceneMediator.kt
+@@ -25,6 +25,7 @@ import com.tencent.kuikly.compose.foundation.lazy.layout.PrefetchScheduler
+ import com.tencent.kuikly.compose.foundation.lazy.layout.createDefaultKuiklyPrefetchScheduler
+ import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
+ import com.tencent.kuikly.compose.ui.InternalComposeUiApi
++import com.tencent.kuikly.compose.ui.input.key.KeyEvent
+ import com.tencent.kuikly.compose.ui.platform.WindowInfo
+ import com.tencent.kuikly.compose.ui.scene.ComposeScene
+ import com.tencent.kuikly.compose.ui.unit.IntOffset
+@@ -138,6 +139,9 @@ class ComposeSceneMediator(
+         }
+     }
+ 
++    fun sendKeyEvent(keyEvent: KeyEvent): Boolean =
++        scene.sendKeyEvent(keyEvent)
++
+     fun updateDensity(toFloat: Float) {
+         scene.density = Density(toFloat)
+     }
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwner.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwner.kt
+index d0ccc2724c8bd3cc8da17d6c1f3b1c99d92881b4..c6aec86c11bd672a8eb9214d83bf4d653876a714 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwner.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwner.kt
+@@ -18,7 +18,7 @@ package com.tencent.kuikly.compose.ui.focus
+ 
+ import com.tencent.kuikly.compose.ui.Modifier
+ import com.tencent.kuikly.compose.ui.geometry.Rect
+-//import com.tencent.kuikly.compose.ui.input.key.KeyEvent
++import com.tencent.kuikly.compose.ui.input.key.KeyEvent
+ //import com.tencent.kuikly.compose.ui.input.rotary.RotaryScrollEvent
+ 
+ /**
+@@ -126,20 +126,20 @@ internal interface FocusOwner : FocusManager {
+      */
+     fun getFocusRect(): Rect?
+ 
+-//    /**
+-//     * Dispatches a key event through the compose hierarchy.
+-//     *
+-//     * When an embedded subview has focus, we call onPreviewKeyEvents for all the parents, and then
+-//     * invoke onFocusedItem before we call onKeyEvent on all the parents.
+-//     *
+-//     * @param keyEvent the key event to be dispatched
+-//     *
+-//     * @param onFocusedItem the block that is run after calling onPreviewKeyEvents on all the
+-//     * parents. Returning true will consume the event and prevent the event from propagating
+-//     * to the onKeyEvent modifiers on parents. This is used to dispatch key events to embedded
+-//     * sub-views.
+-//     */
+-//    fun dispatchKeyEvent(keyEvent: KeyEvent, onFocusedItem: () -> Boolean = { false }): Boolean
++    /**
++     * Dispatches a key event through the compose hierarchy.
++     *
++     * When an embedded subview has focus, we call onPreviewKeyEvents for all the parents, and then
++     * invoke onFocusedItem before we call onKeyEvent on all the parents.
++     *
++     * @param keyEvent the key event to be dispatched
++     *
++     * @param onFocusedItem the block that is run after calling onPreviewKeyEvents on all the
++     * parents. Returning true will consume the event and prevent the event from propagating
++     * to the onKeyEvent modifiers on parents. This is used to dispatch key events to embedded
++     * sub-views.
++     */
++    fun dispatchKeyEvent(keyEvent: KeyEvent, onFocusedItem: () -> Boolean = { false }): Boolean
+ //
+ //    /**
+ //     * Dispatches an intercepted soft keyboard key event through the compose hierarchy.
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwnerImpl.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwnerImpl.kt
+index e159140d52c22bdc68caab26ca195691e445e8bf..2f091dd6b28290c133c3ddb81484d338f31e55f3 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwnerImpl.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/focus/FocusOwnerImpl.kt
+@@ -29,11 +29,9 @@ import com.tencent.kuikly.compose.ui.focus.FocusDirection.Companion.Previous
+ import com.tencent.kuikly.compose.ui.focus.FocusRequester.Companion.Cancel
+ import com.tencent.kuikly.compose.ui.focus.FocusRequester.Companion.Default
+ import com.tencent.kuikly.compose.ui.geometry.Rect
+-//import com.tencent.kuikly.compose.ui.input.key.KeyEvent
+-//import com.tencent.kuikly.compose.ui.input.key.KeyEventType.Companion.KeyDown
+-//import com.tencent.kuikly.compose.ui.input.key.KeyEventType.Companion.KeyUp
+-//import com.tencent.kuikly.compose.ui.input.key.key
+-//import com.tencent.kuikly.compose.ui.input.key.type
++import com.tencent.kuikly.compose.ui.input.key.KeyEvent
++import com.tencent.kuikly.compose.ui.input.key.KeyEventType.Companion.KeyDown
++import com.tencent.kuikly.compose.ui.input.key.KeyEventType.Companion.KeyUp
+ //import com.tencent.kuikly.compose.ui.input.rotary.RotaryScrollEvent
+ import com.tencent.kuikly.compose.ui.node.DelegatableNode
+ import com.tencent.kuikly.compose.ui.node.ModifierNodeElement
+@@ -255,30 +253,29 @@ internal class FocusOwnerImpl(
+         }
+     }
+ 
+-//    /**
+-//     * Dispatches a key event through the compose hierarchy.
+-//     */
+-//    override fun dispatchKeyEvent(keyEvent: KeyEvent, onFocusedItem: () -> Boolean): Boolean {
+-//        if (focusInvalidationManager.hasPendingInvalidation()) {
+-//            // Ignoring this to unblock b/346370327.
+-//            println("$Warning: Dispatching key event while focus system is invalidated.")
+-//            return false
+-//        }
+-//        if (!validateKeyEvent(keyEvent)) return false
+-//
+-//        val activeFocusTarget = rootFocusNode.findActiveFocusNode()
+-//        val focusedKeyInputNode = activeFocusTarget?.lastLocalKeyInputNode()
+-//                ?: activeFocusTarget?.nearestAncestorIncludingSelf(Nodes.KeyInput)?.node
+-//                ?: rootFocusNode.nearestAncestor(Nodes.KeyInput)?.node
+-//
+-//        focusedKeyInputNode?.traverseAncestorsIncludingSelf(
+-//            type = Nodes.KeyInput,
+-//            onPreVisit = { if (it.onPreKeyEvent(keyEvent)) return true },
+-//            onVisit = { if (onFocusedItem.invoke()) return true },
+-//            onPostVisit = { if (it.onKeyEvent(keyEvent)) return true }
+-//        )
+-//        return false
+-//    }
++    /**
++     * Dispatches a key event through the compose hierarchy.
++     */
++    override fun dispatchKeyEvent(keyEvent: KeyEvent, onFocusedItem: () -> Boolean): Boolean {
++        if (focusInvalidationManager.hasPendingInvalidation()) {
++            // Ignoring this to unblock b/346370327.
++            println("$Warning: Dispatching key event while focus system is invalidated.")
++            return false
++        }
++        if (!validateKeyEvent(keyEvent)) return false
++
++        val activeFocusTarget = rootFocusNode.findActiveFocusNode()
++        val focusedKeyInputNode = activeFocusTarget?.lastLocalKeyInputNode()
++            ?: activeFocusTarget?.nearestAncestorIncludingSelf(Nodes.KeyInput)?.node
++            ?: rootFocusNode.nearestAncestor(Nodes.KeyInput)?.node
++
++        return focusedKeyInputNode?.traverseAncestorsIncludingSelf(
++            type = Nodes.KeyInput,
++            onPreVisit = { it.onPreKeyEvent(keyEvent) },
++            onVisit = onFocusedItem,
++            onPostVisit = { it.onKeyEvent(keyEvent) }
++        ) ?: false
++    }
+ //
+ //    @OptIn(ExperimentalComposeUiApi::class)
+ //    override fun dispatchInterceptedSoftKeyboardEvent(keyEvent: KeyEvent): Boolean {
+@@ -350,16 +347,17 @@ internal class FocusOwnerImpl(
+ 
+     private inline fun <reified T : DelegatableNode> DelegatableNode.traverseAncestorsIncludingSelf(
+         type: NodeKind<T>,
+-        onPreVisit: (T) -> Unit,
+-        onVisit: () -> Unit,
+-        onPostVisit: (T) -> Unit
+-    ) {
++        onPreVisit: (T) -> Boolean,
++        onVisit: () -> Boolean,
++        onPostVisit: (T) -> Boolean
++    ): Boolean {
+         val ancestors = ancestors(type)
+-        ancestors?.fastForEachReversed(onPreVisit)
+-        node.dispatchForKind(type, onPreVisit)
+-        onVisit.invoke()
+-        node.dispatchForKind(type, onPostVisit)
+-        ancestors?.fastForEach(onPostVisit)
++        ancestors?.fastForEachReversed { if (onPreVisit(it)) return true }
++        node.dispatchForKind(type) { if (onPreVisit(it)) return true }
++        if (onVisit.invoke()) return true
++        node.dispatchForKind(type) { if (onPostVisit(it)) return true }
++        ancestors?.fastForEach { if (onPostVisit(it)) return true }
++        return false
+     }
+ 
+     private inline fun <reified T : Any> DelegatableNode.nearestAncestorIncludingSelf(
+@@ -381,38 +379,38 @@ internal class FocusOwnerImpl(
+     override val rootState: FocusState
+         get() = rootFocusNode.focusState
+ 
+-//    private fun DelegatableNode.lastLocalKeyInputNode(): Modifier.Node? {
+-//        var focusedKeyInputNode: Modifier.Node? = null
+-//        visitLocalDescendants(Nodes.FocusTarget or Nodes.KeyInput) { modifierNode ->
+-//            if (modifierNode.isKind(Nodes.FocusTarget)) return focusedKeyInputNode
+-//
+-//            focusedKeyInputNode = modifierNode
+-//        }
+-//        return focusedKeyInputNode
+-//    }
+-//
+-//    // TODO(b/307580000) Factor this out into a class to manage key inputs.
+-//    private fun validateKeyEvent(keyEvent: KeyEvent): Boolean {
+-//        val keyCode = keyEvent.key.keyCode
+-//        when (keyEvent.type) {
+-//            KeyDown -> {
+-//                // It's probably rare for more than 3 hardware keys to be pressed simultaneously.
+-//                val keysCurrentlyDown = keysCurrentlyDown ?: MutableLongSet(initialCapacity = 3)
+-//                    .also { keysCurrentlyDown = it }
+-//                keysCurrentlyDown += keyCode
+-//            }
+-//
+-//            KeyUp -> {
+-//                if (keysCurrentlyDown?.contains(keyCode) != true) {
+-//                    // An UP event for a key that was never DOWN is invalid, ignore it.
+-//                    return false
+-//                }
+-//                keysCurrentlyDown?.remove(keyCode)
+-//            }
+-//            // Always process Unknown event types.
+-//        }
+-//        return true
+-//    }
++    private fun DelegatableNode.lastLocalKeyInputNode(): Modifier.Node? {
++        var focusedKeyInputNode: Modifier.Node? = null
++        visitLocalDescendants(Nodes.FocusTarget or Nodes.KeyInput) { modifierNode ->
++            if (modifierNode.isKind(Nodes.FocusTarget)) return focusedKeyInputNode
++
++            focusedKeyInputNode = modifierNode
++        }
++        return focusedKeyInputNode
++    }
++
++    // TODO(b/307580000) Factor this out into a class to manage key inputs.
++    private fun validateKeyEvent(keyEvent: KeyEvent): Boolean {
++        val keyCode = keyEvent.key.keyCode
++        when (keyEvent.type) {
++            KeyDown -> {
++                // It's probably rare for more than 3 hardware keys to be pressed simultaneously.
++                val keysCurrentlyDown = keysCurrentlyDown ?: MutableLongSet(initialCapacity = 3)
++                    .also { keysCurrentlyDown = it }
++                keysCurrentlyDown += keyCode
++            }
++
++            KeyUp -> {
++                if (keysCurrentlyDown?.contains(keyCode) != true) {
++                    // An UP event for a key that was never DOWN is invalid, ignore it.
++                    return false
++                }
++                keysCurrentlyDown?.remove(keyCode)
++            }
++            // Always process Unknown event types.
++        }
++        return true
++    }
+ }
+ 
+ /**
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.kt
+index 90aaa1f53a388e52bc26b427b5d5f4d434b84185..c2687d02bb1de76b54abd3870d9bd9d9fd19969b 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.kt
+@@ -19,7 +19,6 @@ package com.tencent.kuikly.compose.ui.input.key
+ /**
+  * The native platform-specific keyboard key event.
+  */
+-//expect class NativeKeyEvent
+ typealias NativeKeyEvent = Any
+ 
+ /**
+@@ -31,106 +30,76 @@ typealias NativeKeyEvent = Any
+  *
+  * @sample androidx.compose.ui.samples.KeyEventSample
+  */
++data class KeyEvent(
++    val key: Key = Key.Unknown,
++    val type: KeyEventType = KeyEventType.Unknown,
++    val utf16CodePoint: Int = 0,
++    val isAltPressed: Boolean = false,
++    val isCtrlPressed: Boolean = false,
++    val isMetaPressed: Boolean = false,
++    val isShiftPressed: Boolean = false,
++    val nativeKeyEvent: NativeKeyEvent = Unit
++) {
++    constructor(nativeKeyEvent: NativeKeyEvent) : this(
++        key = Key.Unknown,
++        nativeKeyEvent = nativeKeyEvent
++    )
++
++    companion object
++}
++
++/**
++ * The type of Key Event.
++ *
++ * @sample androidx.compose.ui.samples.KeyEventTypeSample
++ */
+ @kotlin.jvm.JvmInline
+-value class KeyEvent(val nativeKeyEvent: NativeKeyEvent)
++value class KeyEventType internal constructor(@Suppress("unused") private val value: Int) {
++
++    override fun toString(): String {
++        return when (this) {
++            KeyUp -> "KeyUp"
++            KeyDown -> "KeyDown"
++            Unknown -> "Unknown"
++            else -> "Invalid"
++        }
++    }
++
++    companion object {
++        /**
++         * Stable integer protocol value for an unknown key event.
++         */
++        const val UnknownValue: Int = 0
++
++        /**
++         * Stable integer protocol value for a key-up event.
++         */
++        const val KeyUpValue: Int = 1
++
++        /**
++         * Stable integer protocol value for a key-down event.
++         */
++        const val KeyDownValue: Int = 2
++
++        /**
++         * Unknown key event.
++         *
++         * @sample androidx.compose.ui.samples.KeyEventTypeSample
++         */
++        val Unknown: KeyEventType = KeyEventType(UnknownValue)
++
++        /**
++         * Type of KeyEvent sent when the user lifts their finger off a key on the keyboard.
++         *
++         * @sample androidx.compose.ui.samples.KeyEventTypeSample
++         */
++        val KeyUp: KeyEventType = KeyEventType(KeyUpValue)
+ 
+-///**
+-// * The key that was pressed.
+-// *
+-// * @sample androidx.compose.ui.samples.KeyEventIsAltPressedSample
+-// */
+-//val KeyEvent.key: Key get() = Key(nativeKeyEvent.key)
+-//
+-///**
+-// * The UTF16 value corresponding to the key event that was pressed. The unicode character
+-// * takes into account any meta keys that are pressed (eg. Pressing shift results in capital
+-// * alphabets). The UTF16 value uses the
+-// * [U+n notation][http://www.unicode.org/reports/tr27/#notation] of the Unicode Standard.
+-// *
+-// * An [Int] is used instead of a [Char] so that we can support supplementary characters. The
+-// * Unicode Standard allows for characters whose representation requires more than 16 bits.
+-// * The range of legal code points is U+0000 to U+10FFFF, known as Unicode scalar value.
+-// *
+-// * The set of characters from U+0000 to U+FFFF is sometimes referred to as the Basic
+-// * Multilingual Plane (BMP). Characters whose code points are greater than U+FFFF are called
+-// * supplementary characters. In this representation, supplementary characters are represented
+-// * as a pair of char values, the first from the high-surrogates range, (\uD800-\uDBFF), the
+-// * second from the low-surrogates range (\uDC00-\uDFFF).
+-// */
+-//expect val KeyEvent.utf16CodePoint: Int
+-//
+-///**
+-// * The [type][KeyEventType] of key event.
+-// *
+-// * @sample androidx.compose.ui.samples.KeyEventTypeSample
+-// */
+-//expect val KeyEvent.type: KeyEventType
+-//
+-///**
+-// * Indicates whether the Alt key is pressed.
+-// *
+-// * @sample androidx.compose.ui.samples.KeyEventIsAltPressedSample
+-// */
+-//expect val KeyEvent.isAltPressed: Boolean
+-//
+-///**
+-// * Indicates whether the Ctrl key is pressed.
+-// *
+-// * @sample androidx.compose.ui.samples.KeyEventIsCtrlPressedSample
+-// */
+-//expect val KeyEvent.isCtrlPressed: Boolean
+-//
+-///**
+-// * Indicates whether the Meta key is pressed.
+-// *
+-// * @sample androidx.compose.ui.samples.KeyEventIsMetaPressedSample
+-// */
+-//expect val KeyEvent.isMetaPressed: Boolean
+-//
+-///**
+-// * Indicates whether the Shift key is pressed.
+-// *
+-// * @sample androidx.compose.ui.samples.KeyEventIsShiftPressedSample
+-// */
+-//expect val KeyEvent.isShiftPressed: Boolean
+-//
+-///**
+-// * The type of Key Event.
+-// *
+-// * @sample androidx.compose.ui.samples.KeyEventTypeSample
+-// */
+-//@kotlin.jvm.JvmInline
+-//value class KeyEventType internal constructor(@Suppress("unused") private val value: Int) {
+-//
+-//    override fun toString(): String {
+-//        return when (this) {
+-//            KeyUp -> "KeyUp"
+-//            KeyDown -> "KeyDown"
+-//            Unknown -> "Unknown"
+-//            else -> "Invalid"
+-//        }
+-//    }
+-//
+-//    companion object {
+-//        /**
+-//         * Unknown key event.
+-//         *
+-//         * @sample androidx.compose.ui.samples.KeyEventTypeSample
+-//         */
+-//        val Unknown: KeyEventType = KeyEventType(0)
+-//
+-//        /**
+-//         * Type of KeyEvent sent when the user lifts their finger off a key on the keyboard.
+-//         *
+-//         * @sample androidx.compose.ui.samples.KeyEventTypeSample
+-//         */
+-//        val KeyUp: KeyEventType = KeyEventType(1)
+-//
+-//        /**
+-//         * Type of KeyEvent sent when the user presses down their finger on a key on the keyboard.
+-//         *
+-//         * @sample androidx.compose.ui.samples.KeyEventTypeSample
+-//         */
+-//        val KeyDown: KeyEventType = KeyEventType(2)
+-//    }
+-//}
++        /**
++         * Type of KeyEvent sent when the user presses down their finger on a key on the keyboard.
++         *
++         * @sample androidx.compose.ui.samples.KeyEventTypeSample
++         */
++        val KeyDown: KeyEventType = KeyEventType(KeyDownValue)
++    }
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyInputModifier.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyInputModifier.kt
+index 3e9a7fea99bb36a6e0a9dc6c2de979e914f305b3..929a1317da7b7f5db4d50ec2d7c7f02bc28ad6f4 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyInputModifier.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyInputModifier.kt
+@@ -17,6 +17,7 @@
+ package com.tencent.kuikly.compose.ui.input.key
+ 
+ import com.tencent.kuikly.compose.ui.Modifier
++import com.tencent.kuikly.compose.ui.node.DelegatableNode
+ import com.tencent.kuikly.compose.ui.node.ModifierNodeElement
+ import com.tencent.kuikly.compose.ui.platform.InspectorInfo
+ 
+@@ -30,9 +31,9 @@ import com.tencent.kuikly.compose.ui.platform.InspectorInfo
+  *
+  * @sample androidx.compose.ui.samples.KeyEventSample
+  */
+-fun Modifier.onKeyEvent( // todo pel: noop currently, need render support
++fun Modifier.onKeyEvent(
+     onKeyEvent: (KeyEvent) -> Boolean
+-): Modifier = this // then KeyInputElement(onKeyEvent = onKeyEvent, onPreKeyEvent = null)
++): Modifier = this then KeyInputElement(onKeyEvent = onKeyEvent, onPreKeyEvent = null)
+ 
+ /**
+  * Adding this [modifier][Modifier] to the [modifier][Modifier] parameter of a component will
+@@ -46,37 +47,43 @@ fun Modifier.onKeyEvent( // todo pel: noop currently, need render support
+  *
+  * @sample androidx.compose.ui.samples.KeyEventSample
+  */
+-fun Modifier.onPreviewKeyEvent( // todo pel: noop currently, need render support
++fun Modifier.onPreviewKeyEvent(
+     onPreviewKeyEvent: (KeyEvent) -> Boolean
+-): Modifier = this // then KeyInputElement(onKeyEvent = null, onPreKeyEvent = onPreviewKeyEvent)
++): Modifier = this then KeyInputElement(onKeyEvent = null, onPreKeyEvent = onPreviewKeyEvent)
+ 
+-//internal data class KeyInputElement(
+-//    val onKeyEvent: ((KeyEvent) -> Boolean)?,
+-//    val onPreKeyEvent: ((KeyEvent) -> Boolean)?
+-//) : ModifierNodeElement<KeyInputNode>() {
+-//    override fun create() = KeyInputNode(onKeyEvent, onPreKeyEvent)
+-//
+-//    override fun update(node: KeyInputNode) {
+-//        node.onEvent = onKeyEvent
+-//        node.onPreEvent = onPreKeyEvent
+-//    }
+-//
+-//    override fun InspectorInfo.inspectableProperties() {
+-//        onKeyEvent?.let {
+-//            name = "onKeyEvent"
+-//            properties["onKeyEvent"] = it
+-//        }
+-//        onPreKeyEvent?.let {
+-//            name = "onPreviewKeyEvent"
+-//            properties["onPreviewKeyEvent"] = it
+-//        }
+-//    }
+-//}
+-//
+-//internal class KeyInputNode(
+-//    var onEvent: ((KeyEvent) -> Boolean)?,
+-//    var onPreEvent: ((KeyEvent) -> Boolean)?
+-//) : KeyInputModifierNode, Modifier.Node() {
+-//    override fun onKeyEvent(event: KeyEvent): Boolean = this.onEvent?.invoke(event) ?: false
+-//    override fun onPreKeyEvent(event: KeyEvent): Boolean = this.onPreEvent?.invoke(event) ?: false
+-//}
++interface KeyInputModifierNode : DelegatableNode {
++    fun onKeyEvent(event: KeyEvent): Boolean
++
++    fun onPreKeyEvent(event: KeyEvent): Boolean
++}
++
++internal data class KeyInputElement(
++    val onKeyEvent: ((KeyEvent) -> Boolean)?,
++    val onPreKeyEvent: ((KeyEvent) -> Boolean)?
++) : ModifierNodeElement<KeyInputNode>() {
++    override fun create() = KeyInputNode(onKeyEvent, onPreKeyEvent)
++
++    override fun update(node: KeyInputNode) {
++        node.onEvent = onKeyEvent
++        node.onPreEvent = onPreKeyEvent
++    }
++
++    override fun InspectorInfo.inspectableProperties() {
++        onKeyEvent?.let {
++            name = "onKeyEvent"
++            properties["onKeyEvent"] = it
++        }
++        onPreKeyEvent?.let {
++            name = "onPreviewKeyEvent"
++            properties["onPreviewKeyEvent"] = it
++        }
++    }
++}
++
++internal class KeyInputNode(
++    var onEvent: ((KeyEvent) -> Boolean)?,
++    var onPreEvent: ((KeyEvent) -> Boolean)?
++) : KeyInputModifierNode, Modifier.Node() {
++    override fun onKeyEvent(event: KeyEvent): Boolean = this.onEvent?.invoke(event) ?: false
++    override fun onPreKeyEvent(event: KeyEvent): Boolean = this.onPreEvent?.invoke(event) ?: false
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeKind.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeKind.kt
+index a8a921d4c4089fe3feb55b11ddb18cf5342ff437..ec22f3c851042bd06053b4616baca8a3c77150ad 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeKind.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeKind.kt
+@@ -27,6 +27,7 @@ import com.tencent.kuikly.compose.ui.focus.FocusTargetNode
+ import com.tencent.kuikly.compose.ui.focus.invalidateFocusEvent
+ import com.tencent.kuikly.compose.ui.focus.invalidateFocusProperties
+ import com.tencent.kuikly.compose.ui.focus.invalidateFocusTarget
++import com.tencent.kuikly.compose.ui.input.key.KeyInputModifierNode
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerInputModifier
+ import com.tencent.kuikly.compose.ui.internal.checkPrecondition
+ import com.tencent.kuikly.compose.ui.internal.checkPreconditionNotNull
+@@ -94,8 +95,8 @@ internal object Nodes {
+     inline val FocusProperties get() = NodeKind<FocusPropertiesModifierNode>(0b1 shl 11)
+     @JvmStatic
+     inline val FocusEvent get() = NodeKind<FocusEventModifierNode>(0b1 shl 12)
+-//    @JvmStatic
+-//    inline val KeyInput get() = NodeKind<KeyInputModifierNode>(0b1 shl 13)
++    @JvmStatic
++    inline val KeyInput get() = NodeKind<KeyInputModifierNode>(0b1 shl 13)
+ //    @JvmStatic
+ //    inline val RotaryInput get() = NodeKind<RotaryInputModifierNode>(0b1 shl 14)
+     @JvmStatic
+@@ -205,9 +206,9 @@ internal fun calculateNodeKindSetFrom(node: Modifier.Node): Int {
+         if (node is FocusEventModifierNode) {
+             mask = mask or Nodes.FocusEvent
+         }
+-//        if (node is KeyInputModifierNode) {
+-//            mask = mask or Nodes.KeyInput
+-//        }
++        if (node is KeyInputModifierNode) {
++            mask = mask or Nodes.KeyInput
++        }
+ //        if (node is RotaryInputModifierNode) {
+ //            mask = mask or Nodes.RotaryInput
+ //        }
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/BaseComposeScene.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/BaseComposeScene.kt
+index 6a4ec3b3a8843f61356472bdf473e96769dca93d..2454f60e6c3d32eaa218503a249b7c7382ce8b65 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/BaseComposeScene.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/BaseComposeScene.kt
+@@ -36,6 +36,7 @@ import com.tencent.kuikly.compose.ui.GlobalSnapshotManager
+ import com.tencent.kuikly.compose.ui.InternalComposeUiApi
+ import com.tencent.kuikly.compose.ui.geometry.Offset
+ import com.tencent.kuikly.compose.ui.graphics.Canvas
++import com.tencent.kuikly.compose.ui.input.key.KeyEvent
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerButton
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerEventType
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerInputEvent
+@@ -320,6 +321,10 @@ internal abstract class BaseComposeScene(
+         throwRuntimeError("invalid invoke")
+     }
+ 
++    override fun sendKeyEvent(keyEvent: KeyEvent): Boolean = postponeInvalidation {
++        processKeyEvent(keyEvent)
++    }
++
+     private fun doLayout() {
+         snapshotInvalidationTracker.onMeasureAndLayout()
+         measureAndLayout()
+@@ -367,6 +372,8 @@ internal abstract class BaseComposeScene(
+ 
+     protected abstract fun processPointerInputEvent(event: PointerInputEvent)
+ 
++    protected abstract fun processKeyEvent(event: KeyEvent): Boolean
++
+     protected abstract fun measureAndLayout()
+ 
+     protected abstract fun draw(canvas: Canvas)
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/ComposeScene.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/ComposeScene.kt
+index 77b6a0661c37aec2177d55d3f1a8c32a2072448d..4a808f2188c235c04902eb710895e7edbbfe5dbe 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/ComposeScene.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/ComposeScene.kt
+@@ -26,6 +26,7 @@ import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
+ import com.tencent.kuikly.compose.ui.InternalComposeUiApi
+ import com.tencent.kuikly.compose.ui.geometry.Offset
+ import com.tencent.kuikly.compose.ui.graphics.Canvas
++import com.tencent.kuikly.compose.ui.input.key.KeyEvent
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerButton
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerEventType
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerType
+@@ -150,6 +151,14 @@ interface ComposeScene {
+         nanoTime: Long,
+     )
+ 
++    /**
++     * Send a hardware key event to the content.
++     *
++     * The event is routed through focus first with preview handlers from ancestors to the focused
++     * item, then normal handlers from the focused item back to ancestors.
++     */
++    fun sendKeyEvent(keyEvent: KeyEvent): Boolean
++
+     /**
+      * Send pointer event to the content.
+      *
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/KuiklyComposeScene.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/KuiklyComposeScene.kt
+index 271b0c1a7179b5fa1a12c61872154229dc27e2fc..47b6035c993b2f9733d00145d52f646ad2f5ee56 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/KuiklyComposeScene.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/scene/KuiklyComposeScene.kt
+@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.Composition
+ import com.tencent.kuikly.compose.ui.InternalComposeUiApi
+ import com.tencent.kuikly.compose.ui.graphics.Canvas
++import com.tencent.kuikly.compose.ui.input.key.KeyEvent
+ import com.tencent.kuikly.compose.ui.input.pointer.PointerInputEvent
+ import com.tencent.kuikly.compose.ui.node.RootNodeOwner
+ import com.tencent.kuikly.compose.ui.platform.setContent
+@@ -138,6 +139,9 @@ private class KuiklyComposeSceneImpl @InternalComposeUiApi constructor(
+     override fun processPointerInputEvent(event: PointerInputEvent) =
+         mainOwner.onPointerInput(event)
+ 
++    override fun processKeyEvent(event: KeyEvent): Boolean =
++        mainOwner.focusOwner.dispatchKeyEvent(event)
++
+     override fun measureAndLayout() {
+         mainOwner.measureAndLayout()
+     }
+@@ -152,4 +156,3 @@ private class KuiklyComposeSceneImpl @InternalComposeUiApi constructor(
+     private fun onOwnerRemoved(owner: RootNodeOwner) {
+     }
+ }
+-
+diff --git a/compose/src/nativeMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.native.kt b/compose/src/nativeMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.native.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecde01276d8c6a9830c50d6ac6478b6e2f46359e
+--- /dev/null
++++ b/compose/src/nativeMain/kotlin/com/tencent/kuikly/compose/ui/input/key/KeyEvent.native.kt
+@@ -0,0 +1,65 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.input.key
++
++/**
++ * Build a Kuikly Compose key event from a native-family platform key code.
++ *
++ * iOS, macOS and OHOS hosts can use this when they already normalize their native key code to the
++ * same key-code space as [Key] on Kotlin/Native targets.
++ */
++fun nativePlatformKeyEvent(
++    keyCode: Long,
++    type: KeyEventType = KeyEventType.Unknown,
++    utf16CodePoint: Int = 0,
++    isAltPressed: Boolean = false,
++    isCtrlPressed: Boolean = false,
++    isMetaPressed: Boolean = false,
++    isShiftPressed: Boolean = false,
++    nativeKeyEvent: Any? = null,
++): KeyEvent =
++    KeyEvent(
++        key = Key(keyCode),
++        type = type,
++        utf16CodePoint = utf16CodePoint,
++        isAltPressed = isAltPressed,
++        isCtrlPressed = isCtrlPressed,
++        isMetaPressed = isMetaPressed,
++        isShiftPressed = isShiftPressed,
++        nativeKeyEvent = nativeKeyEvent ?: Unit,
++    )
++/**
++ * Build a Kuikly Compose key event from a [SkikoKey] value used by Kuikly native targets.
++ */
++fun SkikoKey.toComposeKeyEvent(
++    type: KeyEventType = KeyEventType.Unknown,
++    utf16CodePoint: Int = 0,
++    isAltPressed: Boolean = false,
++    isCtrlPressed: Boolean = false,
++    isMetaPressed: Boolean = false,
++    isShiftPressed: Boolean = false,
++    nativeKeyEvent: Any? = null,
++): KeyEvent =
++    nativePlatformKeyEvent(
++        keyCode = platformKeyCode.toLong(),
++        type = type,
++        utf16CodePoint = utf16CodePoint,
++        isAltPressed = isAltPressed,
++        isCtrlPressed = isCtrlPressed,
++        isMetaPressed = isMetaPressed,
++        isShiftPressed = isShiftPressed,
++        nativeKeyEvent = nativeKeyEvent,
++    )
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/KuiklyRenderView.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/KuiklyRenderView.kt
+index 9c815586f3e0c81070a445b20ee548489e86c7a0..5bdf26f866f5f87d5fe50060deab999ba2d06737 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/KuiklyRenderView.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/KuiklyRenderView.kt
+@@ -27,6 +27,7 @@ import android.util.Log
+ import android.util.Size
+ import android.util.SizeF
+ import android.util.SparseArray
++import android.view.KeyEvent
+ import android.view.MotionEvent
+ import android.view.View
+ import android.view.ViewGroup
+@@ -665,6 +666,25 @@ class KuiklyRenderView(
+         sendEvent(ON_BACK_PRESSED, mapOf())
+     }
+ 
++    fun sendKeyEvent(event: KeyEvent) {
++        sendEvent(
++            KEY_EVENT,
++            mapOf(
++                KEY_EVENT_KEY_CODE to event.keyCode,
++                KEY_EVENT_TYPE to when (event.action) {
++                    KeyEvent.ACTION_UP -> KEY_EVENT_TYPE_UP
++                    KeyEvent.ACTION_DOWN -> KEY_EVENT_TYPE_DOWN
++                    else -> KEY_EVENT_TYPE_UNKNOWN
++                },
++                KEY_EVENT_UTF16_CODE_POINT to event.unicodeChar,
++                KEY_EVENT_ALT_PRESSED to event.isAltPressed,
++                KEY_EVENT_CTRL_PRESSED to event.isCtrlPressed,
++                KEY_EVENT_META_PRESSED to event.isMetaPressed,
++                KEY_EVENT_SHIFT_PRESSED to event.isShiftPressed,
++            )
++        )
++    }
++
+     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+         if (delegate?.debugLogEnable() == true) {
+             if (requestedLayout) {
+@@ -739,6 +759,17 @@ class KuiklyRenderView(
+         private const val ACCESSIBILITY_RUNNING = "isAccessibilityRunning" // 无障碍化是否开启
+ 
+         private const val ON_BACK_PRESSED = "onBackPressed"
++        private const val KEY_EVENT = "keyEvent"
++        private const val KEY_EVENT_KEY_CODE = "keyCode"
++        private const val KEY_EVENT_TYPE = "type"
++        private const val KEY_EVENT_TYPE_UNKNOWN = 0
++        private const val KEY_EVENT_TYPE_UP = 1
++        private const val KEY_EVENT_TYPE_DOWN = 2
++        private const val KEY_EVENT_UTF16_CODE_POINT = "utf16CodePoint"
++        private const val KEY_EVENT_ALT_PRESSED = "altPressed"
++        private const val KEY_EVENT_CTRL_PRESSED = "ctrlPressed"
++        private const val KEY_EVENT_META_PRESSED = "metaPressed"
++        private const val KEY_EVENT_SHIFT_PRESSED = "shiftPressed"
+ 
+         // RenderView 生命周期状态
+         private const val STATE_INIT = 0
+@@ -1137,4 +1168,4 @@ class KuiklyRenderExport(private val renderContext: IKuiklyRenderContext) : IKui
+ 
+ private typealias InitRenderCoreLazyTask = (size: SizeF) -> Unit
+ private typealias RenderCoreLazyEvent = Pair<String, Map<String, Any>>
+-private typealias RenderCoreLazyTask = (core: IKuiklyRenderCore) -> Unit
+\ No newline at end of file
++private typealias RenderCoreLazyTask = (core: IKuiklyRenderCore) -> Unit
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt
+index 353fdb95b710a05bb5acb75d6597577a4b982c32..8fc8f0d7df81cce4c09f2a48d9b275a0f207dd41 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/KuiklyRenderViewBaseDelegator.kt
+@@ -18,6 +18,7 @@ package com.tencent.kuikly.core.render.android.expand
+ import android.content.Context
+ import android.content.Intent
+ import android.util.Size
++import android.view.KeyEvent
+ import android.view.LayoutInflater
+ import android.view.ViewGroup
+ import android.view.WindowManager
+@@ -570,6 +571,16 @@ open class KuiklyRenderViewBaseDelegator(private val delegate: KuiklyRenderViewB
+         return isBackPressedConsumed.get()
+     }
+ 
++    /**
++     * Dispatch a hardware key event to a Kuikly Compose page.
++     *
++     * Apps can call this from Activity.dispatchKeyEvent. Compose pages receive it through
++     * Modifier.onPreviewKeyEvent/Modifier.onKeyEvent when the focused tree has key handlers.
++     */
++    fun sendKeyEvent(event: KeyEvent) {
++        renderView?.sendKeyEvent(event)
++    }
++
+ }
+ 
+ private typealias KuiklyRenderViewPendingTask = (KuiklyRenderView) -> Unit
+@@ -703,4 +714,4 @@ interface KuiklyRenderViewBaseDelegatorDelegate {
+     fun debugLogEnable(): Boolean {
+         return false
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.h b/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.h
+index 170256123f69b58fc838ccaf4921882b1f2391a9..9784b199655f4fd86d8bfd198f2c5818450b0f62 100644
+--- a/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.h
++++ b/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.h
+@@ -130,6 +130,19 @@ FOUNDATION_EXTERN NSString *const KRPageDataSnapshotKey;
+  */
+ - (void)onBackPressedWithCompletion:(nullable KuiklyBackPressCompletion)completion;
+ 
++/*
++ * @brief 向 Kuikly Compose 页面发送硬件键盘事件.
++ * @param keyCode 平台 key code，对应 Kuikly Compose Native Key.keyCode 编码
++ * @param type 事件类型：0 unknown，1 key up，2 key down
++ */
++- (void)sendKeyEventWithKeyCode:(NSInteger)keyCode
++                           type:(NSInteger)type
++                utf16CodePoint:(NSInteger)utf16CodePoint
++                     altPressed:(BOOL)altPressed
++                    ctrlPressed:(BOOL)ctrlPressed
++                    metaPressed:(BOOL)metaPressed
++                   shiftPressed:(BOOL)shiftPressed;
++
+ @end
+ 
+ @protocol KuiklyRenderViewControllerBaseDelegatorDelegate<NSObject>
+@@ -304,4 +317,3 @@ FOUNDATION_EXTERN NSString *const KRPageDataSnapshotKey;
+ 
+ 
+ NS_ASSUME_NONNULL_END
+-
+diff --git a/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.m b/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.m
+index 3c009a425332032c4e3f1fc62094d1b0dda36ec8..ae4362e5c05f17244523785eed457a5288d75a28 100644
+--- a/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.m
++++ b/core-render-ios/Extension/KuiklyRenderViewControllerBaseDelegator.m
+@@ -148,6 +148,25 @@ NSString *const KRPageDataSnapshotKey = @"kr_snapshotKey";
+     }
+ }
+ 
++- (void)sendKeyEventWithKeyCode:(NSInteger)keyCode
++                           type:(NSInteger)type
++                utf16CodePoint:(NSInteger)utf16CodePoint
++                     altPressed:(BOOL)altPressed
++                    ctrlPressed:(BOOL)ctrlPressed
++                    metaPressed:(BOOL)metaPressed
++                   shiftPressed:(BOOL)shiftPressed {
++    [self sendWithEvent:@"keyEvent"
++                   data:@{
++                       @"keyCode": @(keyCode),
++                       @"type": @(type),
++                       @"utf16CodePoint": @(utf16CodePoint),
++                       @"altPressed": @(altPressed),
++                       @"ctrlPressed": @(ctrlPressed),
++                       @"metaPressed": @(metaPressed),
++                       @"shiftPressed": @(shiftPressed),
++                   }];
++}
++
+ - (BOOL)syncSendEvent:(NSString *)event {
+     // onBackPressed 固定同步执行
+     if ([event isEqualToString:@"onBackPressed"]) {
+@@ -568,4 +587,3 @@ NSString *const KRPageDataSnapshotKey = @"kr_snapshotKey";
+ 
+ @end
+ 
+-
+diff --git a/core-render-ios/View/KuiklyRenderView.h b/core-render-ios/View/KuiklyRenderView.h
+index bf659ebc15a5cdf63d0d6277d7c85799782e75f8..dbda2380e627af60d579579e2450d3c8fc94bd27 100644
+--- a/core-render-ios/View/KuiklyRenderView.h
++++ b/core-render-ios/View/KuiklyRenderView.h
+@@ -73,6 +73,19 @@ FOUNDATION_EXTERN NSString *const KRRootViewSizeDidChangedEventKey;
+  */
+ - (void)sendWithEvent:(NSString *)event data:(NSDictionary *)data sync:(BOOL)sync;
+ 
++/*
++ * @brief 向 Kuikly Compose 页面发送硬件键盘事件.
++ * @param keyCode 平台 key code，对应 Kuikly Compose Native Key.keyCode 编码
++ * @param type 事件类型：0 unknown，1 key up，2 key down
++ */
++- (void)sendKeyEventWithKeyCode:(NSInteger)keyCode
++                           type:(NSInteger)type
++                utf16CodePoint:(NSInteger)utf16CodePoint
++                     altPressed:(BOOL)altPressed
++                    ctrlPressed:(BOOL)ctrlPressed
++                    metaPressed:(BOOL)metaPressed
++                   shiftPressed:(BOOL)shiftPressed;
++
+ /*
+  * @brief 获取模块对应的实例（仅支持在主线程调用）.
+  * @param moduleName 模块名
+@@ -169,4 +182,3 @@ FOUNDATION_EXTERN NSString *const KRRootViewSizeDidChangedEventKey;
+ @end
+ 
+ NS_ASSUME_NONNULL_END
+-
+diff --git a/core-render-ios/View/KuiklyRenderView.m b/core-render-ios/View/KuiklyRenderView.m
+index 1e327c1034e5c360834d9719c391f945a3554478..ccf78ab64b45633c2e0f3f327f20016be17fe911 100644
+--- a/core-render-ios/View/KuiklyRenderView.m
++++ b/core-render-ios/View/KuiklyRenderView.m
+@@ -92,6 +92,26 @@ NSString *const KRDensity = @"density";
+ - (void)sendWithEvent:(NSString *)event data:(NSDictionary *)data sync:(BOOL)sync {
+     [_renderCore sendWithEvent:event data:data sync:sync];
+ }
++
++- (void)sendKeyEventWithKeyCode:(NSInteger)keyCode
++                           type:(NSInteger)type
++                utf16CodePoint:(NSInteger)utf16CodePoint
++                     altPressed:(BOOL)altPressed
++                    ctrlPressed:(BOOL)ctrlPressed
++                    metaPressed:(BOOL)metaPressed
++                   shiftPressed:(BOOL)shiftPressed {
++    [self sendWithEvent:@"keyEvent"
++                   data:@{
++                       @"keyCode": @(keyCode),
++                       @"type": @(type),
++                       @"utf16CodePoint": @(utf16CodePoint),
++                       @"altPressed": @(altPressed),
++                       @"ctrlPressed": @(ctrlPressed),
++                       @"metaPressed": @(metaPressed),
++                       @"shiftPressed": @(shiftPressed),
++                   }];
++}
++
+ /*
+  * @brief 获取模块对应的实例（仅支持在主线程调用）.
+  * @param moduleName 模块名
+@@ -355,4 +375,3 @@ NSString *const KRDensity = @"density";
+ }
+ 
+ @end
+-
+diff --git a/core-render-ohos/src/main/ets/IKuiklyRenderView.ets b/core-render-ohos/src/main/ets/IKuiklyRenderView.ets
+index e68d5cde1871cbade2fc27a6125ca03886c4faf1..7cc98a85d3efc520bf9e3be5e52d84ef35e5f30c 100644
+--- a/core-render-ohos/src/main/ets/IKuiklyRenderView.ets
++++ b/core-render-ohos/src/main/ets/IKuiklyRenderView.ets
+@@ -38,6 +38,21 @@ export interface IKuiklyRenderView {
+    */
+   sendEventSync(event: string, data: KRRecord, sync: boolean): void;
+ 
++  /**
++   * Send a hardware key event to a Kuikly Compose page.
++   * @param keyCode platform key code normalized to Kuikly Compose Native Key.keyCode
++   * @param type event type: 0 unknown, 1 key up, 2 key down
++   */
++  sendKeyEvent(
++    keyCode: number,
++    type: number,
++    utf16CodePoint?: number,
++    altPressed?: boolean,
++    ctrlPressed?: boolean,
++    metaPressed?: boolean,
++    shiftPressed?: boolean
++  ): void;
++
+   /**
+    * 获取 [KuiklyRenderBaseModule]
+    * @param name module 的名字
+diff --git a/core-render-ohos/src/main/ets/KRNativeRenderController.ets b/core-render-ohos/src/main/ets/KRNativeRenderController.ets
+index 14e614c8387aeaa49ca697e7f54c0e9bb39e0a8a..d991cef0b6b801ed133b47ce23afd968ead3c046 100644
+--- a/core-render-ohos/src/main/ets/KRNativeRenderController.ets
++++ b/core-render-ohos/src/main/ets/KRNativeRenderController.ets
+@@ -682,6 +682,19 @@ export class KRNativeRenderController {
+     this.doSendEvent(event, data, sync);
+   }
+ 
++  sendKeyEvent(keyCode: number, type: number, utf16CodePoint?: number, altPressed?: boolean,
++    ctrlPressed?: boolean, metaPressed?: boolean, shiftPressed?: boolean) {
++    this.doSendEvent('keyEvent', {
++      'keyCode': keyCode,
++      'type': type,
++      'utf16CodePoint': utf16CodePoint ?? 0,
++      'altPressed': altPressed ?? false,
++      'ctrlPressed': ctrlPressed ?? false,
++      'metaPressed': metaPressed ?? false,
++      'shiftPressed': shiftPressed ?? false,
++    });
++  }
++
+   onBackPress() {
+     const sendTime = Date.now();
+     this.doSendEvent(KROnBackPressedKey, {}, this.syncSendEvent(KROnBackPressedKey));
+@@ -1077,4 +1090,4 @@ export enum KRMonitorType {
+   LAUNCH = 1 << 0,  // 1 启动监控
+   FRAME = 1 << 1,  // 2 FPS监控
+   MEMORY = 1 << 2,  // 4 内存监控
+-}
+\ No newline at end of file
++}

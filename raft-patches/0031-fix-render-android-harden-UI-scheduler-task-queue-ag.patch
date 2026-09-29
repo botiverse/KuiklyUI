@@ -1,0 +1,485 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:06:28 +0000
+Subject: [PATCH] fix(render-android): harden UI scheduler task queue against
+ races and teardown
+
+Context-thread producers and the main thread shared the pending task lists
+without a lock. Move queue state into a locked KuiklyRenderCoreTaskQueue,
+gate every entry point on destroy(), and skip null tasks in a batch instead
+of crashing. Upstream's turboDisplay isMarkViewDidLoad direct path (#1679)
+is kept; the destroyed guard is added to both of its branches.
+
+Fork-Patch: render-android-ui-scheduler-task-queue
+Origin: 71227e68
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../scheduler/KuiklyRenderCoreUIScheduler.kt  | 200 +++++++++++++-----
+ ...uiklyRenderCoreUISchedulerTaskBatchTest.kt | 136 ++++++++++++
+ 2 files changed, 283 insertions(+), 53 deletions(-)
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUISchedulerTaskBatchTest.kt
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUIScheduler.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUIScheduler.kt
+index 6ed615b936fd515f59b6aef0ae27183123b52ae6..06e1b386d983e48f3831c914745cafbe575e0471 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUIScheduler.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUIScheduler.kt
+@@ -31,22 +31,15 @@ import com.tencent.kuikly.core.render.android.expand.KuiklyRenderTracer
+ class KuiklyRenderCoreUIScheduler(
+     private val preRunKuiklyRenderCoreUITask: PreRunKuiklyRenderCoreTask? = null
+ ) : IKuiklyRenderCoreScheduler {
+-    /**
+-     *  Context线程上的主线程任务集合
+-     */
+-    private var mainThreadTasksOnContextQueue: MutableList<KuiklyRenderCoreTaskExecutor>? = null
+-    /**
+-     * 主线程上的任务集合
+-     */
+-    private var mainThreadTasks = mutableListOf<KuiklyRenderCoreTaskExecutor>()
+-    /**
+-     * 待批量同步主线程任务任务闭包，用于保证一个runLoop中，不管[scheduleTask]调用多少次，最后只会批量调度一次
+-     */
+-    private var needSyncMainQueueTasksBlock : ((sync: Boolean) -> Unit)? = null
++    private val taskQueue = KuiklyRenderCoreTaskQueue()
+     /*
+      * 需要立即回到主线程执行的同步主线程执行任务闭包
+      */
+-    var mainThreadTaskWaitToSyncBlock : (() -> Unit)? = null
++    var mainThreadTaskWaitToSyncBlock: (() -> Unit)?
++        get() = taskQueue.peekMainThreadWaitBlock()
++        set(value) {
++            taskQueue.replaceMainThreadWaitBlock(value)
++        }
+     /*
+      *  是否执行主线程任务中
+      */
+@@ -106,7 +99,11 @@ class KuiklyRenderCoreUIScheduler(
+ 
+     override fun destroy() {
+         KuiklyRenderLog.i("KuiklyRenderCoreUIScheduler", "--destroy uiScheduler--")
++        taskQueue.destroy()
+         uiHandler.removeCallbacksAndMessages(null)
++        viewDidLoadMainThreadTasks.clear()
++        viewTreeUpdateListener = null
++        exceptionListener = null
+     }
+ 
+     fun setViewTreeUpdateListener(listener: IKuiklyRenderViewTreeUpdateListener) {
+@@ -118,27 +115,26 @@ class KuiklyRenderCoreUIScheduler(
+     }
+ 
+     fun performSyncMainQueueTasksBlockIfNeed(sync: Boolean) {
++        if (taskQueue.destroyed) return
+         var tracer: KuiklyRenderTracer? = null
+         if (debugLogEnable && logPerformIfNeedCount < UI_SCHEDULER_MAX_LOG_COUNT) {
+-            tracer = KuiklyRenderTracer("invoke needSyncMainQueueTasksBlock $logPerformIfNeedCount isNull=${needSyncMainQueueTasksBlock == null} sync=$sync")
++            tracer = KuiklyRenderTracer("invoke needSyncMainQueueTasksBlock $logPerformIfNeedCount isNull=${!taskQueue.hasDrainBlock()} sync=$sync")
+             logPerformIfNeedCount++
+         }
+-        if (needSyncMainQueueTasksBlock != null) {
+-            needSyncMainQueueTasksBlock?.invoke(sync)
+-            needSyncMainQueueTasksBlock = null
+-        }
++        taskQueue.takeDrainBlock()?.invoke(sync)
+         tracer?.end()
+     }
+ 
+     fun performMainThreadTaskWaitToSyncBlockIfNeed() {
++        if (taskQueue.destroyed) return
+         var tracer: KuiklyRenderTracer? = null
+         if (debugLogEnable && logRunCount < UI_SCHEDULER_MAX_LOG_COUNT) {
+-            tracer = KuiklyRenderTracer("invoke mainThreadTaskWaitToSyncBlock $logRunCount isNull=${mainThreadTaskWaitToSyncBlock == null}")
++            tracer = KuiklyRenderTracer("invoke mainThreadTaskWaitToSyncBlock $logRunCount isNull=${!taskQueue.hasMainThreadWaitBlock()}")
+             logRunCount++
+         }
+-        if (mainThreadTaskWaitToSyncBlock != null) {
+-            mainThreadTaskWaitToSyncBlock?.invoke()
+-            mainThreadTaskWaitToSyncBlock = null
++        val block = taskQueue.takeMainThreadWaitBlock()
++        if (!taskQueue.destroyed) {
++            block?.invoke()
+         }
+         tracer?.end()
+     }
+@@ -146,6 +142,7 @@ class KuiklyRenderCoreUIScheduler(
+     // 首屏完成在执行任务
+     fun performWhenViewDidLoad(task: KuiklyRenderCoreTask) {
+         assert(isMainThread())
++        if (taskQueue.destroyed) return
+         if (viewDidLoad || isMarkViewDidLoad) {
+             task()
+         } else {
+@@ -155,10 +152,7 @@ class KuiklyRenderCoreUIScheduler(
+ 
+     private fun addTaskToMainQueue(task: KuiklyRenderCoreTaskExecutor) {
+         assert(!isMainThread())
+-        val tasks = mainThreadTasksOnContextQueue ?: mutableListOf<KuiklyRenderCoreTaskExecutor>().apply {
+-            mainThreadTasksOnContextQueue = this
+-        }
+-        tasks.add(task)
++        if (!taskQueue.enqueue(task)) return
+         if (task.isUpdateViewTree) {
+             viewTreeUpdateListener?.onUpdateViewTreeEnqueued()
+         }
+@@ -167,77 +161,75 @@ class KuiklyRenderCoreUIScheduler(
+ 
+     private fun setNeedSyncMainQueueTasks() {
+         assert(!isMainThread())
+-        if (needSyncMainQueueTasksBlock != null) {
+-            return
+-        }
++        if (taskQueue.destroyed) return
+         if (debugLogEnable && setNeedSyncLogCount < UI_SCHEDULER_MAX_LOG_COUNT) {
+             KuiklyRenderLog.d("KuiklyUIScheduler", "--setNeedSyncMainQueueTasks${setNeedSyncLogCount}--")
+             setNeedSyncLogCount++
+         }
+-        needSyncMainQueueTasksBlock = { sync ->
++        val block: (Boolean) -> Unit = syncBlock@ { sync ->
++            if (taskQueue.destroyed) return@syncBlock
+             assert(!isMainThread())
+             if (debugLogEnable && needSyncLogCount < UI_SCHEDULER_MAX_LOG_COUNT) {
+                 KuiklyRenderLog.d("KuiklyUIScheduler", "--needSyncMainQueueTasksBlock${needSyncLogCount}--")
+                 needSyncLogCount++
+             }
+             preRunKuiklyRenderCoreUITask?.invoke()
+-            val performTasks = mainThreadTasksOnContextQueue
+-            mainThreadTasksOnContextQueue = null
+-            synchronized(this) {
+-                mainThreadTasks.addAll(performTasks?.toList() ?: listOf())
+-            }
++            if (!taskQueue.transferContextTasksToMain()) return@syncBlock
+             performOnMainQueueWithTask(sync = sync) {
++                if (taskQueue.destroyed) return@performOnMainQueueWithTask
+                 if (debugLogEnable && performFunLogCount < UI_SCHEDULER_MAX_LOG_COUNT) {
+                     KuiklyRenderLog.d("KuiklyUIScheduler", "--performOnMainQueueWithTask:${sync} ${performFunLogCount}--")
+                     performFunLogCount++
+                 }
+-                var tasks : List<KuiklyRenderCoreTaskExecutor>?
+-                synchronized(this) {
+-                    tasks = mainThreadTasks.toList()
+-                    mainThreadTasks.clear()
+-                }
+-                runMainQueueTasks(tasks)
++                runMainQueueTasks(taskQueue.takeMainTasks())
+             }
+         }
++        if (!taskQueue.installDrainBlock(block)) return
+         KuiklyRenderCoreContextScheduler.scheduleTask {
+             performSyncMainQueueTasksBlockIfNeed(false)
+         } // end task
+     }
+ 
+     fun performOnMainQueueWithTask(sync : Boolean, task: ()-> Unit) {
++        if (taskQueue.destroyed) return
+         var tracer: KuiklyRenderTracer? = null
+         if (debugLogEnable && performCount < UI_SCHEDULER_MAX_LOG_COUNT) {
+-            tracer = KuiklyRenderTracer("performOnMainQueueWithTask $performCount sync=$sync isNull=${mainThreadTaskWaitToSyncBlock == null}")
++            tracer = KuiklyRenderTracer("performOnMainQueueWithTask $performCount sync=$sync isNull=${!taskQueue.hasMainThreadWaitBlock()}")
+             performCount++
+         }
+         if (sync) {
+             if (isMainThread()) {
+-                task()
++                if (!taskQueue.destroyed) task()
+             } else {
+                 // 当前子线程等到主线程可能发生死锁，暂用闭包等后面立即回到主线程处理
+-                mainThreadTaskWaitToSyncBlock = task
++                taskQueue.setMainThreadWaitBlock(task)
+             }
+         } else {
+             uiHandler.post {
+-                task()
++                if (!taskQueue.destroyed) task()
+             }
+         }
+         tracer?.end()
+     }
+ 
+-    private fun runMainQueueTasks(tasks: List<KuiklyRenderCoreTaskExecutor>?) {
++    private fun runMainQueueTasks(tasks: List<KuiklyRenderCoreTaskExecutor?>?) {
+         assert(isMainThread()) {
+             "must call on ui thread"
+         }
++        if (taskQueue.destroyed) return
+         try {
+             val uiTasks = tasks ?: return
+             isPerformingMainQueueTask = true
+-            for (task in uiTasks) {
+-                task.execute()
+-                if (task.isUpdateViewTree) {
+-                    viewTreeUpdateListener?.onUpdateViewTreeFinish()
+-                }
+-            }
++            executeKuiklyRenderCoreTaskBatch(
++                tasks = uiTasks,
++                onNullTask = { index ->
++                    KuiklyRenderLog.e(
++                        "KuiklyRenderCoreUIScheduler",
++                        "skip null main queue task index=$index size=${uiTasks.size}"
++                    )
++                },
++                onUpdateViewTreeFinish = { viewTreeUpdateListener?.onUpdateViewTreeFinish() }
++            )
+             isPerformingMainQueueTask = false
+         } catch (e : Exception) {
+             exceptionListener?.onRenderException(e, ErrorReason.UPDATE_VIEW_TREE)
+@@ -258,7 +250,9 @@ class KuiklyRenderCoreUIScheduler(
+ 
+     // perform all wait to viewDidLoad tasks
+     private fun performViewDidLoadTasksIfNeed() {
+-        val block = {
++        if (taskQueue.destroyed) return
++        val block = block@{
++            if (taskQueue.destroyed) return@block
+             for (task in viewDidLoadMainThreadTasks.toList()) {
+                 task()
+             }
+@@ -283,6 +277,106 @@ class KuiklyRenderCoreUIScheduler(
+ 
+ }
+ 
++/**
++ * Owns all render-task queue state shared by context/native producers and the Android main thread.
++ * A non-main-thread assertion does not imply a single producer, so every mutation must use [lock].
++ */
++internal class KuiklyRenderCoreTaskQueue {
++    private val lock = Any()
++    private var contextTasks: MutableList<KuiklyRenderCoreTaskExecutor?>? = null
++    private val mainTasks = mutableListOf<KuiklyRenderCoreTaskExecutor?>()
++    private var drainBlock: ((Boolean) -> Unit)? = null
++    private var mainThreadWaitBlock: (() -> Unit)? = null
++
++    @Volatile
++    var destroyed = false
++        private set
++
++    fun enqueue(task: KuiklyRenderCoreTaskExecutor): Boolean = synchronized(lock) {
++        if (destroyed) return@synchronized false
++        val tasks = contextTasks ?: mutableListOf<KuiklyRenderCoreTaskExecutor?>().also {
++            contextTasks = it
++        }
++        tasks.add(task)
++        true
++    }
++
++    fun installDrainBlock(block: (Boolean) -> Unit): Boolean = synchronized(lock) {
++        if (destroyed || drainBlock != null) return@synchronized false
++        drainBlock = block
++        true
++    }
++
++    fun hasDrainBlock(): Boolean = synchronized(lock) { drainBlock != null }
++
++    fun takeDrainBlock(): ((Boolean) -> Unit)? = synchronized(lock) {
++        drainBlock.also { drainBlock = null }
++    }
++
++    fun transferContextTasksToMain(): Boolean = synchronized(lock) {
++        if (destroyed) return@synchronized false
++        mainTasks.addAll(contextTasks?.toList().orEmpty())
++        contextTasks = null
++        true
++    }
++
++    fun takeMainTasks(): List<KuiklyRenderCoreTaskExecutor?> = synchronized(lock) {
++        if (destroyed) return@synchronized emptyList()
++        mainTasks.toList().also { mainTasks.clear() }
++    }
++
++    fun hasMainThreadWaitBlock(): Boolean = synchronized(lock) { mainThreadWaitBlock != null }
++
++    fun peekMainThreadWaitBlock(): (() -> Unit)? = synchronized(lock) { mainThreadWaitBlock }
++
++    fun setMainThreadWaitBlock(block: () -> Unit): Boolean = synchronized(lock) {
++        if (destroyed) return@synchronized false
++        mainThreadWaitBlock = block
++        true
++    }
++
++    fun replaceMainThreadWaitBlock(block: (() -> Unit)?): Boolean = synchronized(lock) {
++        if (destroyed && block != null) return@synchronized false
++        mainThreadWaitBlock = block
++        true
++    }
++
++    fun takeMainThreadWaitBlock(): (() -> Unit)? = synchronized(lock) {
++        mainThreadWaitBlock.also { mainThreadWaitBlock = null }
++    }
++
++    fun destroy() {
++        synchronized(lock) {
++            destroyed = true
++            contextTasks?.clear()
++            contextTasks = null
++            mainTasks.clear()
++            drainBlock = null
++            mainThreadWaitBlock = null
++        }
++    }
++}
++
++internal fun executeKuiklyRenderCoreTaskBatch(
++    tasks: List<KuiklyRenderCoreTaskExecutor?>,
++    onNullTask: (Int) -> Unit = {},
++    onUpdateViewTreeFinish: () -> Unit = {}
++): Int {
++    var executed = 0
++    tasks.forEachIndexed { index, task ->
++        if (task == null) {
++            onNullTask(index)
++            return@forEachIndexed
++        }
++        task.execute()
++        executed++
++        if (task.isUpdateViewTree) {
++            onUpdateViewTreeFinish()
++        }
++    }
++    return executed
++}
++
+ /**
+  * 执行任务包装类，用于区分是否为更新 UI 的任务
+  */
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUISchedulerTaskBatchTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUISchedulerTaskBatchTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e59bb0abd239efcbc3253dfe3dd6e1b455d8eb2
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreUISchedulerTaskBatchTest.kt
+@@ -0,0 +1,136 @@
++package com.tencent.kuikly.core.render.android.scheduler
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.Executors
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicBoolean
++
++class KuiklyRenderCoreUISchedulerTaskBatchTest {
++
++    @Test
++    fun nullQueueEntriesAreSkippedWithoutDroppingValidTasks() {
++        val executed = mutableListOf<String>()
++        val nullIndexes = mutableListOf<Int>()
++        var updateViewTreeFinishCount = 0
++
++        val executedCount =
++            executeKuiklyRenderCoreTaskBatch(
++                tasks =
++                    listOf(
++                        KuiklyRenderCoreTaskExecutor(Runnable { executed += "first" }, false),
++                        null,
++                        KuiklyRenderCoreTaskExecutor(Runnable { executed += "second" }, true)
++                    ),
++                onNullTask = nullIndexes::add,
++                onUpdateViewTreeFinish = { updateViewTreeFinishCount++ }
++            )
++
++        assertEquals(listOf("first", "second"), executed)
++        assertEquals(listOf(1), nullIndexes)
++        assertEquals(2, executedCount)
++        assertEquals(1, updateViewTreeFinishCount)
++    }
++
++    @Test
++    fun taskFailureStillStopsTheBatchForTheSchedulerExceptionBoundary() {
++        val executed = mutableListOf<String>()
++
++        val error =
++            runCatching {
++                executeKuiklyRenderCoreTaskBatch(
++                    tasks =
++                        listOf(
++                            KuiklyRenderCoreTaskExecutor(Runnable { executed += "first" }, false),
++                            KuiklyRenderCoreTaskExecutor(Runnable { error("boom") }, false),
++                            KuiklyRenderCoreTaskExecutor(Runnable { executed += "third" }, false)
++                        )
++                )
++            }.exceptionOrNull()
++
++        assertEquals("boom", error?.message)
++        assertEquals(listOf("first"), executed)
++    }
++
++    @Test
++    fun concurrentProducersDoNotCorruptOrDropQueueEntries() {
++        val queue = KuiklyRenderCoreTaskQueue()
++        val producerCount = 4
++        val tasksPerProducer = 500
++        val start = CountDownLatch(1)
++        val done = CountDownLatch(producerCount)
++        val executor = Executors.newFixedThreadPool(producerCount)
++        val allAccepted = AtomicBoolean(true)
++
++        repeat(producerCount) { producer ->
++            executor.execute {
++                try {
++                    start.await()
++                    repeat(tasksPerProducer) { index ->
++                        if (!queue.enqueue(
++                            KuiklyRenderCoreTaskExecutor(
++                                Runnable {},
++                                (producer + index) % 2 == 0
++                            )
++                        )) {
++                            allAccepted.set(false)
++                        }
++                    }
++                } finally {
++                    done.countDown()
++                }
++            }
++        }
++
++        start.countDown()
++        assertTrue(done.await(5, TimeUnit.SECONDS))
++        executor.shutdownNow()
++
++        assertTrue(allAccepted.get())
++        assertTrue(queue.transferContextTasksToMain())
++        val tasks = queue.takeMainTasks()
++        assertEquals(producerCount * tasksPerProducer, tasks.size)
++        assertTrue(tasks.all { it != null })
++    }
++
++    @Test
++    fun destroyClearsPendingWorkAndRejectsNewWork() {
++        val queue = KuiklyRenderCoreTaskQueue()
++        var drained = false
++        var waited = false
++
++        assertTrue(queue.enqueue(KuiklyRenderCoreTaskExecutor(Runnable {}, false)))
++        assertTrue(queue.installDrainBlock { drained = true })
++        assertTrue(queue.setMainThreadWaitBlock { waited = true })
++        assertTrue(queue.transferContextTasksToMain())
++
++        queue.destroy()
++
++        assertTrue(queue.destroyed)
++        assertFalse(queue.enqueue(KuiklyRenderCoreTaskExecutor(Runnable {}, false)))
++        assertFalse(queue.installDrainBlock { drained = true })
++        assertFalse(queue.setMainThreadWaitBlock { waited = true })
++        assertFalse(queue.transferContextTasksToMain())
++        assertTrue(queue.takeMainTasks().isEmpty())
++        queue.takeDrainBlock()?.invoke(false)
++        queue.takeMainThreadWaitBlock()?.invoke()
++        assertFalse(drained)
++        assertFalse(waited)
++    }
++
++    @Test
++    fun takingDrainBlockAllowsConcurrentFollowUpBatchToSchedule() {
++        val queue = KuiklyRenderCoreTaskQueue()
++        val first: (Boolean) -> Unit = {}
++        val second: (Boolean) -> Unit = {}
++
++        assertTrue(queue.installDrainBlock(first))
++        assertFalse(queue.installDrainBlock(second))
++        assertTrue(queue.takeDrainBlock() === first)
++        assertTrue(queue.installDrainBlock(second))
++        assertTrue(queue.takeDrainBlock() === second)
++    }
++}

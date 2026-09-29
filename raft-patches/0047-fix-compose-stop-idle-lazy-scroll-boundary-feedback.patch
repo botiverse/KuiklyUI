@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:15:45 +0000
+Subject: [PATCH] fix(compose): stop idle lazy scroll boundary feedback
+
+tryExpandStartSize ran its top-expand / pull-back correction on every
+native scroll callback, including settle/fling callbacks that were echoes
+of its own offset writes, which fed a boundary feedback loop at the list
+top. Return early unless a correction is actually needed, and skip it
+while the list is scrolling without an active native drag.
+
+Fork-Patch: compose-lazy-idle-boundary-guard
+Origin: f6864c23, 0f22838d (early-return residue kept after revert 661e6a3a)
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../compose/scroller/ContentSizeExtensions.kt       | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+index aff7706e6bb4d3316584f64dc96be2fd47ba9391..df7a1583701e79be18bda549bee728a14c399a2f 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+@@ -291,9 +291,20 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
+     if (kuiklyInfo.skipExpandStartSize) return
+     if (this is PagerState) return
+ 
++    val atTopSync = isComposeAtTopForScrollSync()
++    val needsTopExpand = offset <= 0 && !atTopSync && kuiklyInfo.offsetDirty
++    val needsScrollViewPullBack = offset > 0 && atTopSync
++    if (!needsTopExpand && !needsScrollViewPullBack) {
++        return
++    }
++
++    if (isScrolling && kuiklyInfo.scrollView?.isDragging != true) {
++        return
++    }
++
+     val density = kuiklyInfo.getDensity()
+     // scrollview 到顶了，但是compose没到顶
+-    if (offset <= 0 && !isComposeAtTopForScrollSync() && kuiklyInfo.offsetDirty) {
++    if (needsTopExpand) {
+         var delta = calculateBackExpandSize(offset)
+         val minDelta = (ScrollableStateConstants.DEFAULT_CONTENT_SIZE * density).toInt()
+         delta = max(delta ?: minDelta, minDelta)

@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:06:03 +0000
+Subject: [PATCH] fix(ios): guard render-view method dispatch
+
+hrv_callWithMethod:params:callback: is optional in the view export
+protocol, but the layer handler and KRGradientRichTextView forwarded it
+unconditionally, crashing with an unrecognized selector for views that do
+not implement it. Check respondsToSelector: before dispatching.
+
+Fork-Patch: ios-guard-view-method-dispatch
+Origin: d706e0ed
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../Extension/AdvancedComps/KRGradientRichTextView.m          | 4 +++-
+ core-render-ios/Handler/KuiklyRenderLayerHandler.mm           | 4 +++-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/core-render-ios/Extension/AdvancedComps/KRGradientRichTextView.m b/core-render-ios/Extension/AdvancedComps/KRGradientRichTextView.m
+index a468df07233bf3d179e2f9c1d7a854f80c2ef59e..27ef5db0c0683b61e1e4c84145038d03649f318d 100644
+--- a/core-render-ios/Extension/AdvancedComps/KRGradientRichTextView.m
++++ b/core-render-ios/Extension/AdvancedComps/KRGradientRichTextView.m
+@@ -133,7 +133,9 @@
+  * 调用view方法
+  */
+ - (void)hrv_callWithMethod:(NSString *)method params:(NSString *)params callback:(KuiklyRenderCallback)callback {
+-    [_contentTextView hrv_callWithMethod:method params:params callback:callback];
++    if ([_contentTextView respondsToSelector:@selector(hrv_callWithMethod:params:callback:)]) {
++        [_contentTextView hrv_callWithMethod:method params:params callback:callback];
++    }
+ }
+ 
+ #pragma mark - override
+diff --git a/core-render-ios/Handler/KuiklyRenderLayerHandler.mm b/core-render-ios/Handler/KuiklyRenderLayerHandler.mm
+index 2360cd6d82b223a824268b92eb8d14dea5cc2580..d4b7e59766fc5da3128407401071c75a45815696 100644
+--- a/core-render-ios/Handler/KuiklyRenderLayerHandler.mm
++++ b/core-render-ios/Handler/KuiklyRenderLayerHandler.mm
+@@ -122,7 +122,9 @@ Class _Nullable KRClassFromString(NSString *aClassName) {
+                      callback:(KuiklyRenderCallback _Nullable)callback {
+     NSAssert([NSThread isMainThread], @"should call on main thread");
+     id<KuiklyRenderViewExportProtocol> view = [self p_renderViewHandlerWithTag:tag];
+-    [view hrv_callWithMethod:method params:params callback:callback];
++    if ([view respondsToSelector:@selector(hrv_callWithMethod:params:callback:)]) {
++        [view hrv_callWithMethod:method params:params callback:callback];
++    }
+ }
+ 
+ - (NSString* _Nullable)callModuleMethodWithModuleName:(NSString *)moduleName

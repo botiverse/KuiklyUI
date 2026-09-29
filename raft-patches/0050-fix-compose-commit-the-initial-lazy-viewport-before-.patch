@@ -1,0 +1,314 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:17:19 +0000
+Subject: [PATCH] fix(compose): commit the initial lazy viewport before first
+ placement
+
+A LazyList that opens at a non-top index (initialFirstVisibleItemIndex)
+first published its children at native offset zero and only converged
+through the 150 ms deferred alignment. On the first non-empty placement,
+write the matching native offset before children are placed so the
+platform applies it in its first layout; later scrolling keeps the
+deferred alignment path.
+
+Fork-Patch: compose-lazy-initial-native-viewport
+Origin: 92245b3f
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../compose/foundation/lazy/LazyList.kt       |  20 +++-
+ .../compose/foundation/lazy/LazyListState.kt  |  39 +++++++
+ .../compose/scroller/ContentSizeExtensions.kt |  35 +++++-
+ .../lazy/LazyListInitialNativeViewportTest.kt |  27 +++++
+ .../scroller/ContentSizeExtensionsTest.kt     | 100 ++++++++++++++++++
+ 5 files changed, 218 insertions(+), 3 deletions(-)
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListInitialNativeViewportTest.kt
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
+index 427c93ca4ec0a9d759e32b7cd77d6c5ea0732145..3c9e8b234547a464c51c37e06ef8c9332d68a763 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
+@@ -406,8 +406,15 @@ private fun rememberLazyListMeasurePolicy(
+                         containerConstraints.constrainWidth(width + totalHorizontalPadding),
+                         containerConstraints.constrainHeight(height + totalVerticalPadding),
+                         emptyMap(),
+-                        placement
+-                    )
++                    ) {
++                        placeLazyListChildrenWithInitialNativeViewport(
++                            placementScope = this,
++                            prepareInitialNativeViewport = {
++                                state.prepareInitialNativeViewportBeforePlacement()
++                            },
++                            placement = placement,
++                        )
++                    }
+                 }
+             )
+ 
+@@ -418,3 +425,12 @@ private fun rememberLazyListMeasurePolicy(
+         measureResult
+     }
+ }
++
++internal fun <T> placeLazyListChildrenWithInitialNativeViewport(
++    placementScope: T,
++    prepareInitialNativeViewport: () -> Unit,
++    placement: T.() -> Unit,
++) {
++    prepareInitialNativeViewport()
++    placementScope.placement()
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt
+index 46d19eec3d1fc7962e4937cf4d27729f1dc8706d..b3ae449d13bde088f4b6c08da5eed145794fad63 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt
+@@ -64,6 +64,10 @@ import com.tencent.kuikly.compose.ui.util.fastFirstOrNull
+ import com.tencent.kuikly.compose.ui.util.fastRoundToInt
+ import com.tencent.kuikly.compose.ui.util.fastSumBy
+ import com.tencent.kuikly.compose.scroller.kuiklyInfo
++import com.tencent.kuikly.compose.scroller.InitialLazyListNativeViewportAction
++import com.tencent.kuikly.compose.scroller.initialLazyListNativeViewportAction
++import com.tencent.kuikly.compose.scroller.isComposeAtTopForScrollSync
++import com.tencent.kuikly.compose.scroller.tryExpandStartSize
+ import com.tencent.kuikly.compose.scroller.tryExpandStartSizeNoScroll
+ import com.tencent.kuikly.compose.profiler.RecompositionProfiler
+ import com.tencent.kuikly.compose.material3.internal.identityHashCode
+@@ -483,6 +487,41 @@ class LazyListState
+ 
+         internal val placementScopeInvalidator = ObservableScopeInvalidator()
+ 
++        private var initialNativeViewportPending = true
++
++        /**
++         * Establishes the native offset during the first non-empty placement, before any child
++         * frame is published. Platform renderers can therefore apply a queued contentOffset from
++         * their first layout instead of exposing offset zero and converging 150 ms later.
++         */
++        internal fun prepareInitialNativeViewportBeforePlacement() {
++            when (
++                initialLazyListNativeViewportAction(
++                    pending = initialNativeViewportPending,
++                    hasItems = layoutInfo.totalItemsCount > 0,
++                    isComposeAtTop = isComposeAtTopForScrollSync(),
++                    contentOffset = kuiklyInfo.contentOffset,
++                    composeOffset = kuiklyInfo.composeOffset.toInt(),
++                    isDragging = kuiklyInfo.scrollView?.isDragging == true,
++                    hasScrollView = kuiklyInfo.scrollView != null,
++                )
++            ) {
++                InitialLazyListNativeViewportAction.Wait -> return
++                InitialLazyListNativeViewportAction.Complete -> {
++                    initialNativeViewportPending = false
++                    return
++                }
++                InitialLazyListNativeViewportAction.Prepare -> Unit
++            }
++
++            kuiklyInfo.deferredScrollOffsetAlignmentCoordinator.cancelAndInvalidate { it.cancel() }
++            kuiklyInfo.offsetDirty = true
++            tryExpandStartSize(offset = 0, isScrolling = false)
++            if (kuiklyInfo.composeOffset > 0f) {
++                initialNativeViewportPending = false
++            }
++        }
++
+         // TODO: Coroutine scrolling APIs will allow this to be private again once we have more
+         //  fine-grained control over scrolling
+         // @VisibleForTesting
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+index 27ca04d072cff9f24ea6c3e2776ae42dbefdce98..cd3a2e504980e8c405c68484ca0c8a31b39fbb3f 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+@@ -223,13 +223,46 @@ private const val PULL_TO_REFRESH_ITEM_KEY = "pull_to_refresh"
+  * Whether Compose is at top for scroll-sync correction.
+  * Only differs from [isAtTop] when PTR [KuiklyScrollInfo.pullToRefreshTopInsetPx] > 0.
+  */
+-private fun ScrollableState.isComposeAtTopForScrollSync(): Boolean {
++internal fun ScrollableState.isComposeAtTopForScrollSync(): Boolean {
+     if (this is LazyListState && kuiklyInfo.pullToRefreshTopInsetPx > 0) {
+         return firstVisibleItemIndex == 0 && firstVisibleItemScrollOffset == 0
+     }
+     return isAtTop()
+ }
+ 
++internal enum class InitialLazyListNativeViewportAction {
++    Wait,
++    Prepare,
++    Complete,
++}
++
++/**
++ * Decides whether the first non-empty LazyList placement must establish the native scroll
++ * coordinate space before its children are placed.
++ *
++ * A non-top initial LazyList measure is already the intended Compose viewport. Deferring the
++ * matching native offset through [tryExpandStartSizeNoScroll] lets ScrollView expose offset-zero
++ * pixels first and only converge later. The initial placement is the one safe boundary where the
++ * native offset can still be queued for the platform's first layout, while ordinary scrolling
++ * keeps the existing deferred alignment policy.
++ */
++internal fun initialLazyListNativeViewportAction(
++    pending: Boolean,
++    hasItems: Boolean,
++    isComposeAtTop: Boolean,
++    contentOffset: Int,
++    composeOffset: Int,
++    isDragging: Boolean,
++    hasScrollView: Boolean,
++): InitialLazyListNativeViewportAction = when {
++    !pending -> InitialLazyListNativeViewportAction.Complete
++    !hasItems || !hasScrollView -> InitialLazyListNativeViewportAction.Wait
++    isDragging -> InitialLazyListNativeViewportAction.Complete
++    isComposeAtTop -> InitialLazyListNativeViewportAction.Complete
++    contentOffset != 0 || composeOffset != 0 -> InitialLazyListNativeViewportAction.Complete
++    else -> InitialLazyListNativeViewportAction.Prepare
++}
++
+ /**
+  * Estimate Compose scroll offset when PTR item is taller than average (topInset case).
+  */
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListInitialNativeViewportTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListInitialNativeViewportTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e84ea8eac7fa1f0f36ce3cabfeff42191b521c1
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListInitialNativeViewportTest.kt
+@@ -0,0 +1,27 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2026 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI.
++ */
++
++package com.tencent.kuikly.compose.foundation.lazy
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class LazyListInitialNativeViewportTest {
++
++    @Test
++    fun nativeViewportIsPreparedBeforeAnyChildFrameIsPlaced() {
++        val commits = mutableListOf<String>()
++
++        placeLazyListChildrenWithInitialNativeViewport(
++            placementScope = Unit,
++            prepareInitialNativeViewport = { commits += "native-offset" },
++            placement = { commits += "child-frames" },
++        )
++
++        assertEquals(listOf("native-offset", "child-frames"), commits)
++    }
++}
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt
+index 782d591911aeece99f43d355edd45e640c234682..1f6611ff25544433838e73884afef27f20dab1ad 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensionsTest.kt
+@@ -29,6 +29,106 @@ import kotlin.test.assertTrue
+ 
+ class ContentSizeExtensionsTest {
+ 
++    @Test
++    fun initialNonTopViewportCommitsBeforeFirstPlacement() {
++        assertEquals(
++            InitialLazyListNativeViewportAction.Prepare,
++            initialLazyListNativeViewportAction(
++                pending = true,
++                hasItems = true,
++                isComposeAtTop = false,
++                contentOffset = 0,
++                composeOffset = 0,
++                isDragging = false,
++                hasScrollView = true,
++            )
++        )
++    }
++
++    @Test
++    fun initialViewportWaitsForItemsAndNativeBinding() {
++        assertEquals(
++            InitialLazyListNativeViewportAction.Wait,
++            initialLazyListNativeViewportAction(
++                pending = true,
++                hasItems = false,
++                isComposeAtTop = false,
++                contentOffset = 0,
++                composeOffset = 0,
++                isDragging = false,
++                hasScrollView = true,
++            )
++        )
++        assertEquals(
++            InitialLazyListNativeViewportAction.Wait,
++            initialLazyListNativeViewportAction(
++                pending = true,
++                hasItems = true,
++                isComposeAtTop = false,
++                contentOffset = 0,
++                composeOffset = 0,
++                isDragging = false,
++                hasScrollView = false,
++            )
++        )
++    }
++
++    @Test
++    fun initialTopOrRestoredViewportNeedsNoNewNativeCommit() {
++        assertEquals(
++            InitialLazyListNativeViewportAction.Complete,
++            initialLazyListNativeViewportAction(
++                pending = true,
++                hasItems = true,
++                isComposeAtTop = true,
++                contentOffset = 0,
++                composeOffset = 0,
++                isDragging = false,
++                hasScrollView = true,
++            )
++        )
++        assertEquals(
++            InitialLazyListNativeViewportAction.Complete,
++            initialLazyListNativeViewportAction(
++                pending = true,
++                hasItems = true,
++                isComposeAtTop = false,
++                contentOffset = 900,
++                composeOffset = 900,
++                isDragging = false,
++                hasScrollView = true,
++            )
++        )
++    }
++
++    @Test
++    fun initialViewportNeverOverridesDragOrRepeats() {
++        assertEquals(
++            InitialLazyListNativeViewportAction.Complete,
++            initialLazyListNativeViewportAction(
++                pending = true,
++                hasItems = true,
++                isComposeAtTop = false,
++                contentOffset = 0,
++                composeOffset = 0,
++                isDragging = true,
++                hasScrollView = true,
++            )
++        )
++        assertEquals(
++            InitialLazyListNativeViewportAction.Complete,
++            initialLazyListNativeViewportAction(
++                pending = false,
++                hasItems = true,
++                isComposeAtTop = false,
++                contentOffset = 0,
++                composeOffset = 0,
++                isDragging = false,
++                hasScrollView = true,
++            )
++        )
++    }
++
+     @Test
+     fun deferredAlignmentSkipsActiveScrollUnlessForced() {
+         assertFalse(

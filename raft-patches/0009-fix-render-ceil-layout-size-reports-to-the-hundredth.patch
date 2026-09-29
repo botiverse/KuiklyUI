@@ -1,0 +1,636 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:05:20 +0000
+Subject: [PATCH] fix(render): ceil layout size reports to the hundredth
+
+Replace the +0.005 bias used before %.2f formatting on Android, iOS, OHOS
+and Web with a representation-aware ceiling to two decimals. Measured sizes
+still never round down, but exact values (10.00) are no longer inflated to
+10.01. Android's null-size wire value becomes 0.00|0.00, matching Web.
+
+Fork-Patch: render-ceil-layout-size-report
+Origin: 08553ec9
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../render/android/core/KuiklyRenderCore.kt   | 10 +--
+ .../android/core/LayoutSizeFormatter.kt       | 57 +++++++++++++++++
+ .../expand/component/KRRichTextView.kt        |  4 +-
+ .../android/core/LayoutSizeFormatterTest.kt   | 54 ++++++++++++++++
+ .../component/KRRichTextLayoutParamsTest.kt   | 34 +++++++++++
+ .../Extension/Category/KRConvertUtil.m        |  8 +--
+ .../Category/KRLayoutSizeFormatter.h          | 44 +++++++++++++
+ .../libohos_render/utils/KRConvertUtil.cpp    | 10 +--
+ .../utils/KRLayoutSizeFormatter.h             | 48 +++++++++++++++
+ .../test/cpp/layout_size_formatter_test.cpp   | 54 ++++++++++++++++
+ .../cpp/run_layout_size_formatter_test.sh     | 18 ++++++
+ .../core/render/web/core/KuiklyRenderCore.kt  | 12 +---
+ .../render/web/core/LayoutSizeFormatter.kt    | 61 +++++++++++++++++++
+ .../web/core/LayoutSizeFormatterTest.kt       | 40 ++++++++++++
+ 14 files changed, 424 insertions(+), 30 deletions(-)
+ create mode 100644 core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatter.kt
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatterTest.kt
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextLayoutParamsTest.kt
+ create mode 100644 core-render-ios/Extension/Category/KRLayoutSizeFormatter.h
+ create mode 100644 core-render-ohos/src/main/cpp/libohos_render/utils/KRLayoutSizeFormatter.h
+ create mode 100644 core-render-ohos/src/test/cpp/layout_size_formatter_test.cpp
+ create mode 100755 core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
+ create mode 100644 core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatter.kt
+ create mode 100644 core-render-web/base/src/jsTest/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatterTest.kt
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+index f4d3c8608191635f4308fae79c2e0fc6d49114f0..7d58381a4e908f059fed362a646492eb1ee38883 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+@@ -51,7 +51,6 @@ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreTask
+ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreUIScheduler
+ import com.tencent.tdf.module.TDFBaseModule
+ import org.json.JSONObject
+-import java.util.Locale
+ 
+ class KuiklyRenderCore(
+     private var contextHandler: IKuiklyRenderContextHandler? = null
+@@ -448,14 +447,7 @@ class KuiklyRenderCore(
+                 args.fourthArg()
+             )
+         )
+-        return if (size == null) {
+-            "0|0"
+-        } else {
+-            // %.2f 会四舍五入，第三位小数 <5 时会被舍去（如 10.999 -> 10.99），
+-            // 导致回传尺寸比真实值偏小，可能引发布局截断。这里给宽高各加 0.005 再格式化，
+-            // 整体抬高半个最小精度，使回传尺寸倾向于向上取整，避免变小。
+-            String.format(Locale.ENGLISH, "%.2f|%.2f", size.width + 0.005f, size.height + 0.005f)
+-        }
++        return formatLayoutSizeForReport(size?.width, size?.height)
+     }
+ 
+     private fun callViewMethod(method: KuiklyRenderNativeMethod, args: List<Any?>): Any? {
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatter.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatter.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ffc1f2838e97ec965abe7655ebae04b9286b25f
+--- /dev/null
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatter.kt
+@@ -0,0 +1,57 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.core
++
++import java.util.Locale
++import kotlin.math.abs
++import kotlin.math.ceil
++import kotlin.math.round
++
++private const val HUNDREDTH_SCALE = 100.0
++
++/**
++ * Rounds a measured Float upward to two decimals without perturbing values that
++ * are already on a hundredth boundary. The tolerance covers only the Float
++ * representation error introduced before the calculation is promoted to
++ * Double; values materially above the boundary still round upward.
++ */
++internal fun ceilLayoutSizeToHundredth(value: Float): Double {
++    if (!value.isFinite()) {
++        return value.toDouble()
++    }
++
++    val scaled = value.toDouble() * HUNDREDTH_SCALE
++    val nearestHundredth = round(scaled)
++    val representationTolerance = Math.ulp(value).toDouble() * (HUNDREDTH_SCALE / 2.0)
++    val normalized = if (abs(scaled - nearestHundredth) <= representationTolerance) {
++        nearestHundredth
++    } else {
++        scaled
++    }
++    return ceil(normalized) / HUNDREDTH_SCALE
++}
++
++internal fun formatLayoutSizeForReport(width: Float?, height: Float?): String {
++    if (width == null || height == null) {
++        return "0.00|0.00"
++    }
++    return String.format(
++        Locale.ENGLISH,
++        "%.2f|%.2f",
++        ceilLayoutSizeToHundredth(width),
++        ceilLayoutSizeToHundredth(height),
++    )
++}
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt
+index f4c169f03025d50e30d5e8a31013f0cf938e0e50..2eb00c0b6d4211502ebe39744b17c2f8921e8986 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextView.kt
+@@ -54,6 +54,8 @@ import org.json.JSONArray
+ import kotlin.math.max
+ import kotlin.math.roundToInt
+ 
++internal fun layoutParamsWidthIsUnresolved(width: Int): Boolean = width <= 0
++
+ /**
+  * KTV 富文本组件，支持简单文本和富文本两种模式
+  */
+@@ -262,7 +264,7 @@ class KRRichTextView(context: Context) : KRView(context), KRRichTextViewDrawer.C
+      * A value of 0 also indicates that a fixed size has not yet been determined.
+      */
+     private fun layoutParamsNotHasSize(params: ViewGroup.LayoutParams): Boolean =
+-        params.width <= 0
++        layoutParamsWidthIsUnresolved(params.width)
+ 
+     private fun clearActiveLongPressSpanIndex() {
+         activeLongPressSpanIndex = -1
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatterTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatterTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..730a5f5dc3e748d42a76b8bc02a957ab7729abaa
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/core/LayoutSizeFormatterTest.kt
+@@ -0,0 +1,54 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.core
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class LayoutSizeFormatterTest {
++
++    @Test
++    fun preservesZeroIntegersAndExactHundredths() {
++        assertEquals("0.00|10.00", formatLayoutSizeForReport(0f, 10f))
++        assertEquals("10.01|10.02", formatLayoutSizeForReport(10.01f, 10.02f))
++        assertEquals("0.07|1.10", formatLayoutSizeForReport(0.07f, 1.10f))
++    }
++
++    @Test
++    fun roundsOnlyValuesBeyondAHundredthBoundaryUpward() {
++        assertEquals("0.01|0.01", formatLayoutSizeForReport(0.001f, 0.004f))
++        assertEquals("0.01|0.01", formatLayoutSizeForReport(0.005f, 0.009f))
++        assertEquals("10.01|10.01", formatLayoutSizeForReport(10.0001f, 10.009f))
++        assertEquals("10.02|-10.00", formatLayoutSizeForReport(10.0101f, -10.001f))
++    }
++
++    @Test
++    fun doesNotLoopOrPerturbNonFiniteDefensiveInputs() {
++        assertTrue(ceilLayoutSizeToHundredth(Float.NaN).isNaN())
++        assertEquals(
++            Double.POSITIVE_INFINITY,
++            ceilLayoutSizeToHundredth(Float.POSITIVE_INFINITY),
++            0.0,
++        )
++    }
++
++    @Test
++    fun preservesLegacyNullSerialization() {
++        assertEquals("0.00|0.00", formatLayoutSizeForReport(null, null))
++        assertEquals("0.00|0.00", formatLayoutSizeForReport(1f, null))
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextLayoutParamsTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextLayoutParamsTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2bd0a8f7f781bd57a26a91c7c1b758b9f7fc06e
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/KRRichTextLayoutParamsTest.kt
+@@ -0,0 +1,34 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component
++
++import android.view.ViewGroup
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class KRRichTextLayoutParamsTest {
++
++    @Test
++    fun treatsOnlyPositiveWidthsAsResolved() {
++        assertTrue(layoutParamsWidthIsUnresolved(ViewGroup.LayoutParams.WRAP_CONTENT))
++        assertTrue(layoutParamsWidthIsUnresolved(ViewGroup.LayoutParams.MATCH_PARENT))
++        assertTrue(layoutParamsWidthIsUnresolved(0))
++        assertTrue(layoutParamsWidthIsUnresolved(-3))
++        assertFalse(layoutParamsWidthIsUnresolved(1))
++        assertFalse(layoutParamsWidthIsUnresolved(320))
++    }
++}
+diff --git a/core-render-ios/Extension/Category/KRConvertUtil.m b/core-render-ios/Extension/Category/KRConvertUtil.m
+index d7d9594a31bb839f06142964a158907a5e35d68c..891acaed64ba07f25e58cfc715ca131668dddef3 100644
+--- a/core-render-ios/Extension/Category/KRConvertUtil.m
++++ b/core-render-ios/Extension/Category/KRConvertUtil.m
+@@ -14,6 +14,7 @@
+  */
+ 
+ #import "KRConvertUtil.h"
++#import "KRLayoutSizeFormatter.h"
+ #import <JavaScriptCore/JavaScriptCore.h>
+ #import <CoreText/CoreText.h>
+ #import <CommonCrypto/CommonDigest.h>
+@@ -759,10 +760,9 @@ const NSString *lineargradientPrefix = @"linear-gradient(";
+ }
+ 
+ + (NSString *)sizeStrWithSize:(CGSize)size {
+-    // %.2lf 会四舍五入，第三位小数 <5 时会被舍去（如 10.999 -> 10.99），
+-    // 导致回传尺寸比真实值偏小，可能引发布局截断。这里给宽高各加 0.005 再格式化，
+-    // 确保回传尺寸不小于真实尺寸（向上截取保留 2 位小数）。
+-    return [NSString stringWithFormat:@"%.2lf|%.2lf", size.width + 0.005, size.height + 0.005];
++    return [NSString stringWithFormat:@"%.2lf|%.2lf",
++            KRCeilLayoutSizeToHundredth(size.width),
++            KRCeilLayoutSizeToHundredth(size.height)];
+ }
+ 
+ + (id)nativeObjectToKotlinObject:(id)ocObject {
+diff --git a/core-render-ios/Extension/Category/KRLayoutSizeFormatter.h b/core-render-ios/Extension/Category/KRLayoutSizeFormatter.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..11b5d3d478b5ab0e2232cf1b279d3e9819e5683d
+--- /dev/null
++++ b/core-render-ios/Extension/Category/KRLayoutSizeFormatter.h
+@@ -0,0 +1,44 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef CORE_RENDER_IOS_KRLAYOUTSIZEFORMATTER_H
++#define CORE_RENDER_IOS_KRLAYOUTSIZEFORMATTER_H
++
++#include <math.h>
++
++/**
++ * Ceils a measured value to a hundredth while absorbing only the binary
++ * representation error around an existing hundredth boundary.
++ */
++static inline double KRCeilLayoutSizeToHundredth(double value) {
++    if (!isfinite(value)) {
++        return value;
++    }
++
++    const double scale = 100.0;
++    double scaled = value * scale;
++    const double nearest_hundredth = round(scaled);
++    const double value_magnitude = fabs(value);
++    const double scaled_magnitude = fabs(scaled);
++    const double input_ulp = nextafter(value_magnitude, INFINITY) - value_magnitude;
++    const double scaled_ulp = nextafter(scaled_magnitude, INFINITY) - scaled_magnitude;
++    const double representation_tolerance = input_ulp * (scale / 2.0) + scaled_ulp / 2.0;
++    if (fabs(scaled - nearest_hundredth) <= representation_tolerance) {
++        scaled = nearest_hundredth;
++    }
++    return ceil(scaled) / scale;
++}
++
++#endif  // CORE_RENDER_IOS_KRLAYOUTSIZEFORMATTER_H
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp b/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp
+index 62369fc11bc52628e7c3d4a63199ff677b078d93..edd022c8245798e0b94a7207f32ceefb1d92e65b 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include "libohos_render/utils/KRConvertUtil.h"
+ #include "libohos_render/foundation/KRConfig.h"
++#include "libohos_render/utils/KRLayoutSizeFormatter.h"
+ #include <codecvt>
+ #include <iostream>
+ #include <locale>
+@@ -263,10 +264,9 @@ static_assert(ConvertFontWeightCommon(600, 1.5) == 8);
+ 
+ std::string ConvertSizeToString(const KRSize &size) {
+     std::array<char, 50> buffer;
+-    // %.2lf 会四舍五入，第三位小数 <5 时会被舍去（如 10.999 -> 10.99），
+-    // 导致回传尺寸比真实值偏小，可能引发布局截断。这里给宽高各加 0.005 再格式化，
+-    // 确保回传尺寸不小于真实尺寸（向上截取保留 2 位小数）。
+-    std::snprintf(buffer.data(), buffer.size(), "%.2lf|%.2lf", size.width + 0.005, size.height + 0.005);
++    std::snprintf(buffer.data(), buffer.size(), "%.2lf|%.2lf",
++                  CeilLayoutSizeToHundredth(size.width),
++                  CeilLayoutSizeToHundredth(size.height));
+     return std::string(buffer.data());
+ }
+ 
+@@ -394,4 +394,4 @@ std::string ConvertToPathCommand(const std::string &pathProp) {
+ }
+ 
+ }  // namespace util
+-}  // namespace kuikly
+\ No newline at end of file
++}  // namespace kuikly
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRLayoutSizeFormatter.h b/core-render-ohos/src/main/cpp/libohos_render/utils/KRLayoutSizeFormatter.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..22760b3b9032cdcc960e142d8cd138fcca17ba70
+--- /dev/null
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRLayoutSizeFormatter.h
+@@ -0,0 +1,48 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef CORE_RENDER_OHOS_KRLAYOUTSIZEFORMATTER_H
++#define CORE_RENDER_OHOS_KRLAYOUTSIZEFORMATTER_H
++
++#include <cmath>
++#include <limits>
++
++namespace kuikly {
++namespace util {
++
++inline double CeilLayoutSizeToHundredth(double value) {
++    if (!std::isfinite(value)) {
++        return value;
++    }
++
++    constexpr double scale = 100.0;
++    double scaled = value * scale;
++    const double nearest_hundredth = std::round(scaled);
++    const double infinity = std::numeric_limits<double>::infinity();
++    const double value_magnitude = std::fabs(value);
++    const double scaled_magnitude = std::fabs(scaled);
++    const double input_ulp = std::nextafter(value_magnitude, infinity) - value_magnitude;
++    const double scaled_ulp = std::nextafter(scaled_magnitude, infinity) - scaled_magnitude;
++    const double representation_tolerance = input_ulp * (scale / 2.0) + scaled_ulp / 2.0;
++    if (std::fabs(scaled - nearest_hundredth) <= representation_tolerance) {
++        scaled = nearest_hundredth;
++    }
++    return std::ceil(scaled) / scale;
++}
++
++}  // namespace util
++}  // namespace kuikly
++
++#endif  // CORE_RENDER_OHOS_KRLAYOUTSIZEFORMATTER_H
+diff --git a/core-render-ohos/src/test/cpp/layout_size_formatter_test.cpp b/core-render-ohos/src/test/cpp/layout_size_formatter_test.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..204ac108f746fdb344f32a93a05084690d3ece59
+--- /dev/null
++++ b/core-render-ohos/src/test/cpp/layout_size_formatter_test.cpp
+@@ -0,0 +1,54 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++
++#include "libohos_render/utils/KRLayoutSizeFormatter.h"
++
++namespace {
++
++void RequireFormatted(double width, double height, const char *expected) {
++    char actual[64];
++    std::snprintf(actual, sizeof(actual), "%.2f|%.2f",
++                  kuikly::util::CeilLayoutSizeToHundredth(width),
++                  kuikly::util::CeilLayoutSizeToHundredth(height));
++    if (std::string(actual) != expected) {
++        std::fprintf(stderr, "layout size mismatch: input=%.17g|%.17g expected=%s actual=%s\n",
++                     width, height, expected, actual);
++        std::exit(1);
++    }
++}
++
++}  // namespace
++
++int main() {
++    RequireFormatted(0.0, 10.0, "0.00|10.00");
++    RequireFormatted(10.01, 10.02, "10.01|10.02");
++    RequireFormatted(0.07, 1.10, "0.07|1.10");
++    RequireFormatted(0.001, 0.004, "0.01|0.01");
++    RequireFormatted(0.005, 0.009, "0.01|0.01");
++    RequireFormatted(10.0001, 10.009, "10.01|10.01");
++    RequireFormatted(10.0101, -10.001, "10.02|-10.00");
++    if (!std::isnan(kuikly::util::CeilLayoutSizeToHundredth(
++            std::numeric_limits<double>::quiet_NaN())) ||
++        !std::isinf(kuikly::util::CeilLayoutSizeToHundredth(
++            std::numeric_limits<double>::infinity()))) {
++        std::fputs("non-finite layout size handling changed\n", stderr);
++        return 1;
++    }
++    return 0;
++}
+diff --git a/core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh b/core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..dd11ff1d5b560287566c8b3c0cbae4aae08737b3
+--- /dev/null
++++ b/core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
+@@ -0,0 +1,18 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++script_dir="$(cd "$(dirname "$0")" && pwd)"
++repo_root="$(cd "$script_dir/../../../.." && pwd)"
++build_dir="$(mktemp -d)"
++trap 'rm -rf "$build_dir"' EXIT
++
++"${CXX:-c++}" \
++  -std=c++17 \
++  -Wall \
++  -Wextra \
++  -Werror \
++  -I"$repo_root/core-render-ohos/src/main/cpp" \
++  "$script_dir/layout_size_formatter_test.cpp" \
++  -o "$build_dir/layout_size_formatter_test"
++
++"$build_dir/layout_size_formatter_test"
+diff --git a/core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/KuiklyRenderCore.kt b/core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/KuiklyRenderCore.kt
+index e91aa6fbbddd1f35c390a26d3390cbbaf24c1a11..ce4fa6196ae43bdfd361fdd813d453bc13e9d34f 100644
+--- a/core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/KuiklyRenderCore.kt
++++ b/core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/KuiklyRenderCore.kt
+@@ -321,17 +321,7 @@ class KuiklyRenderCore : IKuiklyRenderCore {
+             args.secondArg().unsafeCast<Int>(),
+             SizeF(args.thirdArg().unsafeCast<Float>(), args.fourthArg().unsafeCast<Float>()),
+         )
+-        // Data compatibility processing, exception takes 0
+-        if (size == null) {
+-            return "0.00|0.00"
+-        }
+-        // toFixed(2) 会四舍五入，第三位小数 <5 时会被舍去（如 10.999 -> 10.99），
+-        // 导致回传尺寸比真实值偏小，可能引发布局截断。这里给宽高各加 0.005 再格式化，
+-        // 确保回传尺寸不小于真实尺寸（向上截取保留 2 位小数）。
+-        val width = (size.width + 0.005f).asDynamic().toFixed(2)
+-        val height = (size.height + 0.005f).asDynamic().toFixed(2)
+-        // Return size information
+-        return "$width|$height"
++        return formatLayoutSizeForReport(size?.width, size?.height)
+     }
+ 
+     /**
+diff --git a/core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatter.kt b/core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatter.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b539efd6f27cff84f2424e19e4dfb262460b5b9
+--- /dev/null
++++ b/core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatter.kt
+@@ -0,0 +1,61 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.web.core
++
++import kotlin.math.abs
++import kotlin.math.ceil
++import kotlin.math.round
++
++private const val HUNDREDTH_SCALE = 100.0
++
++/** See the Android renderer's counterpart for the cross-platform contract. */
++internal fun ceilLayoutSizeToHundredth(value: Float): Double {
++    if (!value.isFinite()) {
++        return value.toDouble()
++    }
++
++    val scaled = value.toDouble() * HUNDREDTH_SCALE
++    val nearestHundredth = round(scaled)
++    val representationTolerance = floatUlp(value) * (HUNDREDTH_SCALE / 2.0)
++    val normalized = if (abs(scaled - nearestHundredth) <= representationTolerance) {
++        nearestHundredth
++    } else {
++        scaled
++    }
++    return ceil(normalized) / HUNDREDTH_SCALE
++}
++
++private fun floatUlp(value: Float): Double {
++    val magnitude = abs(value)
++    if (magnitude == 0f) {
++        return Float.MIN_VALUE.toDouble()
++    }
++    val adjacent = if (magnitude < Float.MAX_VALUE) {
++        Float.fromBits(magnitude.toBits() + 1)
++    } else {
++        Float.fromBits(magnitude.toBits() - 1)
++    }
++    return abs(adjacent.toDouble() - magnitude.toDouble())
++}
++
++internal fun formatLayoutSizeForReport(width: Float?, height: Float?): String {
++    if (width == null || height == null) {
++        return "0.00|0.00"
++    }
++    val roundedWidth = ceilLayoutSizeToHundredth(width).asDynamic().toFixed(2)
++    val roundedHeight = ceilLayoutSizeToHundredth(height).asDynamic().toFixed(2)
++    return "$roundedWidth|$roundedHeight"
++}
+diff --git a/core-render-web/base/src/jsTest/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatterTest.kt b/core-render-web/base/src/jsTest/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatterTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1b777422c1a7a865aa2695d9ed4b9e279b2879d
+--- /dev/null
++++ b/core-render-web/base/src/jsTest/kotlin/com/tencent/kuikly/core/render/web/core/LayoutSizeFormatterTest.kt
+@@ -0,0 +1,40 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.web.core
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertTrue
++
++class LayoutSizeFormatterTest {
++
++    @Test
++    fun preservesBoundariesAndCeilsOnlyTheRemainder() {
++        assertEquals("0.00|10.00", formatLayoutSizeForReport(0f, 10f))
++        assertEquals("10.01|10.02", formatLayoutSizeForReport(10.01f, 10.02f))
++        assertEquals("0.01|0.01", formatLayoutSizeForReport(0.001f, 0.004f))
++        assertEquals("0.01|0.01", formatLayoutSizeForReport(0.005f, 0.009f))
++        assertEquals("10.01|10.01", formatLayoutSizeForReport(10.0001f, 10.009f))
++        assertEquals("10.02|-10.00", formatLayoutSizeForReport(10.0101f, -10.001f))
++        assertTrue(ceilLayoutSizeToHundredth(Float.NaN).isNaN())
++        assertEquals(Double.POSITIVE_INFINITY, ceilLayoutSizeToHundredth(Float.POSITIVE_INFINITY))
++    }
++
++    @Test
++    fun keepsNullCompatibility() {
++        assertEquals("0.00|0.00", formatLayoutSizeForReport(null, null))
++    }
++}

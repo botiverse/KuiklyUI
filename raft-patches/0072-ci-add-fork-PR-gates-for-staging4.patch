@@ -1,0 +1,2880 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:14:50 +0000
+Subject: [PATCH] ci: add fork PR gates for staging4
+
+Adds the Compose PR matrix (JVM/Web suites, iOS renderer fixtures and
+warnings-as-errors build, OHOS arm64 link, source-contract checkers) and the
+checker/harness files it runs, re-keyed to staging4. The single-commit
+identity gate becomes a patch-queue gate: every commit must be DCO signed
+off by its committer, history must be linear on the current staging4 tip,
+and a series drift step runs raft-patches/verify.sh once it exists.
+The layout-size checks move here from the dropped staging3 migration gate;
+the profiler observer-state checker is left out with its deferred feature.
+
+Fork-Patch: ci-fork-pr-gates
+Origin: fbe21d57 1a26a84f f35eeb87 d5211691 824a0fd2 cc781232 e50633f9 d3fe2cba 60efe6cd e01902bf 08553ec9 51ddc75b 155d8737 9e51de47 2b07729c 473de9a8 1a5b41ac d208ca5e a3881bb2 d706e0ed db77397b
+Upstream-Status: not-upstreamable
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .github/workflows/compose-pr.yml              | 347 +++++++++++++
+ ...id-drag-entry-preserves-physical-scroll.py | 225 +++++++++
+ tools/check-compose-node-event-freshness.py   | 408 ++++++++++++++++
+ tools/check-draw-modifier-view-dispatch.py    | 164 +++++++
+ tools/check-ios-scroll-event-finiteness.py    | 221 +++++++++
+ tools/check-layout-size-report-rounding.py    | 167 +++++++
+ tools/check-profiler-file-output-lifecycle.py | 456 ++++++++++++++++++
+ .../compose-node-event-capture-allowlist.txt  |   2 +
+ ...KRGradientRichTextViewMethodDispatchTest.m | 115 +++++
+ .../KRLayoutSizeFormatterTest.c               |  48 ++
+ .../KRTextBlurPayloadRawTextTest.m            |  59 +++
+ .../KRTextInputEventSequencerTest.m           |  87 ++++
+ .../Task114ReleaseCarrierHandlerTest.m        |  91 ++++
+ .../Task114ReleaseCarrierInfo.plist           |  37 ++
+ ...gradient-rich-text-method-dispatch-test.sh |  27 ++
+ .../run-layout-size-formatter-test.sh         |  17 +
+ ...un-task114-release-carrier-handler-test.sh | 120 +++++
+ .../run-text-input-event-sequencer-test.sh    |  17 +
+ .../run-textarea-blur-raw-text-test.sh        |  27 ++
+ .../run-arm64-direct-link.sh                  |  64 +++
+ 20 files changed, 2699 insertions(+)
+ create mode 100644 .github/workflows/compose-pr.yml
+ create mode 100644 tools/check-android-drag-entry-preserves-physical-scroll.py
+ create mode 100644 tools/check-compose-node-event-freshness.py
+ create mode 100644 tools/check-draw-modifier-view-dispatch.py
+ create mode 100644 tools/check-ios-scroll-event-finiteness.py
+ create mode 100755 tools/check-layout-size-report-rounding.py
+ create mode 100644 tools/check-profiler-file-output-lifecycle.py
+ create mode 100644 tools/compose-node-event-capture-allowlist.txt
+ create mode 100644 tools/ios-renderer-tests/KRGradientRichTextViewMethodDispatchTest.m
+ create mode 100644 tools/ios-renderer-tests/KRLayoutSizeFormatterTest.c
+ create mode 100644 tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m
+ create mode 100644 tools/ios-renderer-tests/KRTextInputEventSequencerTest.m
+ create mode 100644 tools/ios-renderer-tests/Task114ReleaseCarrierHandlerTest.m
+ create mode 100644 tools/ios-renderer-tests/Task114ReleaseCarrierInfo.plist
+ create mode 100755 tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+ create mode 100755 tools/ios-renderer-tests/run-layout-size-formatter-test.sh
+ create mode 100755 tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh
+ create mode 100755 tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+ create mode 100755 tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+ create mode 100755 tools/ohos-renderer-tests/run-arm64-direct-link.sh
+
+diff --git a/.github/workflows/compose-pr.yml b/.github/workflows/compose-pr.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..42098d37a2bbaf78e7ecb5ed167a5113be1a4eac
+--- /dev/null
++++ b/.github/workflows/compose-pr.yml
+@@ -0,0 +1,347 @@
++name: Compose PR Exact Matrix
++
++on:
++  pull_request:
++    branches:
++      - staging4
++
++permissions:
++  contents: read
++
++env:
++  EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
++  BASE_SHA: ${{ github.event.pull_request.base.sha }}
++
++jobs:
++  # staging4 is a patch queue: upstream tag + one commit per fork patch
++  # (raft-patches/series). A PR may add, refresh or drop several patch commits,
++  # so this gate checks every commit for DCO and linearity instead of requiring
++  # exactly one commit on the base.
++  dco-series:
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    steps:
++      - name: Check out exact PR head
++        uses: actions/checkout@v4
++        with:
++          ref: ${{ env.EXPECTED_HEAD_SHA }}
++          fetch-depth: 0
++
++      - name: Verify exact head, linear history and clean tree
++        shell: bash
++        run: |
++          set -euo pipefail
++          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
++          test -z "$(git status --porcelain)"
++          if ! git merge-base --is-ancestor "$BASE_SHA" HEAD; then
++            echo "::error::PR head does not contain the current staging4 tip $BASE_SHA; rebase onto staging4"
++            exit 1
++          fi
++          count="$(git rev-list --count "${BASE_SHA}..HEAD")"
++          test "$count" -ge 1
++          merges="$(git rev-list --merges "${BASE_SHA}..HEAD")"
++          if [[ -n "$merges" ]]; then
++            echo "::error::merge commits are not allowed in the staging4 patch queue: $merges"
++            exit 1
++          fi
++          git diff --check "${BASE_SHA}...HEAD"
++
++      - name: Verify DCO on every commit
++        shell: bash
++        run: |
++          set -euo pipefail
++          status=0
++          for commit in $(git rev-list --reverse "${BASE_SHA}..HEAD"); do
++            author_name="$(git show -s --format=%an "$commit")"
++            author_email="$(git show -s --format=%ae "$commit")"
++            committer_name="$(git show -s --format=%cn "$commit")"
++            committer_email="$(git show -s --format=%ce "$commit")"
++            body="$(git show -s --format=%B "$commit")"
++            if [[ -z "$committer_email" ]]; then
++              echo "::error::$commit has no committer email"; status=1; continue
++            fi
++            # The committer (the person landing the patch) must sign off.
++            if ! grep -Fxq "Signed-off-by: ${committer_name} <${committer_email}>" <<<"$body"; then
++              echo "::error::$commit lacks 'Signed-off-by: ${committer_name} <${committer_email}>'"
++              status=1
++            fi
++            # Author may differ only for upstream backports that keep upstream
++            # authorship and record their source commit.
++            if [[ "$author_email" != "$committer_email" ]] \
++              && ! grep -Eq '^\(cherry picked from commit [0-9a-f]{40}\)$' <<<"$body"; then
++              echo "::error::$commit author ${author_name} <${author_email}> differs from committer and is not a recorded cherry-pick"
++              status=1
++            fi
++          done
++          exit "$status"
++
++      - name: Series drift check
++        shell: bash
++        run: |
++          set -euo pipefail
++          # TODO(staging4): once raft-patches/{UPSTREAM,series,*.patch,verify.sh}
++          # land on staging4, this step becomes a hard gate: applying the series
++          # on the upstream tag must reproduce HEAD's tree byte for byte.
++          if [[ -x raft-patches/verify.sh ]]; then
++            git config --global user.name "Kuikly CI"
++            git config --global user.email "kuikly-ci@users.noreply.github.com"
++            raft-patches/verify.sh
++          else
++            echo "::notice::raft-patches/verify.sh not present yet; series drift check skipped"
++          fi
++
++      - name: Record exact identity evidence
++        if: always()
++        shell: bash
++        run: |
++          set -euo pipefail
++          {
++            echo "head=$(git rev-parse HEAD)"
++            echo "tree=$(git rev-parse 'HEAD^{tree}')"
++            echo "base=$BASE_SHA"
++            echo "merge_base=$(git merge-base HEAD "$BASE_SHA")"
++            for commit in $(git rev-list --reverse "${BASE_SHA}..HEAD"); do
++              patch_id="$(git show --pretty=format: "$commit" | git patch-id --stable | awk '{print $1}')"
++              echo "commit=$commit patch_id=${patch_id:-empty} author=$(git show -s --format='%an <%ae>' "$commit") subject=$(git show -s --format=%s "$commit")"
++            done
++          } | tee exact-manifest.txt
++          git diff --binary "${BASE_SHA}...HEAD" > candidate.patch
++          sha256sum candidate.patch | tee candidate.patch.sha256
++
++      - name: Upload exact identity evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: dco-series-${{ env.EXPECTED_HEAD_SHA }}
++          path: |
++            exact-manifest.txt
++            candidate.patch.sha256
++
++  common-core-android:
++    runs-on: ubuntu-latest
++    timeout-minutes: 45
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ env.EXPECTED_HEAD_SHA }}
++      - uses: actions/setup-java@v4
++        with:
++          distribution: temurin
++          java-version: "17"
++      - uses: gradle/actions/setup-gradle@v4
++      - name: Verify exact checkout
++        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
++      - name: Compile metadata and run production JVM and Web fixtures
++        run: |
++          ./gradlew \
++            :core:compileCommonMainKotlinMetadata \
++            :compose:compileCommonMainKotlinMetadata \
++            :core:testDebugUnitTest \
++            :compose:testDebugUnitTest \
++            :core-render-android:testDebugUnitTest \
++            :core-render-web:base:jsNodeTest \
++            --no-build-cache --no-daemon
++      - name: Require successful suites and report module counts
++        run: |
++          python3 - <<'PY'
++          from pathlib import Path
++          import xml.etree.ElementTree as ET
++
++          modules = {
++              "core": Path("core/build/test-results"),
++              "compose": Path("compose/build/test-results"),
++              "core-render-android": Path("core-render-android/build/test-results"),
++              "core-render-web-base": Path("core-render-web/base/build/test-results"),
++          }
++          for name, root in modules.items():
++              reports = sorted(root.glob("**/TEST-*.xml"))
++              tests = failures = errors = 0
++              for report in reports:
++                  suite = ET.parse(report).getroot()
++                  tests += int(suite.attrib.get("tests", "0"))
++                  failures += int(suite.attrib.get("failures", "0"))
++                  errors += int(suite.attrib.get("errors", "0"))
++              print(f"{name}: tests={tests} failures={failures} errors={errors}")
++              # core has no JVM test sources, so :core:testDebugUnitTest is
++              # intentionally NO-SOURCE. Every other suite must stay nonzero.
++              if name != "core" and tests == 0:
++                  raise SystemExit(1)
++              if failures or errors:
++                  raise SystemExit(1)
++          PY
++      - name: Upload JVM and Web evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: common-core-android-${{ env.EXPECTED_HEAD_SHA }}
++          path: |
++            core/build/test-results
++            compose/build/test-results
++            core-render-android/build/test-results
++            core-render-web/base/build/test-results
++
++  ios-renderer:
++    runs-on: macos-14
++    timeout-minutes: 60
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ env.EXPECTED_HEAD_SHA }}
++      - uses: actions/setup-java@v4
++        with:
++          distribution: temurin
++          java-version: "17"
++      - uses: ruby/setup-ruby@v1
++        with:
++          ruby-version: "3.3"
++          bundler-cache: true
++      - uses: gradle/actions/setup-gradle@v4
++      - name: Select Xcode 16.2
++        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
++      - name: Generate CocoaPods dummy framework
++        run: ./gradlew :demo:generateDummyFramework --no-build-cache --no-daemon
++      - name: Install locked Pods
++        run: bundle exec pod install --project-directory=iosApp --deployment
++      - name: Compile Kotlin Native main and tests
++        run: |
++          ./gradlew \
++            :core:compileKotlinIosSimulatorArm64 \
++            :compose:compileKotlinIosSimulatorArm64 \
++            :compose:compileTestKotlinIosSimulatorArm64 \
++            --no-build-cache --no-daemon
++      - name: Run native text-input sequencing fixture
++        run: tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
++      - name: textarea blur raw text regression
++        run: tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
++      - name: Run gradient rich-text optional dispatch fixture
++        run: tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
++      - name: Run layout size report formatter fixture
++        run: tools/ios-renderer-tests/run-layout-size-formatter-test.sh
++      - name: Build production renderer with warnings as errors
++        run: |
++          mkdir -p build
++          set -o pipefail
++          xcodebuild \
++            -workspace iosApp/iosApp.xcworkspace \
++            -scheme OpenKuiklyIOSRender \
++            -configuration Debug \
++            -sdk iphonesimulator \
++            -destination 'generic/platform=iOS Simulator' \
++            CODE_SIGNING_ALLOWED=NO \
++            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
++            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
++            -derivedDataPath build/ios-derived \
++            -resultBundlePath build/ios-renderer.xcresult \
++            build | tee build/ios-renderer.log
++      - name: Run rich-text generic method contract fixture
++        run: |
++          tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh \
++            . \
++            build/ios-derived \
++            build/rich-text-generic-method-fixture
++      - name: Upload iOS evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: ios-renderer-${{ env.EXPECTED_HEAD_SHA }}
++          path: |
++            build/ios-renderer.log
++            build/ios-renderer.xcresult
++            build/rich-text-generic-method-fixture
++
++  ohos-native:
++    # KuiklyUI is a personal repository, so organization-scoped Blacksmith runners never pick up
++    # these jobs. Keep the existing pinned HarmonyOS container on the official hosted runner.
++    runs-on: ubuntu-latest
++    container:
++      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
++    timeout-minutes: 60
++    env:
++      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
++      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ env.EXPECTED_HEAD_SHA }}
++          fetch-depth: 0
++      - name: Trust the mounted workspace inside the job container
++        run: |
++          git config --global --add safe.directory "$GITHUB_WORKSPACE"
++          git config --global user.name "Kuikly CI"
++          git config --global user.email "kuikly-ci@users.noreply.github.com"
++      - name: Prepare OHOS native dependency metadata
++        working-directory: ohosApp
++        run: |
++          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
++          ohpm install --all
++          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
++          hvigorw assembleHar \
++            --mode module \
++            -p module=render@default \
++            -p product=default \
++            -p buildMode=debug \
++            --analyze=normal \
++            --parallel \
++            --no-daemon
++      - name: Fresh arm64 production libkuikly compile and link
++        shell: bash
++        run: |
++          set -euo pipefail
++          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
++          tools/ohos-renderer-tests/run-arm64-direct-link.sh "$GITHUB_WORKSPACE/build/ohos-evidence"
++      - name: Upload OHOS native evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: ohos-native-${{ env.EXPECTED_HEAD_SHA }}
++          path: build/ohos-evidence
++
++  source-contracts:
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ env.EXPECTED_HEAD_SHA }}
++          fetch-depth: 0
++      - name: Reject stale native callbacks retained by Compose node initialization
++        run: python3 tools/check-compose-node-event-freshness.py --self-test
++      - name: Preserve active user motion when RecyclerView enters dragging
++        run: python3 tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
++      - name: Keep DrawModifierNode view-aware production dispatch
++        run: python3 tools/check-draw-modifier-view-dispatch.py --self-test
++      - name: Reject non-finite iOS scroll event values
++        run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
++      - name: Preserve profiler file output across Pager and session lifecycle
++        run: python3 tools/check-profiler-file-output-lifecycle.py --self-test
++      - name: Keep layout size reports ceiled to the hundredth on every renderer
++        run: python3 tools/check-layout-size-report-rounding.py --self-test
++      - name: Keep OHOS contentInset leading offsets aligned with the margin model
++        run: core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
++      - name: Keep OHOS layout size report formatter ceiled to the hundredth
++        run: core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
++      - name: Keep OHOS typed-avatar descriptors fail-closed
++        run: core-render-ohos/src/test/cpp/run_avatar_image_model_test.sh
++
++  exact-matrix:
++    if: always()
++    runs-on: ubuntu-latest
++    needs:
++      - dco-series
++      - common-core-android
++      - ios-renderer
++      - ohos-native
++      - source-contracts
++    steps:
++      - name: Require every exact-bound gate
++        env:
++          RESULTS: ${{ toJSON(needs) }}
++        run: |
++          python3 - <<'PY'
++          import json, os
++          needs = json.loads(os.environ["RESULTS"])
++          failed = {name: value["result"] for name, value in needs.items() if value["result"] != "success"}
++          print(json.dumps(needs, indent=2, sort_keys=True))
++          if failed:
++              raise SystemExit(f"exact matrix failed: {failed}")
++          PY
+diff --git a/tools/check-android-drag-entry-preserves-physical-scroll.py b/tools/check-android-drag-entry-preserves-physical-scroll.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..32b53f9e55c2eba027feddd79a5b058341194f09
+--- /dev/null
++++ b/tools/check-android-drag-entry-preserves-physical-scroll.py
+@@ -0,0 +1,225 @@
++#!/usr/bin/env python3
++"""Fail closed if entering RecyclerView DRAGGING can stop active user motion."""
++
++from __future__ import annotations
++
++import argparse
++import re
++from pathlib import Path
++
++
++SOURCE = Path(
++    "core-render-android/src/main/java/com/tencent/kuikly/core/render/android/"
++    "expand/component/list/KRRecyclerView.kt"
++)
++
++
++def strip_comments(source: str) -> str:
++    output: list[str] = []
++    index = 0
++    state = "code"
++    quote = ""
++    while index < len(source):
++        char = source[index]
++        nxt = source[index + 1] if index + 1 < len(source) else ""
++        if state == "code":
++            if char == "/" and nxt == "/":
++                state = "line"
++                output.extend("  ")
++                index += 2
++                continue
++            if char == "/" and nxt == "*":
++                state = "block"
++                output.extend("  ")
++                index += 2
++                continue
++            if char in ('"', "'"):
++                state = "string"
++                quote = char
++            output.append(char)
++        elif state == "line":
++            output.append("\n" if char == "\n" else " ")
++            if char == "\n":
++                state = "code"
++        elif state == "block":
++            if char == "*" and nxt == "/":
++                output.extend("  ")
++                index += 2
++                state = "code"
++                continue
++            output.append("\n" if char == "\n" else " ")
++        else:
++            output.append(char)
++            if char == "\\" and index + 1 < len(source):
++                output.append(source[index + 1])
++                index += 2
++                continue
++            if char == quote:
++                state = "code"
++        index += 1
++    return "".join(output)
++
++
++def brace_block(source: str, start: int) -> str:
++    brace = source.find("{", start)
++    if brace < 0:
++        raise AssertionError("missing block body")
++    depth = 0
++    for index in range(brace, len(source)):
++        if source[index] == "{":
++            depth += 1
++        elif source[index] == "}":
++            depth -= 1
++            if depth == 0:
++                return source[brace + 1 : index]
++    raise AssertionError("unterminated block body")
++
++
++def compact(source: str) -> str:
++    return re.sub(r"\s+", "", strip_comments(source))
++
++
++def drag_entry_block(source: str) -> str:
++    clean = strip_comments(source)
++    pattern = re.compile(
++        r"if\s*\(\s*isIdeaStateToDraggingState\s*\(\s*currentState\s*\)\s*\|\|\s*"
++        r"isSettlingStateToDraggingState\s*\(\s*currentState\s*\)\s*\)"
++    )
++    match = pattern.search(clean)
++    if not match:
++        raise AssertionError("missing idle/settling -> DRAGGING transition block")
++    return brace_block(clean, match.end())
++
++
++def local_functions(source: str) -> dict[str, str]:
++    clean = strip_comments(source)
++    functions: dict[str, str] = {}
++    name_pattern = r"(?:`([^`]+)`|([A-Za-z_]\w*))"
++    block_pattern = re.compile(rf"\bfun\s+{name_pattern}\s*\([^)]*\)[^{{=]*\{{")
++    for match in block_pattern.finditer(clean):
++        name = match.group(1) or match.group(2)
++        functions[name] = brace_block(clean, match.end() - 1)
++
++    expression_pattern = re.compile(
++        rf"\bfun\s+{name_pattern}\s*\([^)]*\)[^{{=\n]*=\s*([^\n]+)"
++    )
++    for match in expression_pattern.finditer(clean):
++        name = match.group(1) or match.group(2)
++        functions[name] = match.group(3)
++    return functions
++
++
++def called_names(source: str) -> set[str]:
++    clean = strip_comments(source)
++    pattern = re.compile(r"(?:(?:this|self)\s*\.\s*)?(?:`([^`]+)`|([A-Za-z_]\w*))\s*\(")
++    return {backtick or plain for backtick, plain in pattern.findall(clean)}
++
++
++def assert_no_stop_path(block: str, functions: dict[str, str], stack: tuple[str, ...] = ()) -> None:
++    compacted = compact(block)
++    for forbidden in ("stopScroll(", "forceSetScrollState("):
++        if forbidden in compacted:
++            path = " -> ".join(stack) if stack else "DRAGGING transition"
++            raise AssertionError(f"active physical gesture can be stopped via {path}: {forbidden}")
++
++    for name in called_names(block):
++        if name in functions and name not in stack:
++            assert_no_stop_path(functions[name], functions, stack + (name,))
++
++
++def check(source: str) -> None:
++    block = drag_entry_block(source)
++    compacted = compact(block)
++    for required in ("scrollAnimationManager.cancel()", "fireBeginDragEvent()"):
++        if required not in compacted:
++            raise AssertionError(f"DRAGGING transition must retain executable {required}")
++    assert_no_stop_path(block, local_functions(source))
++
++
++def expect_failure(source: str, label: str) -> None:
++    try:
++        check(source)
++    except AssertionError:
++        return
++    raise AssertionError(f"self-test mutant survived: {label}")
++
++
++def self_test(source: str) -> None:
++    check(source)
++    expect_failure(
++        source.replace(
++            "                    scrollAnimationManager.cancel()\n                    fireBeginDragEvent()",
++            "                    // scrollAnimationManager.cancel()\n                    fireBeginDragEvent()",
++            1,
++        ),
++        "commented required cancellation",
++    )
++
++    expect_failure(
++        source.replace(
++            "                    fireBeginDragEvent()\n                }",
++            "                    fireBeginDragEvent()\n                    stopScroll \n                    ()\n                }",
++            1,
++        ),
++        "whitespace-split direct stopScroll",
++    )
++
++    helper = "\n    private fun injectedGestureStop() {\n        stopScroll()\n    }\n"
++    helper_source = source.replace("\n    private fun fireBeginDragEvent()", helper + "\n    private fun fireBeginDragEvent()", 1)
++    helper_source = helper_source.replace(
++        "                    fireBeginDragEvent()\n                }",
++        "                    fireBeginDragEvent()\n                    injectedGestureStop \n                    ()\n                }",
++        1,
++    )
++    expect_failure(helper_source, "helper-indirected stopScroll")
++
++    backtick_helper = "\n    private fun `injected gesture stop`() {\n        stopScroll()\n    }\n"
++    backtick_source = source.replace(
++        "\n    private fun fireBeginDragEvent()",
++        backtick_helper + "\n    private fun fireBeginDragEvent()",
++        1,
++    ).replace(
++        "                    fireBeginDragEvent()\n                }",
++        "                    fireBeginDragEvent()\n                    `injected gesture stop`()\n                }",
++        1,
++    )
++    expect_failure(backtick_source, "backtick helper-indirected stopScroll")
++
++    qualified_helper = "\n    private fun injectedQualifiedStop() {\n        stopScroll()\n    }\n"
++    qualified_source = source.replace(
++        "\n    private fun fireBeginDragEvent()",
++        qualified_helper + "\n    private fun fireBeginDragEvent()",
++        1,
++    ).replace(
++        "                    fireBeginDragEvent()\n                }",
++        "                    fireBeginDragEvent()\n                    this.injectedQualifiedStop()\n                }",
++        1,
++    )
++    expect_failure(qualified_source, "qualified helper-indirected stopScroll")
++
++    expression_helper = "\n    private fun injectedExpressionStop() = stopScroll()\n"
++    expression_source = source.replace(
++        "\n    private fun fireBeginDragEvent()",
++        expression_helper + "\n    private fun fireBeginDragEvent()",
++        1,
++    ).replace(
++        "                    fireBeginDragEvent()\n                }",
++        "                    fireBeginDragEvent()\n                    injectedExpressionStop()\n                }",
++        1,
++    )
++    expect_failure(expression_source, "expression-bodied helper-indirected stopScroll")
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    parser.add_argument("--source", type=Path, default=SOURCE)
++    args = parser.parse_args()
++
++    source = args.source.read_text(encoding="utf-8")
++    self_test(source) if args.self_test else check(source)
++    print("android_drag_entry_preserves_physical_scroll=pass")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/check-compose-node-event-freshness.py b/tools/check-compose-node-event-freshness.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2d19dc9fc864a60f4696acface71b03815d5f66
+--- /dev/null
++++ b/tools/check-compose-node-event-freshness.py
+@@ -0,0 +1,408 @@
++#!/usr/bin/env python3
++"""Reject inline native event closures retained by Compose node initializers."""
++
++from __future__ import annotations
++
++import argparse
++import re
++import sys
++from dataclasses import dataclass
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[1]
++SOURCE_ROOT = ROOT / "compose/src/commonMain/kotlin"
++ALLOWLIST_PATH = ROOT / "tools/compose-node-event-capture-allowlist.txt"
++INITIALIZER_PATTERN = re.compile(r"\b(?:factory|viewInit)\s*=\s*\{")
++EVENT_ACCESS = r"(?:getViewEvent|`getViewEvent`)\s*\(\s*\)"
++EVENT_ACCESS_PATTERN = re.compile(EVENT_ACCESS)
++INLINE_EVENT_PATTERN = re.compile(
++    EVENT_ACCESS + r"\s*\.\s*(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*\{"
++)
++NAMED_EVENT_PATTERN = re.compile(
++    EVENT_ACCESS + r"\s*\.\s*(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*"
++    r"\(\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)\s*\)"
++)
++ALLOW_COMMENT = "node-event-freshness-allow:"
++CANONICAL_HELPER_PATH = (
++    "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/NodeEventBinder.kt"
++)
++HELPER_IDENTIFIER = r"(?:updatedNodeEvent|`updatedNodeEvent`)"
++HELPER_FUNCTION_PATTERN = re.compile(
++    r"\bfun\b[^\n=(]*" + HELPER_IDENTIFIER + r"\s*\("
++)
++HELPER_SHADOW_PATTERNS = (
++    re.compile(r"\b(?:val|var|class|object|typealias)\s+" + HELPER_IDENTIFIER),
++    re.compile(r"(?:\(|,)\s*" + HELPER_IDENTIFIER + r"\s*:"),
++    re.compile(r"\{[^{}]*" + HELPER_IDENTIFIER + r"[^{}]*->"),
++    re.compile(r"\bas\s+" + HELPER_IDENTIFIER),
++)
++
++
++@dataclass(frozen=True)
++class Finding:
++    path: str
++    line: int
++    method: str
++    source_line: str
++
++
++def matching_brace(source: str, opening: int) -> int:
++    depth = 0
++    in_string = False
++    escaped = False
++    index = opening
++    while index < len(source):
++        char = source[index]
++        if in_string:
++            if escaped:
++                escaped = False
++            elif char == "\\":
++                escaped = True
++            elif char == '"':
++                in_string = False
++        elif source.startswith("//", index):
++            newline = source.find("\n", index)
++            index = len(source) if newline < 0 else newline
++            continue
++        elif source.startswith("/*", index):
++            closing = source.find("*/", index + 2)
++            index = len(source) if closing < 0 else closing + 2
++            continue
++        elif char == '"':
++            in_string = True
++        elif char == "{":
++            depth += 1
++        elif char == "}":
++            depth -= 1
++            if depth == 0:
++                return index
++        index += 1
++    raise ValueError(f"unbalanced initializer at offset {opening}")
++
++
++def initializer_ranges(source: str) -> list[tuple[int, int]]:
++    ranges = []
++    for match in INITIALIZER_PATTERN.finditer(source):
++        opening = source.find("{", match.start())
++        ranges.append((opening, matching_brace(source, opening)))
++    return ranges
++
++
++def line_number(source: str, offset: int) -> int:
++    return source.count("\n", 0, offset) + 1
++
++
++def preceding_lines(source: str, offset: int, count: int = 3) -> str:
++    lines = source[:offset].splitlines()
++    return "\n".join(lines[-count:])
++
++
++def mask_non_code(source: str) -> str:
++    """Replace comments and literals with spaces while preserving offsets and newlines."""
++    masked = list(source)
++    index = 0
++    state = "code"
++    block_depth = 0
++    escaped = False
++    while index < len(source):
++        if state == "code":
++            if source.startswith("//", index):
++                state = "line-comment"
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith("/*", index):
++                state = "block-comment"
++                block_depth = 1
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith('"""', index):
++                state = "triple-string"
++                masked[index : index + 3] = "   "
++                index += 3
++                continue
++            if source[index] == '"':
++                state = "string"
++                escaped = False
++                masked[index] = " "
++            elif source[index] == "'":
++                state = "char"
++                escaped = False
++                masked[index] = " "
++        elif state == "line-comment":
++            if source[index] == "\n":
++                state = "code"
++            else:
++                masked[index] = " "
++        elif state == "block-comment":
++            if source.startswith("/*", index):
++                block_depth += 1
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith("*/", index):
++                block_depth -= 1
++                masked[index : index + 2] = "  "
++                index += 2
++                if block_depth == 0:
++                    state = "code"
++                continue
++            if source[index] != "\n":
++                masked[index] = " "
++        elif state == "triple-string":
++            if source.startswith('"""', index):
++                masked[index : index + 3] = "   "
++                index += 3
++                state = "code"
++                continue
++            if source[index] != "\n":
++                masked[index] = " "
++        else:
++            if source[index] != "\n":
++                masked[index] = " "
++            if escaped:
++                escaped = False
++            elif source[index] == "\\":
++                escaped = True
++            elif state == "string" and source[index] == '"':
++                state = "code"
++            elif state == "char" and source[index] == "'":
++                state = "code"
++        index += 1
++    return "".join(masked)
++
++
++def is_latest_handler_assignment_updated(code: str, handler: str, before: int) -> bool:
++    assignments = list(
++        re.finditer(
++            rf"\bval\s+{re.escape(handler)}\b[^=\n]*=\s*(?P<rhs>[^\n]+)",
++            code[:before],
++        )
++    )
++    if not assignments:
++        return False
++    rhs = assignments[-1].group("rhs").lstrip()
++    return re.match(HELPER_IDENTIFIER + r"\s*(?:<[^>]+>)?\s*\{", rhs) is not None
++
++
++def scan_source(path: Path, source: str) -> list[Finding]:
++    relative = path.relative_to(ROOT).as_posix()
++    code = mask_non_code(source)
++    findings = []
++    for start, end in initializer_ranges(code):
++        block = code[start : end + 1]
++        for access in EVENT_ACCESS_PATTERN.finditer(block):
++            absolute = start + access.start()
++            tail = block[access.start() :]
++            inline = INLINE_EVENT_PATTERN.match(tail)
++            if inline is not None:
++                if ALLOW_COMMENT in preceding_lines(source, absolute):
++                    continue
++                method = inline.group("method")
++            else:
++                named = NAMED_EVENT_PATTERN.match(tail)
++                if named is not None and is_latest_handler_assignment_updated(
++                    code,
++                    named.group("handler"),
++                    absolute,
++                ):
++                    continue
++                method = (
++                    f"{named.group('method')}({named.group('handler')})"
++                    if named is not None
++                    else "indirect event scope"
++                )
++            line = line_number(source, absolute)
++            findings.append(
++                Finding(relative, line, method, source.splitlines()[line - 1].strip())
++            )
++    return findings
++
++
++def read_allowlist() -> dict[tuple[str, str], str]:
++    entries: dict[tuple[str, str], str] = {}
++    for raw_line in ALLOWLIST_PATH.read_text().splitlines():
++        line = raw_line.strip()
++        if not line or line.startswith("#"):
++            continue
++        path, method, reason = line.split("|", 2)
++        entries[(path, method)] = reason
++    return entries
++
++
++def helper_provenance_errors(sources: dict[str, str]) -> list[str]:
++    definitions = []
++    shadows = []
++    for relative, source in sources.items():
++        code = mask_non_code(source)
++        definitions.extend(
++            (relative, line_number(code, match.start()))
++            for match in HELPER_FUNCTION_PATTERN.finditer(code)
++        )
++        for pattern in HELPER_SHADOW_PATTERNS:
++            shadows.extend(
++                (relative, line_number(code, match.start()))
++                for match in pattern.finditer(code)
++            )
++    errors = []
++    if len(definitions) != 1 or definitions[0][0] != CANONICAL_HELPER_PATH:
++        errors.append(
++            "updatedNodeEvent must have exactly one canonical function declaration in "
++            f"{CANONICAL_HELPER_PATH}; found {definitions}"
++        )
++    if shadows:
++        errors.append(f"updatedNodeEvent may not be shadowed or import-aliased; found {shadows}")
++    return errors
++
++
++def validate_allowlist() -> list[str]:
++    errors = []
++    entries = read_allowlist()
++    used: dict[tuple[str, str], int] = {}
++    for path in sorted(SOURCE_ROOT.rglob("*.kt")):
++        source = path.read_text()
++        relative = path.relative_to(ROOT).as_posix()
++        for match in re.finditer(ALLOW_COMMENT, source):
++            following = source[match.end() :]
++            event = INLINE_EVENT_PATTERN.search(following)
++            if event is None or line_number(following, event.start()) > 4:
++                errors.append(f"{relative}:{line_number(source, match.start())}: orphan allow comment")
++                continue
++            key = (relative, event.group("method"))
++            if key not in entries:
++                errors.append(f"{relative}: allow comment for {key[1]} is not in allowlist")
++            opening = event.end() - 1
++            closing = matching_brace(following, opening)
++            if following[opening + 1 : closing].strip():
++                errors.append(f"{relative}: allowlisted {key[1]} handler must be capture-free and empty")
++            used[key] = used.get(key, 0) + 1
++    for key, count in used.items():
++        if count > 1:
++            errors.append(f"duplicate allow usage: {key[0]}|{key[1]} ({count})")
++    for key in entries.keys() - used.keys():
++        errors.append(f"stale allowlist entry: {key[0]}|{key[1]}")
++    return errors
++
++
++def self_test() -> None:
++    raw = "factory = { KNode(view) { getViewEvent().inputFocus { use(enabled) } } }"
++    named_raw = (
++        "val inputFocusEvent = { use(enabled) }\n"
++        "factory = { KNode(view) { getViewEvent().inputFocus(inputFocusEvent) } }"
++    )
++    safe = (
++        "val inputFocusEvent = updatedNodeEvent { use(enabled) }\n"
++        "factory = { KNode(view) { getViewEvent().inputFocus(inputFocusEvent) } }"
++    )
++    scoped = [
++        "viewInit = { getViewEvent().run { click { use(state) } } }",
++        "viewInit = { getViewEvent().apply { click { use(state) } } }",
++        "viewInit = { getViewEvent().let { it.click { use(state) } } }",
++        "viewInit = { with(getViewEvent()) { click { use(state) } } }",
++    ]
++    spaced_access = [
++        "factory = { KNode(view) { getViewEvent ().inputFocus { use(enabled) } } }",
++        "factory = { KNode(view) { getViewEvent/*gap*/().inputFocus { use(enabled) } } }",
++        "factory = { KNode(view) { getViewEvent\n().inputFocus { use(enabled) } } }",
++        "factory = { KNode(view) { `getViewEvent`().inputFocus { use(enabled) } } }",
++    ]
++    stable_node = "factory = { val view = rememberedNativeView; KNode(view) }"
++    allowed_empty = (
++        "viewInit = {\n"
++        "// node-event-freshness-allow: capture-free test fixture\n"
++        "getViewEvent().click { }\n"
++        "}"
++    )
++    comment_bypass = (
++        "// val inputFocusEvent = updatedNodeEvent { use(enabled) }\n"
++        "val inputFocusEvent = { use(enabled) }\n"
++        "factory = { KNode(view) { getViewEvent().inputFocus(inputFocusEvent) } }"
++    )
++    shadowed_bypass = (
++        "val inputFocusEvent = updatedNodeEvent { use(first) }\n"
++        "val inputFocusEvent = { use(second) }\n"
++        "factory = { KNode(view) { getViewEvent().inputFocus(inputFocusEvent) } }"
++    )
++    fake = ROOT / "compose/src/commonMain/kotlin/Fake.kt"
++    assert len(scan_source(fake, raw)) == 1
++    assert len(scan_source(fake, named_raw)) == 1
++    assert scan_source(fake, safe) == []
++    assert all(len(scan_source(fake, fixture)) == 1 for fixture in scoped)
++    assert all(len(scan_source(fake, fixture)) == 1 for fixture in spaced_access)
++    assert scan_source(fake, stable_node) == []
++    assert scan_source(fake, allowed_empty) == []
++    assert len(scan_source(fake, comment_bypass)) == 1
++    assert len(scan_source(fake, shadowed_bypass)) == 1
++    canonical_source = "internal fun <P> updatedNodeEvent(event: (P) -> Unit): (P) -> Unit = event"
++    assert helper_provenance_errors({CANONICAL_HELPER_PATH: canonical_source}) == []
++    assert helper_provenance_errors(
++        {
++            CANONICAL_HELPER_PATH: canonical_source,
++            "compose/src/commonMain/kotlin/Fake.kt": "fun updatedNodeEvent(block: () -> Unit) = block",
++        }
++    )
++    assert helper_provenance_errors(
++        {
++            CANONICAL_HELPER_PATH: canonical_source,
++            "compose/src/commonMain/kotlin/Fake.kt": "fun `updatedNodeEvent`(block: () -> Unit) = block",
++        }
++    )
++    for lambda_shadow in (
++        "val f: ((() -> Unit) -> Unit) -> Unit = {\nupdatedNodeEvent -> use(value) }",
++        "val f: ((() -> Unit) -> Unit) -> Unit = { updatedNodeEvent\n-> use(value) }",
++    ):
++        assert helper_provenance_errors(
++            {
++                CANONICAL_HELPER_PATH: canonical_source,
++                "compose/src/commonMain/kotlin/Fake.kt": lambda_shadow,
++            }
++        )
++    assert helper_provenance_errors(
++        {
++            CANONICAL_HELPER_PATH: canonical_source,
++            "compose/src/commonMain/kotlin/Fake.kt": (
++                "val mapper: ((() -> Unit) -> Unit) -> Unit = { updatedNodeEvent -> "
++                "updatedNodeEvent { use(value) } }"
++            ),
++        }
++    )
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    args = parser.parse_args()
++    if args.self_test:
++        self_test()
++
++    sources = {
++        path.relative_to(ROOT).as_posix(): path.read_text()
++        for path in sorted(SOURCE_ROOT.rglob("*.kt"))
++    }
++    errors = validate_allowlist() + helper_provenance_errors(sources)
++    findings = []
++    for relative, source in sources.items():
++        findings.extend(scan_source(ROOT / relative, source))
++    if findings or errors:
++        for finding in findings:
++            print(
++                f"{finding.path}:{finding.line}: retained inline native event "
++                f"'{finding.method}': {finding.source_line}",
++                file=sys.stderr,
++            )
++        for error in errors:
++            print(error, file=sys.stderr)
++        print(
++            "Use updatedNodeEvent and pass its stable handler to the native event API. "
++            "Only capture-free stable handlers may be allowlisted.",
++            file=sys.stderr,
++        )
++        return 1
++    print("compose node event freshness audit PASS")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/check-draw-modifier-view-dispatch.py b/tools/check-draw-modifier-view-dispatch.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..02714c6f874b26477baa0c536c19f802c7f0aeef
+--- /dev/null
++++ b/tools/check-draw-modifier-view-dispatch.py
+@@ -0,0 +1,164 @@
++#!/usr/bin/env python3
++"""Keep LayoutNodeDrawScope on the view-aware DrawModifierNode entry point."""
++
++from __future__ import annotations
++
++import argparse
++import re
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[1]
++SOURCE_PATH = ROOT / (
++    "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/"
++    "LayoutNodeDrawScope.kt"
++)
++
++
++def mask_non_code(source: str) -> str:
++    masked = list(source)
++    index = 0
++    state = "code"
++    depth = 0
++    escaped = False
++    while index < len(source):
++        if state == "code":
++            if source.startswith("//", index):
++                state = "line-comment"
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith("/*", index):
++                state = "block-comment"
++                depth = 1
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith('"""', index):
++                state = "triple-string"
++                masked[index : index + 3] = "   "
++                index += 3
++                continue
++            if source[index] == '"':
++                state = "string"
++                escaped = False
++                masked[index] = " "
++            elif source[index] == "'":
++                state = "char"
++                escaped = False
++                masked[index] = " "
++        elif state == "line-comment":
++            if source[index] == "\n":
++                state = "code"
++            else:
++                masked[index] = " "
++        elif state == "block-comment":
++            if source.startswith("/*", index):
++                depth += 1
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith("*/", index):
++                depth -= 1
++                masked[index : index + 2] = "  "
++                index += 2
++                if depth == 0:
++                    state = "code"
++                continue
++            if source[index] != "\n":
++                masked[index] = " "
++        elif state == "triple-string":
++            if source.startswith('"""', index):
++                masked[index : index + 3] = "   "
++                index += 3
++                state = "code"
++                continue
++            if source[index] != "\n":
++                masked[index] = " "
++        else:
++            if source[index] != "\n":
++                masked[index] = " "
++            if escaped:
++                escaped = False
++            elif source[index] == "\\":
++                escaped = True
++            elif state == "string" and source[index] == '"':
++                state = "code"
++            elif state == "char" and source[index] == "'":
++                state = "code"
++        index += 1
++    return "".join(masked)
++
++
++def matching_brace(source: str, opening: int) -> int:
++    depth = 0
++    for index in range(opening, len(source)):
++        if source[index] == "{":
++            depth += 1
++        elif source[index] == "}":
++            depth -= 1
++            if depth == 0:
++                return index
++    raise AssertionError("unterminated drawDirect block")
++
++
++def draw_direct_body(source: str) -> str:
++    clean = mask_non_code(source)
++    matches = list(re.finditer(r"\binternal\s+fun\s+drawDirect\s*\(", clean))
++    if len(matches) != 1:
++        raise AssertionError(f"expected one drawDirect function, found {len(matches)}")
++    opening = clean.find("{", matches[0].end())
++    if opening < 0:
++        raise AssertionError("drawDirect has no body")
++    return clean[opening : matching_brace(clean, opening) + 1]
++
++
++def check_source(source: str) -> None:
++    compact = re.sub(r"\s+", "", draw_direct_body(source))
++    view_dispatch = "with(drawNode){this@LayoutNodeDrawScope.draw(kView)}"
++    ordinary_dispatch = "with(drawNode){this@LayoutNodeDrawScope.draw()}"
++    if compact.count(view_dispatch) != 1:
++        raise AssertionError("drawDirect must invoke exactly one view-aware draw(kView)")
++    if ordinary_dispatch in compact:
++        raise AssertionError("drawDirect must not bypass view-aware dispatch with draw()")
++
++
++def self_test() -> None:
++    valid = """
++        internal fun drawDirect(kView: Any?) {
++            with(drawNode) {
++                this@LayoutNodeDrawScope.draw(kView)
++            }
++        }
++    """
++    check_source(valid)
++    for label, mutant in (
++        ("ordinary dispatch", valid.replace("draw(kView)", "draw()")),
++        ("removed dispatch", valid.replace("this@LayoutNodeDrawScope.draw(kView)", "Unit")),
++        (
++            "comment-only dispatch",
++            valid.replace(
++                "this@LayoutNodeDrawScope.draw(kView)",
++                "// this@LayoutNodeDrawScope.draw(kView)\nUnit",
++            ),
++        ),
++    ):
++        try:
++            check_source(mutant)
++        except AssertionError:
++            continue
++        raise AssertionError(f"self-test failed to reject {label}")
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    args = parser.parse_args()
++    if args.self_test:
++        self_test()
++    check_source(SOURCE_PATH.read_text(encoding="utf-8"))
++    print("draw_modifier_view_dispatch=pass")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/check-ios-scroll-event-finiteness.py b/tools/check-ios-scroll-event-finiteness.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f3d2b4c6532359370ba6f7ad5e27cad910dde65
+--- /dev/null
++++ b/tools/check-ios-scroll-event-finiteness.py
+@@ -0,0 +1,221 @@
++#!/usr/bin/env python3
++"""Fail closed if KRScrollView can bridge NaN/Inf or a nil event payload."""
++
++from __future__ import annotations
++
++import argparse
++import re
++from pathlib import Path
++
++
++SOURCE = Path("core-render-ios/Extension/Components/KRScrollView.m")
++
++
++def strip_comments(source: str) -> str:
++    output: list[str] = []
++    index = 0
++    state = "code"
++    quote = ""
++    while index < len(source):
++        char = source[index]
++        nxt = source[index + 1] if index + 1 < len(source) else ""
++        if state == "code":
++            if char == "/" and nxt == "/":
++                state = "line"
++                output.extend("  ")
++                index += 2
++                continue
++            if char == "/" and nxt == "*":
++                state = "block"
++                output.extend("  ")
++                index += 2
++                continue
++            if char in ('"', "'"):
++                state = "string"
++                quote = char
++            output.append(char)
++        elif state == "line":
++            output.append("\n" if char == "\n" else " ")
++            if char == "\n":
++                state = "code"
++        elif state == "block":
++            if char == "*" and nxt == "/":
++                output.extend("  ")
++                index += 2
++                state = "code"
++                continue
++            output.append("\n" if char == "\n" else " ")
++        else:
++            output.append(char)
++            if char == "\\" and index + 1 < len(source):
++                output.append(source[index + 1])
++                index += 2
++                continue
++            if char == quote:
++                state = "code"
++        index += 1
++    return "".join(output)
++
++
++def compact(source: str) -> str:
++    return re.sub(r"\s+", "", strip_comments(source))
++
++
++def brace_block(source: str, start: int) -> str:
++    brace = source.find("{", start)
++    if brace < 0:
++        raise AssertionError("missing block body")
++    depth = 0
++    for index in range(brace, len(source)):
++        if source[index] == "{":
++            depth += 1
++        elif source[index] == "}":
++            depth -= 1
++            if depth == 0:
++                return source[brace + 1 : index]
++    raise AssertionError("unterminated block body")
++
++
++def block_after(source: str, marker: str) -> str:
++    clean = strip_comments(source)
++    start = clean.find(marker)
++    if start < 0:
++        raise AssertionError(f"missing required function/method: {marker}")
++    return brace_block(clean, start + len(marker))
++
++
++def enclosing_nonnull_guard(source: str, call_start: int, variable: str) -> int | None:
++    stack: list[int] = []
++    for index, char in enumerate(source[:call_start]):
++        if char == "{":
++            stack.append(index)
++        elif char == "}" and stack:
++            stack.pop()
++    for brace in reversed(stack):
++        prefix = source[max(0, brace - len(variable) - 12) : brace]
++        if prefix.endswith(f"if({variable})"):
++            return brace
++    return None
++
++
++def check_callback_guards(source: str) -> None:
++    compacted = compact(source)
++    any_call = re.compile(r"(?:strongSelf->)?_css_(?:dragBegin|dragEnd|scrollEnd|willDragEnd)\(")
++    guarded_call = re.compile(
++        r"(?:strongSelf->)?_css_(?:dragBegin|dragEnd|scrollEnd|willDragEnd)\((\w+)\);"
++    )
++    all_calls = list(any_call.finditer(compacted))
++    parsed_calls = list(guarded_call.finditer(compacted))
++    if len(all_calls) != len(parsed_calls):
++        raise AssertionError("scroll callback has a non-variable or direct generated payload")
++    for call in parsed_calls:
++        variable = call.group(1)
++        guard_brace = enclosing_nonnull_guard(compacted, call.start(), variable)
++        if guard_brace is None:
++            raise AssertionError(f"scroll callback payload is not guarded against nil: {call.group(0)}")
++        guarded_prefix = compacted[guard_brace + 1 : call.start()]
++        direct_assignment = re.compile(rf"(?<![\w.]){re.escape(variable)}=(?!=)")
++        if direct_assignment.search(guarded_prefix):
++            raise AssertionError(
++                f"scroll callback payload is reassigned after its non-nil guard: {call.group(0)}"
++            )
++
++
++def check(source: str) -> None:
++    finite = compact(block_after(source, "static BOOL KRScrollEventValueIsFinite(CGFloat value)"))
++    if "return!isnan(value)&&!isinf(value);" not in finite:
++        raise AssertionError("KRScrollEventValueIsFinite must reject both NaN and Inf")
++
++    point = compact(block_after(source, "static BOOL KRScrollEventPointIsFinite(CGPoint point)"))
++    if "returnKRScrollEventValueIsFinite(point.x)&&KRScrollEventValueIsFinite(point.y);" not in point:
++        raise AssertionError("KRScrollEventPointIsFinite must validate both axes")
++
++    base = compact(block_after(source, "- (NSDictionary *)p_generateEventBaseParams"))
++    required_base = (
++        "if(!KRScrollEventValueIsFinite(coreValues[i])){",
++        "KRLogDroppedScrollEventValue(coreFields[i],coreValues[i],@\"drop_event\");returnnil;",
++        "if(!KRScrollEventPointIsFinite(pagePoint)){",
++        "continue;",
++        "if(KRScrollEventPointIsFinite(mousePoint)){",
++    )
++    for required in required_base:
++        if required not in base:
++            raise AssertionError(f"missing event-base finiteness behavior: {required}")
++
++    will_end = compact(block_after(source, "- (void)scrollViewWillEndDragging:"))
++    for field, value in (
++        ("velocityX", "velocity.x"),
++        ("velocityY", "velocity.y"),
++        ("targetContentOffsetX", "target.x"),
++        ("targetContentOffsetY", "target.y"),
++    ):
++        required = f"!KRScrollEventValueIsFinite({value})"
++        log = f"KRLogDroppedScrollEventValue(@\"{field}\",{value},@\"drop_event\");"
++        if required not in will_end or log not in will_end:
++            raise AssertionError(f"missing drag-end finiteness behavior for {field}")
++    if "if(params){" not in will_end or "_css_willDragEnd(params);" not in will_end:
++        raise AssertionError("willDragEnd must only dispatch a non-nil payload")
++
++    check_callback_guards(source)
++
++
++def expect_failure(source: str, label: str) -> None:
++    try:
++        check(source)
++    except AssertionError:
++        return
++    raise AssertionError(f"self-test mutant survived: {label}")
++
++
++def self_test(source: str) -> None:
++    check(source)
++    expect_failure(
++        re.sub(
++            r"(static BOOL KRScrollEventValueIsFinite\(CGFloat value\)\s*\{).*?(\})",
++            r"\1 return YES; \2",
++            source,
++            count=1,
++            flags=re.S,
++        ),
++        "finite helper always true",
++    )
++    expect_failure(
++        source.replace(
++            "if (!KRScrollEventValueIsFinite(coreValues[i]))",
++            "// if (!KRScrollEventValueIsFinite(coreValues[i]))",
++            1,
++        ),
++        "commented core geometry guard",
++    )
++    marker = "\n- (void)scrollViewDidEndDecelerating:"
++    unguarded = "\n- (void)injectedUnguardedScrollEnd {\n    _css_scrollEnd \n    (eventParams);\n}\n"
++    expect_failure(source.replace(marker, unguarded + marker, 1), "whitespace-split unguarded callback")
++
++    guarded_nil_reassignment = (
++        "\n- (void)injectedNilReassignedScrollEnd {\n"
++        "    NSDictionary *eventParams = [self p_generateEventBaseParams];\n"
++        "    if (eventParams) {\n"
++        "        eventParams = nil;\n"
++        "        _css_scrollEnd(eventParams);\n"
++        "    }\n"
++        "}\n"
++    )
++    expect_failure(
++        source.replace(marker, guarded_nil_reassignment + marker, 1),
++        "payload reassigned to nil inside non-null guard",
++    )
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    parser.add_argument("--source", type=Path, default=SOURCE)
++    args = parser.parse_args()
++
++    source = args.source.read_text(encoding="utf-8")
++    self_test(source) if args.self_test else check(source)
++    print("ios_scroll_event_finiteness=pass")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/check-layout-size-report-rounding.py b/tools/check-layout-size-report-rounding.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..2dd7e3bb672af22635bfefa11152a1813f0f720b
+--- /dev/null
++++ b/tools/check-layout-size-report-rounding.py
+@@ -0,0 +1,167 @@
++#!/usr/bin/env python3
++"""Lock true two-decimal ceiling and legacy null serialization across renderers."""
++
++from __future__ import annotations
++
++import argparse
++import re
++from pathlib import Path
++
++
++ANDROID_CORE = Path(
++    "core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt"
++)
++ANDROID_FORMATTER = ANDROID_CORE.with_name("LayoutSizeFormatter.kt")
++ANDROID_RICH_TEXT = Path(
++    "core-render-android/src/main/java/com/tencent/kuikly/core/render/android/"
++    "expand/component/KRRichTextView.kt"
++)
++WEB_CORE = Path(
++    "core-render-web/base/src/jsMain/kotlin/com/tencent/kuikly/core/render/web/core/KuiklyRenderCore.kt"
++)
++WEB_FORMATTER = WEB_CORE.with_name("LayoutSizeFormatter.kt")
++IOS_CONVERT = Path("core-render-ios/Extension/Category/KRConvertUtil.m")
++IOS_FORMATTER = IOS_CONVERT.with_name("KRLayoutSizeFormatter.h")
++OHOS_CONVERT = Path("core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp")
++OHOS_FORMATTER = OHOS_CONVERT.with_name("KRLayoutSizeFormatter.h")
++
++PRODUCTION_FILES = (
++    ANDROID_CORE,
++    ANDROID_FORMATTER,
++    ANDROID_RICH_TEXT,
++    WEB_CORE,
++    WEB_FORMATTER,
++    IOS_CONVERT,
++    IOS_FORMATTER,
++    OHOS_CONVERT,
++    OHOS_FORMATTER,
++)
++
++REQUIRED = {
++    ANDROID_CORE: ("formatLayoutSizeForReport(size?.width, size?.height)",),
++    ANDROID_FORMATTER: (
++        "Math.ulp(value).toDouble() * (HUNDREDTH_SCALE / 2.0)",
++        "ceil(normalized) / HUNDREDTH_SCALE",
++        'return "0.00|0.00"',
++    ),
++    ANDROID_RICH_TEXT: (
++        "layoutParamsWidthIsUnresolved(width: Int): Boolean = width <= 0",
++        "layoutParamsWidthIsUnresolved(params.width)",
++    ),
++    WEB_CORE: ("formatLayoutSizeForReport(size?.width, size?.height)",),
++    WEB_FORMATTER: (
++        "floatUlp(value) * (HUNDREDTH_SCALE / 2.0)",
++        "ceil(normalized) / HUNDREDTH_SCALE",
++        'return "0.00|0.00"',
++    ),
++    IOS_CONVERT: (
++        "KRCeilLayoutSizeToHundredth(size.width)",
++        "KRCeilLayoutSizeToHundredth(size.height)",
++    ),
++    IOS_FORMATTER: (
++        "representation_tolerance",
++        "return ceil(scaled) / scale;",
++    ),
++    OHOS_CONVERT: (
++        "CeilLayoutSizeToHundredth(size.width)",
++        "CeilLayoutSizeToHundredth(size.height)",
++    ),
++    OHOS_FORMATTER: (
++        "representation_tolerance",
++        "return std::ceil(scaled) / scale;",
++    ),
++}
++
++BIAS = re.compile(r"\+\s*0\.005(?:f)?\b")
++
++
++def load_sources() -> dict[Path, str]:
++    return {path: path.read_text(encoding="utf-8") for path in PRODUCTION_FILES}
++
++
++def check(sources: dict[Path, str]) -> None:
++    for path, snippets in REQUIRED.items():
++        source = sources[path]
++        for snippet in snippets:
++            if snippet not in source:
++                raise AssertionError(f"{path}: missing required layout-size contract: {snippet}")
++        if BIAS.search(source):
++            raise AssertionError(f"{path}: half-cent bias is not a true ceiling operation")
++
++
++def expect_failure(sources: dict[Path, str], path: Path, old: str, new: str, label: str) -> None:
++    mutated = dict(sources)
++    if old not in mutated[path]:
++        raise AssertionError(f"self-test setup missing marker for {label}")
++    mutated[path] = mutated[path].replace(old, new, 1)
++    try:
++        check(mutated)
++    except AssertionError:
++        return
++    raise AssertionError(f"self-test mutant survived: {label}")
++
++
++def self_test(sources: dict[Path, str]) -> None:
++    check(sources)
++    expect_failure(
++        sources,
++        ANDROID_CORE,
++        "formatLayoutSizeForReport(size?.width, size?.height)",
++        'String.format(java.util.Locale.ENGLISH, "%.2f|%.2f", size!!.width + 0.005f, size.height + 0.005f)',
++        "Android biased formatter",
++    )
++    expect_failure(
++        sources,
++        WEB_CORE,
++        "formatLayoutSizeForReport(size?.width, size?.height)",
++        '(size!!.width + 0.005f).asDynamic().toFixed(2)',
++        "Web biased formatter",
++    )
++    expect_failure(
++        sources,
++        IOS_CONVERT,
++        "KRCeilLayoutSizeToHundredth(size.width)",
++        "size.width + 0.005",
++        "iOS biased formatter",
++    )
++    expect_failure(
++        sources,
++        OHOS_CONVERT,
++        "CeilLayoutSizeToHundredth(size.width)",
++        "size.width + 0.005",
++        "OHOS biased formatter",
++    )
++    expect_failure(
++        sources,
++        ANDROID_FORMATTER,
++        'return "0.00|0.00"',
++        'return "0|0"',
++        "Android null serialization drift",
++    )
++    expect_failure(
++        sources,
++        ANDROID_RICH_TEXT,
++        "layoutParamsWidthIsUnresolved(width: Int): Boolean = width <= 0",
++        "layoutParamsWidthIsUnresolved(width: Int): Boolean = width == 0",
++        "Android rich-text unresolved width narrowing",
++    )
++    expect_failure(
++        sources,
++        IOS_FORMATTER,
++        "return ceil(scaled) / scale;",
++        "return round(scaled) / scale;",
++        "iOS nearest rounding",
++    )
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    args = parser.parse_args()
++    sources = load_sources()
++    self_test(sources) if args.self_test else check(sources)
++    print("layout_size_report_rounding=pass")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/check-profiler-file-output-lifecycle.py b/tools/check-profiler-file-output-lifecycle.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..88e31e9fece748bbea0f7ff6bf76b6b44fc1a8d8
+--- /dev/null
++++ b/tools/check-profiler-file-output-lifecycle.py
+@@ -0,0 +1,456 @@
++#!/usr/bin/env python3
++"""Fail closed if profiler file output can bind to a dead Pager or lose session files."""
++
++from __future__ import annotations
++
++import argparse
++import re
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[1]
++PATHS = {
++    "container": ROOT / "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt",
++    "profiler": ROOT / (
++        "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/"
++        "RecompositionProfiler.kt"
++    ),
++    "strategy": ROOT / (
++        "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/output/"
++        "FileOutputStrategy.kt"
++    ),
++    "completion_result": ROOT / (
++        "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/"
++        "RecompositionProfilerFileOutputResult.kt"
++    ),
++    "tracker": ROOT / (
++        "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/"
++        "RecompositionTracker.kt"
++    ),
++    "output_interface": ROOT / (
++        "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/"
++        "RecompositionOutputStrategy.kt"
++    ),
++    "file_module": ROOT / "core/src/commonMain/kotlin/com/tencent/kuikly/core/module/FileModule.kt",
++    "android": ROOT / (
++        "core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/module/"
++        "KRFileModule.kt"
++    ),
++    "ios": ROOT / "core-render-ios/Extension/Modules/KRFileModule.m",
++    "android_tests": ROOT / (
++        "core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/module/"
++        "KRFileModuleTest.kt"
++    ),
++    "ohos": ROOT / (
++        "core-render-ohos/src/main/cpp/libohos_render/expand/modules/file/"
++        "KRFileModule.cpp"
++    ),
++    "tests": ROOT / (
++        "compose/src/commonTest/kotlin/com/tencent/kuikly/compose/profiler/"
++        "ProfilerFileOutputLifecycleTest.kt"
++    ),
++    "workflow": ROOT / ".github/workflows/compose-pr.yml",
++}
++
++
++def compact(source: str) -> str:
++    return re.sub(r"\s+", "", source)
++
++
++def between(source: str, start: str, end: str) -> str:
++    start_index = source.find(start)
++    if start_index < 0:
++        raise AssertionError(f"missing region start: {start}")
++    end_index = source.find(end, start_index + len(start))
++    if end_index < 0:
++        raise AssertionError(f"missing region end after {start}: {end}")
++    return source[start_index:end_index]
++
++
++def require_tokens(label: str, source: str, tokens: tuple[str, ...]) -> None:
++    compacted = compact(source)
++    for token in tokens:
++        if compact(token) not in compacted:
++            raise AssertionError(f"{label} missing contract token: {token}")
++
++
++def assert_contract(sources: dict[str, str]) -> None:
++    container = sources["container"]
++    require_tokens(
++        "ComposeContainer",
++        container,
++        (
++            "private var profilerFileModule: FileModule? = null",
++            "RecompositionProfiler.registerFileModule(module)",
++            "RecompositionProfiler.unregisterFileModule(it)",
++            "unregisterProfilerFileModule()",
++        ),
++    )
++    destroy = between(container, "override fun pageWillDestroy()", "private fun updateLifecycleState")
++    unregister_index = destroy.find("unregisterProfilerFileModule()")
++    dispose_index = destroy.find("dispose()")
++    if unregister_index < 0 or dispose_index < 0 or unregister_index > dispose_index:
++        raise AssertionError("ComposeContainer must unregister FileModule before Pager dispose")
++
++    profiler = sources["profiler"]
++    require_tokens(
++        "RecompositionProfiler",
++        profiler,
++        (
++            "private val fileModuleRegistry = ProfilerFileModuleRegistry()",
++            "currentFileModule = fileModuleRegistry.register(fileModule)",
++            "currentFileModule = fileModuleRegistry.unregister(fileModule)",
++            "fileStrategy?.onFileModuleChanged()",
++            "FileOutputStrategy(fileModuleProvider = { currentFileModule })",
++            "newTracker.addOutputStrategy(strategy)",
++            "strategy.activate(newTracker.sessionId, newTracker.startTimestampMs)",
++            "fun stop(completion: (RecompositionProfilerFileOutputResult) -> Unit)",
++            "strategy.deactivate(report, completion)",
++            "fun getReport(",
++            "completion: (RecompositionProfilerFileOutputResult) -> Unit",
++            "strategy.writeReport(finalReport, completion)",
++        ),
++    )
++    start_stop = between(profiler, "fun start()", "fun getReport(")
++    if "fileStrategy = null" in start_stop:
++        raise AssertionError("FileOutputStrategy must survive stop/start to serialize native writes")
++
++    strategy = sources["strategy"]
++    require_tokens(
++        "FileOutputStrategy",
++        strategy,
++        (
++            "private val fileModuleProvider: () -> FileModule?",
++            "private val pendingFileOperations = mutableListOf<ProfilerFileOperation>()",
++            "private var inFlightFileOperation: ProfilerFileOperation? = null",
++            "private var inFlightFileModule: FileModule? = null",
++            "val operationId: String = nextProfilerFileOperationId()",
++            "module.writeFile(\n                            operation.filename,\n                            operation.content,\n                            operation.operationId,",
++            "module.appendFile(\n                            operation.filename,\n                            operation.content,\n                            operation.operationId,",
++            "if (operation != null && inFlightFileModule !== currentModule)",
++            "if (inFlightFileOperation !== operation || inFlightFileModule !== module)",
++            "ProfilerFileIoResult.RetryableFailure(\"pager bridge unavailable\")",
++            "pendingFileOperations.add(0, operation)",
++            "operation.sameModuleRetryCount < MAX_SAME_MODULE_RETRIES",
++            "retryable file output exhausted after",
++            "takeCompletionLocked(operation, completionResult)",
++            "profiler session superseded before native file output completed",
++            "sessionId != report.sessionId",
++            "generationArtifactFailures",
++            "operation.filename == FILE_FRAMES",
++            "internal fun onFileModuleChanged()",
++            "override fun onSessionReset(sessionId: String, startTimestampMs: Long)",
++            "pendingFileOperations.clear()",
++            "FILE_REPORT, \"\", generation",
++        ),
++    )
++    if re.search(r"private\s+val\s+fileModule\s*:\s*FileModule", strategy):
++        raise AssertionError("FileOutputStrategy may not retain one fixed Pager FileModule")
++    if "if (!cancel) block()" in strategy or "if(!cancel)block()" in compact(strategy):
++        raise AssertionError("Pager cancellation must retry; it may not silently drop file I/O")
++    if strategy.count("nextProfilerFileOperationId()") != 2:
++        raise AssertionError("operation id must be created once per operation, never per dispatch/retry")
++
++    file_module = sources["file_module"]
++    require_tokens(
++        "FileModule",
++        file_module,
++        (
++            'private const val PARAM_OPERATION_ID = "operationId"',
++            "writeFileInternal(filename, content, operationId, callback)",
++            "appendFileInternal(filename, content, operationId, callback)",
++        ),
++    )
++    if file_module.count("put(PARAM_OPERATION_ID, operationId)") != 2:
++        raise AssertionError("FileModule must serialize operationId for both write and append")
++
++    require_tokens(
++        "RecompositionProfilerFileOutputResult",
++        sources["completion_result"],
++        (
++            "sealed class RecompositionProfilerFileOutputResult",
++            "data class Success",
++            "data class Failure",
++            "val reason: String",
++        ),
++    )
++
++    require_tokens(
++        "RecompositionTracker",
++        sources["tracker"],
++        (
++            "strategy.onReset()",
++            "strategy is RecompositionSessionOutputStrategy",
++            "strategy.onSessionReset(sessionId, startTimestampMs)",
++        ),
++    )
++    require_tokens(
++        "RecompositionOutputStrategy",
++        sources["output_interface"],
++        (
++            "internal interface RecompositionSessionOutputStrategy",
++            "fun onSessionReset(sessionId: String, startTimestampMs: Long)",
++        ),
++    )
++
++    android_write = between(sources["android"], "private fun writeFile(", "companion object")
++    if "content.isNullOrEmpty()" in android_write:
++        raise AssertionError("Android overwrite must allow empty content to truncate stale report")
++    if "if (filename.isNullOrEmpty())" not in android_write:
++        raise AssertionError("Android overwrite must still reject a missing filename")
++    android_append = between(sources["android"], "private fun appendFile(", "private fun writeFile(")
++    if "content.isNullOrEmpty()" not in android_append:
++        raise AssertionError("Android append must continue rejecting empty batches")
++    require_tokens(
++        "Android profiler file queue",
++        sources["android"],
++        (
++            "Executors.newSingleThreadExecutor",
++            'private const val PARAM_OPERATION_ID = "operationId"',
++            "private val COMPLETED_OPERATION_IDS = HashSet<String>()",
++        ),
++    )
++    for label, region in (("write", android_write), ("append", android_append)):
++        require_tokens(
++            f"Android {label} idempotent FIFO",
++            region,
++            (
++                "FILE_EXECUTOR.execute",
++                "COMPLETED_OPERATION_IDS.contains(operationId)",
++                "COMPLETED_OPERATION_IDS.add(operationId)",
++            ),
++        )
++        if "Thread {" in region:
++            raise AssertionError(f"Android {label} may not start a raw per-call thread")
++    require_tokens(
++        "Android native file queue tests",
++        sources["android_tests"],
++        (
++            "duplicateOperationIdAcrossPagerModulesAppendsOnlyOnce",
++            "moduleA.call(\"appendFile\", params, callback)",
++            "moduleB.call(\"appendFile\", params, callback)",
++            'assertEquals("frame\\n", file.readText(Charsets.UTF_8))',
++        ),
++    )
++
++    ios_append = between(sources["ios"], "- (void)appendFile:", "- (void)writeFile:")
++    ios_write = between(sources["ios"], "- (void)writeFile:", "@end")
++    require_tokens(
++        "iOS profiler file queue",
++        sources["ios"],
++        (
++            'dispatch_queue_create("com.tencent.kuikly.profiler.file", DISPATCH_QUEUE_SERIAL)',
++            "KRCompletedProfilerOperationIds",
++        ),
++    )
++    for label, region in (("write", ios_write), ("append", ios_append)):
++        require_tokens(
++            f"iOS {label} idempotent FIFO",
++            region,
++            (
++                "dispatch_async(KRProfilerFileQueue()",
++                "[completedOperationIds containsObject:operationId]",
++                "[completedOperationIds addObject:operationId]",
++            ),
++        )
++        if "dispatch_get_global_queue" in region:
++            raise AssertionError(f"iOS {label} may not use a concurrent global queue")
++
++    ohos_write = between(sources["ohos"], "void KRFileModule::WriteFile", "void KRFileModule::AppendFile")
++    if "content.empty()" in ohos_write:
++        raise AssertionError("OHOS overwrite must allow empty content to truncate stale report")
++    if "if (filename.empty())" not in ohos_write:
++        raise AssertionError("OHOS overwrite must still reject a missing filename")
++    ohos_append = between(sources["ohos"], "void KRFileModule::AppendFile", "void KRFileModule::GetFilesDir")
++    if "content.empty()" not in ohos_append:
++        raise AssertionError("OHOS append must continue rejecting empty batches")
++    require_tokens(
++        "OHOS profiler file queue",
++        sources["ohos"],
++        (
++            "class ProfilerFileWorker",
++            "std::condition_variable condition_",
++            "std::deque<Task> tasks_",
++            "std::unordered_set<std::string> completedOperationIds_",
++        ),
++    )
++    for label, region in (("write", ohos_write), ("append", ohos_append)):
++        require_tokens(
++            f"OHOS {label} idempotent FIFO",
++            region,
++            (
++                "ProfilerFileWorker::Instance().Enqueue",
++                "completedOperationIds.count(operationId)",
++                "completedOperationIds.insert(operationId)",
++            ),
++        )
++    if ".detach()" in sources["ohos"]:
++        raise AssertionError("OHOS file operations may not use detached per-call threads")
++
++    require_tokens(
++        "profiler lifecycle tests",
++        sources["tests"],
++        (
++            "liveModuleRegistryFallsBackWhenThePreferredPagerIsDestroyed",
++            "stalePagerCancellationRetriesTheSameWriteOnTheLiveFallback",
++            "moduleChangeRecoversAnInFlightFrameWriteWhoseCallbackNeverReturns",
++            "queuedWritesWaitForAFileModuleInsteadOfBeingDropped",
++            "resetRewritesTheSessionHeaderAndRejectsFramesFromTheOldGeneration",
++            "reportWritesRemainSerializedAcrossStopAndPostStopExport",
++            "retryableFailureRetriesOnTheSameLiveModuleInsteadOfStalling",
++            "retryableFailureExhaustionSurfacesOneTerminalReportFailure",
++            "reportCompletionWaitsForQueuedFramesAndNativeReportCommit",
++            "earlierFrameFailureMakesACommittedReportArtifactSetFail",
++            "reportOnlyTerminalFailureCanRetrySuccessfullyInTheSameSession",
++            "newSessionSupersedesOldReportCompletionExactlyOnce",
++            "lateStopFromOldSessionCannotDeactivateTheNewSession",
++            "twoConsecutiveSessionsEachReceiveTheirOwnCommitAcknowledgement",
++        ),
++    )
++    if "python3 tools/check-profiler-file-output-lifecycle.py --self-test" not in sources["workflow"]:
++        raise AssertionError("compose source-contracts must run profiler file lifecycle checker")
++
++
++def expect_failure(sources: dict[str, str], key: str, old: str, new: str) -> None:
++    mutated = dict(sources)
++    if old not in mutated[key]:
++        raise AssertionError(f"self-test mutation source missing in {key}: {old}")
++    mutated[key] = mutated[key].replace(old, new, 1)
++    try:
++        assert_contract(mutated)
++    except AssertionError:
++        return
++    raise AssertionError(f"checker accepted mutation in {key}: {old} -> {new}")
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    args = parser.parse_args()
++
++    sources = {name: path.read_text(encoding="utf-8") for name, path in PATHS.items()}
++    assert_contract(sources)
++
++    if args.self_test:
++        expect_failure(
++            sources,
++            "container",
++            "        unregisterProfilerFileModule()\n        RecompositionProfiler.removeLifecycleListener",
++            "        // mutation: stale module retained\n        RecompositionProfiler.removeLifecycleListener",
++        )
++        expect_failure(
++            sources,
++            "strategy",
++            "completion(ProfilerFileIoResult.RetryableFailure(\"pager bridge unavailable\"))",
++            "completion(ProfilerFileIoResult.TerminalFailure(\"mutation: cancelled operation dropped\"))",
++        )
++        expect_failure(
++            sources,
++            "tracker",
++            "strategy.onSessionReset(sessionId, startTimestampMs)",
++            "// mutation: persisted session not reset",
++        )
++        expect_failure(
++            sources,
++            "profiler",
++            "strategy.deactivate(report, completion)",
++            "strategy.deactivate(report)\n            fileStrategy = null",
++        )
++        expect_failure(
++            sources,
++            "strategy",
++            "operation.sameModuleRetryCount < MAX_SAME_MODULE_RETRIES",
++            "false // mutation: same live module never retries",
++        )
++        expect_failure(
++            sources,
++            "strategy",
++            "takeCompletionLocked(operation, completionResult)",
++            "null // mutation: native success is never acknowledged",
++        )
++        expect_failure(
++            sources,
++            "strategy",
++            "sessionId != report.sessionId",
++            "false // mutation: old stop may deactivate a new session",
++        )
++        expect_failure(
++            sources,
++            "strategy",
++            "operation.filename == FILE_FRAMES",
++            "operation.filename == FILE_REPORT // mutation: report failure poisons retry",
++        )
++        expect_failure(
++            sources,
++            "strategy",
++            "                            operation.operationId,",
++            "                            nextProfilerFileOperationId(), // mutation: new id on retry",
++        )
++        expect_failure(
++            sources,
++            "strategy",
++            "if (inFlightFileOperation !== operation || inFlightFileModule !== module)",
++            "if (inFlightFileOperation !== operation) // mutation: old Pager callback may win",
++        )
++        expect_failure(
++            sources,
++            "file_module",
++            "put(PARAM_OPERATION_ID, operationId)",
++            "put(\"mutationOperationId\", operationId)",
++        )
++        expect_failure(
++            sources,
++            "android",
++            "COMPLETED_OPERATION_IDS.contains(operationId)",
++            "false // mutation: duplicate native commit",
++        )
++        expect_failure(
++            sources,
++            "android",
++            "FILE_EXECUTOR.execute {",
++            "Thread { // mutation: concurrent per-call writer",
++        )
++        expect_failure(
++            sources,
++            "ios",
++            "[completedOperationIds containsObject:operationId]",
++            "NO // mutation: duplicate native commit",
++        )
++        expect_failure(
++            sources,
++            "ios",
++            "dispatch_async(KRProfilerFileQueue(), ^{",
++            "dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{",
++        )
++        expect_failure(
++            sources,
++            "ohos",
++            "completedOperationIds.count(operationId) > 0",
++            "false // mutation: duplicate native commit",
++        )
++        expect_failure(
++            sources,
++            "ohos",
++            "ProfilerFileWorker::Instance().Enqueue(",
++            "std::thread( // mutation: concurrent per-call writer",
++        )
++        expect_failure(
++            sources,
++            "android",
++            "if (filename.isNullOrEmpty()) {",
++            "if (filename.isNullOrEmpty() || content.isNullOrEmpty()) {",
++        )
++        expect_failure(
++            sources,
++            "ohos",
++            "if (filename.empty()) {",
++            "if (filename.empty() || content.empty()) {",
++        )
++        print("profiler file output lifecycle checker self-test: PASS")
++    else:
++        print("profiler file output lifecycle contract: PASS")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/compose-node-event-capture-allowlist.txt b/tools/compose-node-event-capture-allowlist.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..4274317fb3485a5fbec4a2182aaa51ad984715fe
+--- /dev/null
++++ b/tools/compose-node-event-capture-allowlist.txt
+@@ -0,0 +1,2 @@
++# path|event method|reason
++compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt|click|stable empty handler consumes native touch without capturing composition state
+diff --git a/tools/ios-renderer-tests/KRGradientRichTextViewMethodDispatchTest.m b/tools/ios-renderer-tests/KRGradientRichTextViewMethodDispatchTest.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..97774568b019c8ac8868435451fe7844e83668b3
+--- /dev/null
++++ b/tools/ios-renderer-tests/KRGradientRichTextViewMethodDispatchTest.m
+@@ -0,0 +1,115 @@
++#import <AppKit/AppKit.h>
++#import <objc/runtime.h>
++
++#import "KRGradientRichTextView.h"
++#import "KRRichTextView.h"
++
++@implementation KRLabel
++@end
++
++@implementation KRRichTextView
++
++- (void)hrv_setPropWithKey:(NSString *)propKey propValue:(id)propValue {
++}
++
++- (void)hrv_prepareForeReuse {
++}
++
+++ (id<KuiklyRenderShadowProtocol>)hrv_createShadow {
++    return nil;
++}
++
++- (void)hrv_setShadow:(id<KuiklyRenderShadowProtocol>)shadow {
++}
++
++@end
++
++static NSInteger forwardedCallCount = 0;
++static NSString *forwardedMethod = nil;
++static NSString *forwardedParams = nil;
++
++static void KRImplementedViewMethod(
++    __unused KRRichTextView *self,
++    __unused SEL command,
++    NSString *method,
++    NSString *params,
++    KuiklyRenderCallback callback
++) {
++    forwardedCallCount += 1;
++    forwardedMethod = method;
++    forwardedParams = params;
++    if (callback) {
++        callback(@{ @"forwarded": @YES });
++    }
++}
++
++static void KRAssert(BOOL condition, NSString *message) {
++    if (!condition) {
++        NSLog(@"KRGradientRichTextViewMethodDispatchTest failed: %@", message);
++        exit(1);
++    }
++}
++
++static void testMissingOptionalInnerMethodIsIgnored(void) {
++    SEL selector = @selector(hrv_callWithMethod:params:callback:);
++    KRAssert(
++        ![KRRichTextView instancesRespondToSelector:selector],
++        @"fixture inner view must begin without the optional method"
++    );
++
++    KRGradientRichTextView *gradientView =
++        [[KRGradientRichTextView alloc] initWithFrame:CGRectMake(0, 0, 100, 20)];
++    __block BOOL callbackCalled = NO;
++    BOOL threw = NO;
++
++    @try {
++        [gradientView hrv_callWithMethod:@"unsupported"
++                                  params:@"payload"
++                                callback:^(__unused id result) {
++                                    callbackCalled = YES;
++                                }];
++    } @catch (__unused NSException *exception) {
++        threw = YES;
++    }
++
++    KRAssert(!threw, @"wrapper must not message an inner view that lacks the optional selector");
++    KRAssert(!callbackCalled, @"unsupported method must not synthesize a callback");
++}
++
++static void testImplementedInnerMethodStillForwardsExactlyOnce(void) {
++    SEL selector = @selector(hrv_callWithMethod:params:callback:);
++    BOOL added = class_addMethod(
++        [KRRichTextView class],
++        selector,
++        (IMP)KRImplementedViewMethod,
++        "v@:@@@?"
++    );
++    KRAssert(added, @"fixture must install the optional inner method");
++
++    KRGradientRichTextView *gradientView =
++        [[KRGradientRichTextView alloc] initWithFrame:CGRectMake(0, 0, 100, 20)];
++    __block NSInteger callbackCount = 0;
++    __block NSDictionary *callbackResult = nil;
++
++    [gradientView hrv_callWithMethod:@"supported"
++                              params:@"payload"
++                            callback:^(id result) {
++                                callbackCount += 1;
++                                callbackResult = result;
++                            }];
++
++    KRAssert(forwardedCallCount == 1, @"implemented inner method must be forwarded exactly once");
++    KRAssert([forwardedMethod isEqualToString:@"supported"], @"method identity must be preserved");
++    KRAssert([forwardedParams isEqualToString:@"payload"], @"params identity must be preserved");
++    KRAssert(callbackCount == 1, @"implemented method callback must be delivered exactly once");
++    KRAssert([callbackResult[@"forwarded"] boolValue], @"callback payload must be preserved");
++}
++
++int main(void) {
++    @autoreleasepool {
++        testMissingOptionalInnerMethodIsIgnored();
++        testImplementedInnerMethodStillForwardsExactlyOnce();
++        NSLog(@"KRGradientRichTextViewMethodDispatchTest passed");
++    }
++    return 0;
++}
+diff --git a/tools/ios-renderer-tests/KRLayoutSizeFormatterTest.c b/tools/ios-renderer-tests/KRLayoutSizeFormatterTest.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..971222b808d45cd7ceb113a6123d02af781333e5
+--- /dev/null
++++ b/tools/ios-renderer-tests/KRLayoutSizeFormatterTest.c
+@@ -0,0 +1,48 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "KRLayoutSizeFormatter.h"
++
++static void require_formatted(double width, double height, const char *expected) {
++    char actual[64];
++    snprintf(actual, sizeof(actual), "%.2f|%.2f",
++             KRCeilLayoutSizeToHundredth(width),
++             KRCeilLayoutSizeToHundredth(height));
++    if (strcmp(actual, expected) != 0) {
++        fprintf(stderr, "layout size mismatch: input=%.17g|%.17g expected=%s actual=%s\n",
++                width, height, expected, actual);
++        exit(1);
++    }
++}
++
++int main(void) {
++    require_formatted(0.0, 10.0, "0.00|10.00");
++    require_formatted(10.01, 10.02, "10.01|10.02");
++    require_formatted(0.07, 1.10, "0.07|1.10");
++    require_formatted(0.001, 0.004, "0.01|0.01");
++    require_formatted(0.005, 0.009, "0.01|0.01");
++    require_formatted(10.0001, 10.009, "10.01|10.01");
++    require_formatted(10.0101, -10.001, "10.02|-10.00");
++    if (!isnan(KRCeilLayoutSizeToHundredth(NAN)) ||
++        !isinf(KRCeilLayoutSizeToHundredth(INFINITY))) {
++        fputs("non-finite layout size handling changed\n", stderr);
++        return 1;
++    }
++    return 0;
++}
+diff --git a/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m b/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7efd50b84d296594094b40cadcdf3238014b124
+--- /dev/null
++++ b/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m
+@@ -0,0 +1,59 @@
++// Regression: the blur event payload must carry the RAW output text
++// (attachments restored via kr_originlTextBeforeTextAttachment), never the
++// display string — otherwise a textPostProcessor field's blur would overwrite
++// the stored raw value with its visible placeholder.
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++#import "KRTextBlurEventPayload.h"
++#import "KuiklyRenderBridge.h"
++
++@interface KRBlurTestAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
++@end
++@implementation KRBlurTestAttachment
++- (NSString *)kr_originlTextBeforeTextAttachment { return @"@alice"; }
++@end
++
++static int failures = 0;
++#define KRAssert(cond, msg) do { if (!(cond)) { \
++    NSLog(@"FAIL: %s", msg); failures++; } else { NSLog(@"PASS: %s", msg); } } while (0)
++
++int main(void) {
++    @autoreleasepool {
++        // 1) Attachment restored to raw text; placeholder never leaks.
++        NSMutableAttributedString *display =
++            [[NSMutableAttributedString alloc] initWithString:@"hi \uFFFC"];
++        [display addAttribute:NSAttachmentAttributeName
++                        value:[KRBlurTestAttachment new]
++                        range:NSMakeRange(3, 1)];
++        NSDictionary *payload =
++            KRBlurEventPayloadFromAttributedText(display, nil, @(42));
++        KRAssert([payload[@"text"] isEqualToString:@"hi @alice"],
++                 "blur text is raw output text (attachment restored)");
++        KRAssert(![payload[@"text"] containsString:@"\uFFFC"],
++                 "blur text is not the display string");
++        KRAssert([payload[@"focusRequestId"] isEqualToNumber:@(42)],
++                 "focusRequestId carried through");
++
++        // 2) Plain attributed text passes through unchanged.
++        payload = KRBlurEventPayloadFromAttributedText(
++            [[NSAttributedString alloc] initWithString:@"plain"], nil, nil);
++        KRAssert([payload[@"text"] isEqualToString:@"plain"],
++                 "plain text passes through");
++        KRAssert(payload[@"focusRequestId"] == nil,
++                 "nil focusRequestId omitted from payload");
++
++        // 3) Empty string stays empty (explicit clear must not be lost).
++        payload = KRBlurEventPayloadFromAttributedText(
++            [[NSAttributedString alloc] initWithString:@""], nil, nil);
++        KRAssert([payload[@"text"] isEqualToString:@""],
++                 "explicit empty string preserved");
++
++        // 4) No attributed text -> plain-text fallback (raw current text).
++        payload = KRBlurEventPayloadFromAttributedText(nil, @"rawCurrent", nil);
++        KRAssert([payload[@"text"] isEqualToString:@"rawCurrent"],
++                 "nil attributedText falls back to plain text");
++
++        NSLog(@"%@", failures == 0 ? @"ALL PASS" : @"FAILURES");
++        return failures == 0 ? 0 : 1;
++    }
++}
+diff --git a/tools/ios-renderer-tests/KRTextInputEventSequencerTest.m b/tools/ios-renderer-tests/KRTextInputEventSequencerTest.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..11b6bafacd0b09343f45ffe09409b11519e49a1e
+--- /dev/null
++++ b/tools/ios-renderer-tests/KRTextInputEventSequencerTest.m
+@@ -0,0 +1,87 @@
++#import <Foundation/Foundation.h>
++
++#import "KRTextInputEventSequencer.h"
++
++static void KRAssert(BOOL condition, NSString *message) {
++    if (!condition) {
++        NSLog(@"KRTextInputEventSequencerTest failed: %@", message);
++        exit(1);
++    }
++}
++
++static NSDictionary *KRState(NSString *text, NSUInteger selection, NSInteger compositionStart, NSInteger compositionEnd) {
++    return @{
++        @"text": text,
++        @"length": @(text.length),
++        @"selectionStart": @(selection),
++        @"selectionEnd": @(selection),
++        @"compositionStart": @(compositionStart),
++        @"compositionEnd": @(compositionEnd)
++    };
++}
++
++static void testCompleteStateLeadsLegacyFromOneSnapshot(void) {
++    KRTextInputEventSequencer *sequencer = [KRTextInputEventSequencer new];
++    NSString *markedText = [@"" stringByPaddingToLength:31 withString:@"p" startingAtIndex:0];
++    NSDictionary *markedState = KRState(markedText, 31, 0, 31);
++    NSDictionary *committedState = KRState(@"abc", 3, -1, -1);
++    NSMutableArray<NSString *> *order = [NSMutableArray array];
++    __block NSDictionary *receivedMarkedCompleteState = nil;
++    __block NSDictionary *receivedCompleteState = nil;
++    __block NSDictionary *receivedLegacyState = nil;
++
++    [sequencer notifyState:markedState
++          completeCallback:^(NSDictionary *state) {
++              [order addObject:@"marked-complete"];
++              receivedMarkedCompleteState = state;
++          }
++            legacyCallback:^(NSDictionary *state) {
++                [order addObject:@"marked-legacy"];
++            }];
++    [sequencer notifyState:committedState
++          completeCallback:^(NSDictionary *state) {
++              [order addObject:@"commit-complete"];
++              receivedCompleteState = state;
++          }
++            legacyCallback:^(NSDictionary *state) {
++                [order addObject:@"commit-legacy"];
++                receivedLegacyState = state;
++            }];
++
++    KRAssert(
++        [order isEqualToArray:@[@"marked-complete", @"marked-legacy", @"commit-complete", @"commit-legacy"]],
++        @"31 marked -> 3 committed must publish complete before legacy in both phases"
++    );
++    KRAssert(receivedMarkedCompleteState == markedState, @"marked complete must receive its production snapshot instance");
++    KRAssert(receivedCompleteState == committedState, @"complete must receive the production snapshot instance");
++    KRAssert([receivedLegacyState[@"text"] isEqual:committedState[@"text"]], @"legacy text must derive from snapshot");
++    KRAssert([receivedLegacyState[@"length"] isEqual:committedState[@"length"]], @"legacy length must derive from snapshot");
++    KRAssert([committedState[@"selectionStart"] unsignedIntegerValue] == 3, @"final selection must remain 3");
++    KRAssert([committedState[@"compositionStart"] integerValue] == -1, @"committed state must clear composition");
++}
++
++static void testMarkedContractionIsBoundToOneEditSession(void) {
++    KRTextInputEventSequencer *sequencer = [KRTextInputEventSequencer new];
++
++    KRAssert([sequencer recordRawTextLength:31 hasMarkedText:YES] == nil, @"marked growth is not a commit");
++    NSDictionary *sameSession = [sequencer recordRawTextLength:3 hasMarkedText:NO];
++    KRAssert([sameSession[@"markedLength"] unsignedIntegerValue] == 31, @"same-session marked length");
++    KRAssert([sameSession[@"committedLength"] unsignedIntegerValue] == 3, @"same-session committed length");
++
++    [sequencer recordRawTextLength:31 hasMarkedText:YES];
++    [sequencer invalidatePendingMarkedText]; // textViewDidEndEditing
++    KRAssert([sequencer recordRawTextLength:3 hasMarkedText:NO] == nil, @"blur must end pending marked attribution");
++
++    [sequencer recordRawTextLength:31 hasMarkedText:YES];
++    [sequencer invalidatePendingMarkedText]; // css_setTextInputState / setCss_text / css_setText / setCss_values
++    KRAssert([sequencer recordRawTextLength:3 hasMarkedText:NO] == nil, @"controlled sync must end pending marked attribution");
++}
++
++int main(void) {
++    @autoreleasepool {
++        testCompleteStateLeadsLegacyFromOneSnapshot();
++        testMarkedContractionIsBoundToOneEditSession();
++        NSLog(@"KRTextInputEventSequencerTest passed");
++    }
++    return 0;
++}
+diff --git a/tools/ios-renderer-tests/Task114ReleaseCarrierHandlerTest.m b/tools/ios-renderer-tests/Task114ReleaseCarrierHandlerTest.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..71b910caa5aa9f55c206c4979fb51ac39d9bfdbd
+--- /dev/null
++++ b/tools/ios-renderer-tests/Task114ReleaseCarrierHandlerTest.m
+@@ -0,0 +1,91 @@
++#import <UIKit/UIKit.h>
++#import <objc/runtime.h>
++
++#import "KuiklyRenderLayerHandler.h"
++#import "KRGradientRichTextView.h"
++#import "KRRichTextView.h"
++
++@interface Task114ReleaseCarrierAppDelegate : UIResponder <UIApplicationDelegate>
++@property(nonatomic, strong) UIWindow *window;
++@end
++
++@implementation Task114ReleaseCarrierAppDelegate
++
++- (BOOL)application:(UIApplication *)application
++    didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
++    self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
++    self.window.rootViewController = [UIViewController new];
++    [self.window makeKeyAndVisible];
++
++    // The production handler resolves this view by string. Keep an explicit
++    // class reference so the static renderer archive member is linked into
++    // the fixture app instead of being discarded as apparently unused.
++    Class richTextViewClass = [KRRichTextView class];
++    NSCAssert(
++        richTextViewClass != Nil && [NSStringFromClass(richTextViewClass) isEqualToString:@"KRRichTextView"],
++        @"KRRichTextView must be present in the carrier fixture binary"
++    );
++    SEL genericViewMethodSelector = @selector(hrv_callWithMethod:params:callback:);
++    Method genericViewMethod = class_getInstanceMethod(richTextViewClass, genericViewMethodSelector);
++    NSCAssert(
++        genericViewMethod != NULL && method_getImplementation(genericViewMethod) != NULL,
++        @"KRRichTextView must have a concrete generic RenderView.callMethod dispatcher IMP"
++    );
++    Class gradientRichTextViewClass = [KRGradientRichTextView class];
++    NSCAssert(
++        gradientRichTextViewClass != Nil &&
++            [NSStringFromClass(gradientRichTextViewClass) isEqualToString:@"KRGradientRichTextView"],
++        @"KRGradientRichTextView must be present in the carrier fixture binary"
++    );
++
++    KuiklyContextParam *contextParam =
++        [KuiklyContextParam newWithPageName:@"task114-release-carrier"
++                          resourceFolderUrl:nil];
++    KuiklyRenderLayerHandler *handler =
++        [[KuiklyRenderLayerHandler alloc] initWithRootView:self.window contextParam:contextParam];
++    [handler createRenderViewWithTag:@114 viewName:@"KRRichTextView"];
++    [handler callViewMethodWithTag:@114
++                           method:@"accessibilityFocus"
++                           params:nil
++                         callback:nil];
++    [handler callViewMethodWithTag:@114
++                           method:@"accessibilityAnnounce"
++                           params:@"task131-rich-text-generic-method"
++                         callback:nil];
++    [handler createRenderViewWithTag:@115 viewName:@"KRGradientRichTextView"];
++    [handler callViewMethodWithTag:@115
++                           method:@"accessibilityFocus"
++                           params:nil
++                         callback:nil];
++    [handler callViewMethodWithTag:@115
++                           method:@"accessibilityAnnounce"
++                           params:@"task131-gradient-rich-text-generic-method"
++                         callback:nil];
++    [handler callViewMethodWithTag:@115
++                           method:@"unsupported"
++                           params:nil
++                         callback:nil];
++
++    NSString *receipt =
++        [NSTemporaryDirectory() stringByAppendingPathComponent:@"task114-carrier-pass"];
++    NSError *error = nil;
++    BOOL wrote = [@"optional-view-method-safe" writeToFile:receipt
++                                                   atomically:YES
++                                                     encoding:NSUTF8StringEncoding
++                                                        error:&error];
++    NSCAssert(wrote && error == nil, @"failed to write task114 carrier receipt: %@", error);
++    return YES;
++}
++
++@end
++
++int main(int argc, char *argv[]) {
++    @autoreleasepool {
++        return UIApplicationMain(
++            argc,
++            argv,
++            nil,
++            NSStringFromClass(Task114ReleaseCarrierAppDelegate.class)
++        );
++    }
++}
+diff --git a/tools/ios-renderer-tests/Task114ReleaseCarrierInfo.plist b/tools/ios-renderer-tests/Task114ReleaseCarrierInfo.plist
+new file mode 100644
+index 0000000000000000000000000000000000000000..da1b3d35120bf02a4f28a40066c763e281cd6567
+--- /dev/null
++++ b/tools/ios-renderer-tests/Task114ReleaseCarrierInfo.plist
+@@ -0,0 +1,37 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++    <key>CFBundleDevelopmentRegion</key>
++    <string>en</string>
++    <key>CFBundleExecutable</key>
++    <string>Task114ReleaseCarrier</string>
++    <key>CFBundleIdentifier</key>
++    <string>build.raft.task114.releasecarrier</string>
++    <key>CFBundleInfoDictionaryVersion</key>
++    <string>6.0</string>
++    <key>CFBundleName</key>
++    <string>Task114ReleaseCarrier</string>
++    <key>CFBundlePackageType</key>
++    <string>APPL</string>
++    <key>CFBundleShortVersionString</key>
++    <string>1.0</string>
++    <key>CFBundleVersion</key>
++    <string>1</string>
++    <key>LSRequiresIPhoneOS</key>
++    <true/>
++    <key>MinimumOSVersion</key>
++    <string>17.0</string>
++    <key>UIApplicationSceneManifest</key>
++    <dict>
++        <key>UIApplicationSupportsMultipleScenes</key>
++        <false/>
++    </dict>
++    <key>UILaunchStoryboardName</key>
++    <string></string>
++    <key>UISupportedInterfaceOrientations</key>
++    <array>
++        <string>UIInterfaceOrientationPortrait</string>
++    </array>
++</dict>
++</plist>
+diff --git a/tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh b/tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..127b6b66bf3fa1b4abba0e28ac645f2854aea9e5
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
++build_dir="${1:-$repo_root/build/ios-gradient-rich-text-method-dispatch-test}"
++mkdir -p "$build_dir"
++
++xcrun clang \
++  -fobjc-arc \
++  -fblocks \
++  -fmodules \
++  -Werror \
++  -Wno-incomplete-implementation \
++  -Wno-protocol \
++  -Wno-unused-parameter \
++  -DTARGET_OS_OSX=1 \
++  -framework AppKit \
++  -framework Foundation \
++  -framework QuartzCore \
++  -I "$repo_root/core-render-ios/include" \
++  -I "$repo_root/core-render-ios/MacSupport" \
++  "$repo_root/core-render-ios/MacSupport/KRUIKit.m" \
++  "$repo_root/core-render-ios/Extension/AdvancedComps/KRGradientRichTextView.m" \
++  "$repo_root/tools/ios-renderer-tests/KRGradientRichTextViewMethodDispatchTest.m" \
++  -o "$build_dir/KRGradientRichTextViewMethodDispatchTest"
++
++"$build_dir/KRGradientRichTextViewMethodDispatchTest"
+diff --git a/tools/ios-renderer-tests/run-layout-size-formatter-test.sh b/tools/ios-renderer-tests/run-layout-size-formatter-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..68fe6d7a530d8ad58b71c3496632a6255bb4e039
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-layout-size-formatter-test.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
++build_dir="${1:-$repo_root/build/ios-layout-size-formatter-test}"
++mkdir -p "$build_dir"
++
++xcrun clang \
++  -std=c11 \
++  -Wall \
++  -Wextra \
++  -Werror \
++  -I "$repo_root/core-render-ios/Extension/Category" \
++  "$repo_root/tools/ios-renderer-tests/KRLayoutSizeFormatterTest.c" \
++  -o "$build_dir/KRLayoutSizeFormatterTest"
++
++"$build_dir/KRLayoutSizeFormatterTest"
+diff --git a/tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh b/tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..c3cd898808c3eb35f704b673e92ea6400b8c2cee
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh
+@@ -0,0 +1,120 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++if [[ "$#" -ne 3 ]]; then
++  echo "usage: $0 <carrier-root> <carrier-derived-data> <evidence-dir>" >&2
++  exit 64
++fi
++
++trusted_root="$(cd "$(dirname "$0")/../.." && pwd)"
++carrier_root="$(cd "$1" && pwd)"
++derived_data="$(cd "$2" && pwd)"
++evidence_dir="$3"
++mkdir -p "$evidence_dir"
++evidence_dir="$(cd "$evidence_dir" && pwd)"
++
++renderer_archive="$derived_data/Build/Products/Debug-iphonesimulator/OpenKuiklyIOSRender/libOpenKuiklyIOSRender.a"
++test -f "$renderer_archive"
++
++app_dir="$evidence_dir/Task114ReleaseCarrier.app"
++rm -rf "$app_dir"
++mkdir -p "$app_dir"
++cp "$trusted_root/tools/ios-renderer-tests/Task114ReleaseCarrierInfo.plist" \
++  "$app_dir/Info.plist"
++
++case "$(uname -m)" in
++  arm64) simulator_arch="arm64" ;;
++  x86_64) simulator_arch="x86_64" ;;
++  *)
++    echo "unsupported macOS runner architecture: $(uname -m)" >&2
++    exit 1
++    ;;
++esac
++
++xcrun --sdk iphonesimulator clang++ \
++  -target "${simulator_arch}-apple-ios17.0-simulator" \
++  -fobjc-arc \
++  -fblocks \
++  -Werror \
++  -ObjC \
++  -I "$carrier_root/core-render-ios/include" \
++  -I "$carrier_root/core-render-ios/MacSupport" \
++  "$trusted_root/tools/ios-renderer-tests/Task114ReleaseCarrierHandlerTest.m" \
++  "$renderer_archive" \
++  -framework UIKit \
++  -framework QuartzCore \
++  -framework CoreGraphics \
++  -framework Foundation \
++  -framework CoreText \
++  -framework ImageIO \
++  -framework AVFoundation \
++  -framework CoreMedia \
++  -framework CoreVideo \
++  -lc++ \
++  -o "$app_dir/Task114ReleaseCarrier"
++
++nm "$app_dir/Task114ReleaseCarrier" |
++  tee "$evidence_dir/linked-symbols.txt" |
++  grep -F "OBJC_CLASS_\$_KRRichTextView"
++
++runtime_id="$(
++  xcrun simctl list runtimes --json |
++    /usr/bin/python3 -c '
++import json, sys
++runtimes = [
++    item for item in json.load(sys.stdin)["runtimes"]
++    if item.get("isAvailable")
++    and item.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
++]
++if not runtimes:
++    raise SystemExit("no available iOS Simulator runtime")
++print(runtimes[-1]["identifier"])
++'
++)"
++
++device_type_id="$(
++  xcrun simctl list devicetypes --json |
++    /usr/bin/python3 -c '
++import json, sys
++devices = json.load(sys.stdin)["devicetypes"]
++preferred = next((item for item in devices if item["name"] == "iPhone 16"), None)
++if preferred is None:
++    preferred = next((item for item in devices if item["name"].startswith("iPhone")), None)
++if preferred is None:
++    raise SystemExit("no iPhone Simulator device type")
++print(preferred["identifier"])
++'
++)"
++
++udid="$(xcrun simctl create "Task114Carrier-${GITHUB_RUN_ID:-local}" "$device_type_id" "$runtime_id")"
++cleanup() {
++  xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
++  xcrun simctl delete "$udid" >/dev/null 2>&1 || true
++}
++trap cleanup EXIT
++
++xcrun simctl boot "$udid"
++xcrun simctl bootstatus "$udid" -b
++xcrun simctl install "$udid" "$app_dir"
++xcrun simctl launch --terminate-running-process \
++  "$udid" build.raft.task114.releasecarrier |
++  tee "$evidence_dir/launch.log"
++
++data_container="$(
++  xcrun simctl get_app_container "$udid" build.raft.task114.releasecarrier data
++)"
++receipt="$data_container/tmp/task114-carrier-pass"
++for _ in $(seq 1 30); do
++  if [[ -f "$receipt" ]]; then
++    break
++  fi
++  sleep 1
++done
++
++test -f "$receipt"
++test "$(<"$receipt")" = "optional-view-method-safe"
++cp "$receipt" "$evidence_dir/receipt.txt"
++xcrun simctl spawn "$udid" launchctl print \
++  system/com.apple.CoreSimulator.CoreSimulatorService >/dev/null 2>&1 || true
++printf 'task114_release_carrier_handler_fixture=PASS\n' |
++  tee "$evidence_dir/result.txt"
+diff --git a/tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh b/tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..60e697142b3552fe35e5f7d18cff3b05eddd1a4e
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
++build_dir="${1:-$repo_root/build/ios-text-input-sequencer-test}"
++mkdir -p "$build_dir"
++
++xcrun clang \
++  -fobjc-arc \
++  -fblocks \
++  -framework Foundation \
++  -I "$repo_root/core-render-ios/Extension/Components" \
++  "$repo_root/core-render-ios/Extension/Components/KRTextInputEventSequencer.m" \
++  "$repo_root/tools/ios-renderer-tests/KRTextInputEventSequencerTest.m" \
++  -o "$build_dir/KRTextInputEventSequencerTest"
++
++"$build_dir/KRTextInputEventSequencerTest"
+diff --git a/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh b/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..e8263f0b8441fd3a4d9329603a9a6e1389d006ab
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
++build_dir="${1:-$repo_root/build/ios-textarea-blur-raw-text-test}"
++mkdir -p "$build_dir"
++
++xcrun clang \
++  -fobjc-arc \
++  -fblocks \
++  -fmodules \
++  -Werror \
++  -Wno-incomplete-implementation \
++  -Wno-protocol \
++  -Wno-unused-parameter \
++  -DTARGET_OS_OSX=1 \
++  -framework AppKit \
++  -framework Foundation \
++  -I "$repo_root/core-render-ios/include" \
++  -I "$repo_root/core-render-ios/MacSupport" \
++  -I "$repo_root/core-render-ios/Extension/Components" \
++  -I "$repo_root/core-render-ios/Extension/BridgeProtocol" \
++  "$repo_root/core-render-ios/Extension/Components/KRTextBlurEventPayload.m" \
++  "$repo_root/tools/ios-renderer-tests/KRTextBlurPayloadRawTextTest.m" \
++  -o "$build_dir/KRTextBlurPayloadRawTextTest"
++
++"$build_dir/KRTextBlurPayloadRawTextTest"
+diff --git a/tools/ohos-renderer-tests/run-arm64-direct-link.sh b/tools/ohos-renderer-tests/run-arm64-direct-link.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..14e8e5727cb399427e2b42939eefc6668a006550
+--- /dev/null
++++ b/tools/ohos-renderer-tests/run-arm64-direct-link.sh
+@@ -0,0 +1,64 @@
++#!/usr/bin/env bash
++
++set -euo pipefail
++
++repo_root="$(git rev-parse --show-toplevel)"
++evidence_dir="${1:-$repo_root/build/ohos-evidence}"
++: "${OHOS_SDK_HOME:?OHOS_SDK_HOME must point to the OpenHarmony SDK}"
++: "${DEVECO_SDK_HOME:?DEVECO_SDK_HOME must point to the DevEco SDK}"
++
++cmake_bin="$OHOS_SDK_HOME/native/build-tools/cmake/bin/cmake"
++ninja_bin="$OHOS_SDK_HOME/native/build-tools/cmake/bin/ninja"
++clang_bin="$OHOS_SDK_HOME/native/llvm/bin/clang++"
++readelf_bin="$OHOS_SDK_HOME/native/llvm/bin/llvm-readelf"
++build_dir="$repo_root/core-render-ohos/.cxx/default/default/debug/arm64-v8a"
++hvigor_dir="$repo_root/core-render-ohos/.cxx/default/default/debug/hvigor/arm64-v8a"
++out_dir="$repo_root/core-render-ohos/build/default/intermediates/cmake/default/obj/arm64-v8a"
++
++test -x "$cmake_bin"
++test -x "$ninja_bin"
++test -x "$clang_bin"
++test -x "$readelf_bin"
++test -f "$hvigor_dir/summary.cmake"
++
++rm -rf "$build_dir" "$out_dir"
++mkdir -p "$build_dir" "$out_dir" "$evidence_dir"
++
++"$cmake_bin" \
++  -S "$repo_root/core-render-ohos/src/main/cpp" \
++  -B "$build_dir" \
++  -G Ninja \
++  -DOHOS_ARCH=arm64-v8a \
++  -DCMAKE_OHOS_ARCH_ABI=arm64-v8a \
++  -DCMAKE_BUILD_TYPE=Debug \
++  -DCMAKE_SYSTEM_NAME=OHOS \
++  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
++  -DOHOS_SDK_NATIVE="$OHOS_SDK_HOME/native" \
++  -DHMOS_SDK_NATIVE="$DEVECO_SDK_HOME/default/hms/native" \
++  -DCMAKE_TOOLCHAIN_FILE="$DEVECO_SDK_HOME/default/hms/native/build/cmake/hmos.toolchain.cmake" \
++  -DCMAKE_MAKE_PROGRAM="$ninja_bin" \
++  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$out_dir" \
++  -DCMAKE_FIND_ROOT_PATH="$hvigor_dir" \
++  -DPACKAGE_FIND_FILE="$hvigor_dir/summary.cmake" \
++  --no-warn-unused-cli 2>&1 | tee "$evidence_dir/configure.log"
++
++"$ninja_bin" -C "$build_dir" -v kuikly 2>&1 | tee "$evidence_dir/link.log"
++
++test -f "$out_dir/libkuikly.so"
++grep -F 'KRScrollerView.cpp' "$evidence_dir/link.log"
++grep -F 'libkuikly.so' "$evidence_dir/link.log"
++sha256sum "$out_dir/libkuikly.so" | tee "$evidence_dir/libkuikly.so.sha256"
++"$readelf_bin" -h "$out_dir/libkuikly.so" | tee "$evidence_dir/readelf.txt"
++grep -F 'Class:                             ELF64' "$evidence_dir/readelf.txt"
++grep -E 'Machine:.*AArch64' "$evidence_dir/readelf.txt"
++cp "$build_dir/compile_commands.json" "$evidence_dir/"
++cp "$out_dir/libkuikly.so" "$evidence_dir/"
++
++{
++  echo "head=$(git -C "$repo_root" rev-parse HEAD)"
++  echo "tree=$(git -C "$repo_root" rev-parse HEAD^{tree})"
++  echo "parent=$(git -C "$repo_root" rev-parse HEAD^)"
++  "$cmake_bin" --version
++  "$ninja_bin" --version
++  "$clang_bin" --version
++} | tee "$evidence_dir/manifest.txt"

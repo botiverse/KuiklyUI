@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:14:05 +0000
+Subject: [PATCH] fix(compose): serialize rich text span font family and keep
+ styleless links
+
+applySpanStyle never forwarded SpanStyle.fontFamily, so per-span families
+(e.g. a mono or brand face inside a paragraph) were lost on the core span.
+A LinkAnnotation without styles also applied an empty SpanStyle, which
+cleared inherited font props on a whole-body click range; a style-less link
+now only contributes interaction metadata.
+
+Fork-Patch: compose-richtext-span-font-family
+Origin: 4ed2bb73 86558d5e
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../foundation/text/KuiklyTextExtension.kt    | 10 +++-
+ .../text/InlineBoxGroupLoweringTest.kt        | 50 +++++++++++++++++++
+ 2 files changed, 58 insertions(+), 2 deletions(-)
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+index 882745ca8e4dc90d3d1ecf334062e2dcb325ed37..13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+@@ -398,8 +398,13 @@ internal fun RichTextAttr.applyAnnotatedString(
+ 
+                 // Apply LinkAnnotation styles if found
+                 linkAnnotation?.let { range ->
+-                    val spanStyle = range.item.styles?.style ?: SpanStyle()
+-                    applySpanStyle(spanStyle, density)
++                    // A style-less link is interaction metadata only. Applying
++                    // an empty SpanStyle writes empty font props onto the core
++                    // span and erases inherited/custom families (for example
++                    // Space Grotesk on a whole-body click annotation).
++                    range.item.styles?.style?.let { spanStyle ->
++                        applySpanStyle(spanStyle, density)
++                    }
+ 
+                     // Add click event handler
+                     click { _ ->
+@@ -433,6 +438,7 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+     if (spanStyle.fontSize.isSpecified) {
+         fontSize(scaleToDensity(density, spanStyle.fontSize.value))
+     }
++    applyFontFamily(spanStyle.fontFamily)
+     applyFontWeight(spanStyle.fontWeight)
+     applyFontStyle(spanStyle.fontStyle)
+     applyShadow(spanStyle.shadow)
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..499d7f0437c94ea911c81ca5d63474f5e2be1320
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
+@@ -0,0 +1,50 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI.
++ */
++
++package com.tencent.kuikly.compose.foundation.text
++
++import com.tencent.kuikly.compose.ui.text.AnnotatedString
++import com.tencent.kuikly.compose.ui.text.LinkAnnotation
++import com.tencent.kuikly.compose.ui.text.SpanStyle
++import com.tencent.kuikly.compose.ui.text.font.FontFamily
++import com.tencent.kuikly.compose.ui.text.font.FontWeight
++import com.tencent.kuikly.compose.ui.text.withStyle
++import com.tencent.kuikly.compose.ui.unit.Density
++import com.tencent.kuikly.core.views.RichTextAttr
++import com.tencent.kuikly.core.views.TextConst
++import com.tencent.kuikly.core.views.TextSpan
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertIs
++
++class InlineBoxGroupLoweringTest {
++
++    @Test
++    fun stylelessClickablePreservesInheritedFontFamilyAndWeight() {
++        val builder = AnnotatedString.Builder()
++        builder.withStyle(SpanStyle(fontFamily = FontFamily.SansSerif)) {
++            append("body ")
++            withStyle(SpanStyle(fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold)) {
++                append("bold")
++            }
++        }
++        val text = builder.toAnnotatedString()
++        val clickable = LinkAnnotation.Clickable(tag = "body", linkInteractionListener = {})
++        val linked = AnnotatedString.Builder(text.length).apply {
++            append(text)
++            addLink(clickable, 0, text.length)
++        }.toAnnotatedString()
++
++        val attr = RichTextAttr()
++        attr.applyAnnotatedString(linked, density = Density(1f))
++
++        val spans = attr.getSpans().map { assertIs<TextSpan>(it) }
++        assertEquals("sans-serif", spans[0].spanPropsMap()[TextConst.FONT_FAMILY])
++        assertEquals("serif", spans[1].spanPropsMap()[TextConst.FONT_FAMILY])
++        assertEquals("700", spans[1].spanPropsMap()[TextConst.FONT_WEIGHT])
++    }
++}

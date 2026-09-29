@@ -1,0 +1,237 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:25:55 +0000
+Subject: [PATCH] feat(ohos): add a system edit-menu newline action to text
+ areas
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When the slockSystemNewlineAction prop is 1, KRTextAreaView registers an
+ArkUI text edit menu item ("换行") that inserts a newline at the current
+selection (UTF-16 aware) and moves the caret after it; the menu options
+are torn down on prop reset and OnDestroy. KRTextFieldView exposes its
+UTF-8/UTF-16 length helpers to subclasses for this.
+
+Fork-Patch: ohos-textarea-newline-edit-menu
+Origin: d2954d58
+Upstream-Status: not-upstreamable
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../components/input/KRTextAreaView.cpp       | 117 ++++++++++++++++++
+ .../expand/components/input/KRTextAreaView.h  |  10 ++
+ .../expand/components/input/KRTextFieldView.h |  21 ++--
+ 3 files changed, 138 insertions(+), 10 deletions(-)
+
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.cpp
+index 5dfaf1fc90b381453ffa3e497409d642817fa8af..4ea5874cb72d1f73d6bcd8ff172d15b38ade75e4 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.cpp
+@@ -17,8 +17,13 @@
+ #include "libohos_render/utils/KRConvertUtil.h"
+ #include "libohos_render/utils/KRViewUtil.h"
+ #include "libohos_render/expand/components/input/KRTextAreaView.h"
++#include <algorithm>
++#include <arkui/native_node.h>
++#include <arkui/native_type.h>
+ 
+ constexpr char kLineHeight[] = "lineHeight";
++constexpr char kSlockSystemNewlineAction[] = "slockSystemNewlineAction";
++constexpr int32_t kSystemNewlineMenuItemId = ARKUI_TEXT_MENU_ITEM_ID_APP_RESERVED_BEGIN;
+ 
+ void KRTextAreaView::DidInit() {
+     // 调用父类的 DidInit 来设置默认样式（透明背景、无圆角、无padding）
+@@ -35,6 +40,14 @@ bool KRTextAreaView::SetProp(const std::string &prop_key, const KRAnyValue &prop
+         kuikly::util::UpdateTextAreaNodeLineHeight(GetNode(), prop_value->toFloat());
+         return true;
+     }
++    if (kuikly::util::isEqual(prop_key, kSlockSystemNewlineAction)) {
++        if (prop_value->toInt() == 1) {
++            SetupSystemNewlineEditMenu();
++        } else {
++            TeardownSystemNewlineEditMenu();
++        }
++        return true;
++    }
+     return KRTextFieldView::SetProp(prop_key, prop_value, event_call_back);
+ }
+ 
+@@ -161,3 +174,107 @@ void KRTextAreaView::UpdateInputNodeContentText(const std::string &text) {
+     kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_AREA_TEXT, &item);
+ }
+ 
++void KRTextAreaView::OnDestroy() {
++    TeardownSystemNewlineEditMenu();
++    KRTextFieldView::OnDestroy();
++}
++
++void KRTextAreaView::SetupSystemNewlineEditMenu() {
++    if (system_newline_edit_menu_options_ != nullptr) {
++        return;
++    }
++    auto options = OH_ArkUI_TextEditMenuOptions_Create();
++    if (options == nullptr) {
++        return;
++    }
++    OH_ArkUI_TextEditMenuOptions_RegisterOnCreateMenuCallback(
++        options, this, KRTextAreaView::OnCreateSystemNewlineMenu);
++    OH_ArkUI_TextEditMenuOptions_RegisterOnMenuItemClickCallback(
++        options, this, KRTextAreaView::OnSystemNewlineMenuItemClick);
++    system_newline_edit_menu_options_ = options;
++
++    ArkUI_AttributeItem item = {};
++    item.object = options;
++    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_EDIT_MENU_OPTIONS, &item);
++}
++
++void KRTextAreaView::TeardownSystemNewlineEditMenu() {
++    if (system_newline_edit_menu_options_ == nullptr) {
++        return;
++    }
++    kuikly::util::GetNodeApi()->resetAttribute(GetNode(), NODE_TEXT_EDIT_MENU_OPTIONS);
++    OH_ArkUI_TextEditMenuOptions_Dispose(system_newline_edit_menu_options_);
++    system_newline_edit_menu_options_ = nullptr;
++}
++
++void KRTextAreaView::OnCreateSystemNewlineMenu(ArkUI_TextMenuItemArray *items, void *userData) {
++    if (items == nullptr) {
++        return;
++    }
++    auto item = OH_ArkUI_TextMenuItem_Create();
++    if (item == nullptr) {
++        return;
++    }
++    OH_ArkUI_TextMenuItem_SetId(item, kSystemNewlineMenuItemId);
++    OH_ArkUI_TextMenuItem_SetContent(item, "换行");
++
++    int32_t itemCount = 0;
++    if (OH_ArkUI_TextMenuItemArray_GetSize(items, &itemCount) != ARKUI_ERROR_CODE_NO_ERROR) {
++        itemCount = 0;
++    }
++    OH_ArkUI_TextMenuItemArray_Insert(items, item, itemCount);
++    OH_ArkUI_TextMenuItem_Dispose(item);
++}
++
++bool KRTextAreaView::OnSystemNewlineMenuItemClick(const ArkUI_TextMenuItem *item, int32_t start, int32_t end,
++                                                  void *userData) {
++    auto self = static_cast<KRTextAreaView *>(userData);
++    if (self == nullptr || item == nullptr) {
++        return false;
++    }
++    int32_t itemId = 0;
++    if (OH_ArkUI_TextMenuItem_GetId(item, &itemId) != ARKUI_ERROR_CODE_NO_ERROR ||
++        itemId != kSystemNewlineMenuItemId) {
++        return false;
++    }
++    self->InsertNewlineAtSelection(start, end);
++    return true;
++}
++
++void KRTextAreaView::InsertNewlineAtSelection(int32_t start, int32_t end) {
++    std::string text;
++    if (auto content = kuikly::util::GetNodeApi()->getAttribute(GetNode(), NODE_TEXT_AREA_TEXT)) {
++        if (content->string != nullptr) {
++            text = content->string;
++        }
++    }
++
++    int32_t rangeStart = start;
++    int32_t rangeEnd = end;
++    if (rangeStart < 0 || rangeEnd < 0) {
++        auto selection = GetInputNodeTextSelectionRange();
++        rangeStart = static_cast<int32_t>(selection.first);
++        rangeEnd = static_cast<int32_t>(selection.second);
++    }
++
++    int32_t u16Length = GetUTF16Length(text);
++    int32_t u16Start = std::min(rangeStart, rangeEnd);
++    int32_t u16End = std::max(rangeStart, rangeEnd);
++    u16Start = std::max(0, std::min(u16Start, u16Length));
++    u16End = std::max(u16Start, std::min(u16End, u16Length));
++
++    auto u8Start = static_cast<size_t>(GetUTF8ByteCount(text, 0, static_cast<size_t>(u16Start)));
++    auto u8End = u8Start + static_cast<size_t>(
++        GetUTF8ByteCount(text, u8Start, static_cast<size_t>(u16End - u16Start)));
++
++    std::string newText = text;
++    newText.replace(u8Start, u8End - u8Start, "\n");
++    UpdateInputNodeContentText(newText);
++
++    KRMainThread::RunOnMainThreadForNextLoop(
++        [weakSelf = weak_from_this(), caret = static_cast<uint32_t>(u16Start + 1)]() {
++            if (auto strongSelf = std::dynamic_pointer_cast<KRTextAreaView>(weakSelf.lock())) {
++                strongSelf->UpdateInputNodeSelectionStartPosition(caret);
++            }
++        });
++}
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.h
+index 40d460f38c63dd77990efb7aa16d4dba209d0f9e..c96cd2d221f2801debf8450d5885c7f0c2ebac27 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextAreaView.h
+@@ -18,10 +18,12 @@
+ 
+ #include "libohos_render/expand/components/input/KRTextFieldView.h"
+ #include "libohos_render/foundation/KRConfig.h"
++#include <arkui/native_type.h>
+ 
+ class KRTextAreaView : public KRTextFieldView {
+  public:
+     void DidInit() override ;
++    void OnDestroy() override;
+     
+     ArkUI_NodeHandle CreateNode() override {
+         return kuikly::util::GetNodeApi()->createNode(ARKUI_NODE_TEXT_AREA);
+@@ -66,6 +68,14 @@ class KRTextAreaView : public KRTextFieldView {
+     void UpdateInputNodePlaceholderFont(uint32_t font_size, ArkUI_FontWeight font_weight) override;
+     void UpdateInputNodeContentText(const std::string &text) override;
+ 
++    void SetupSystemNewlineEditMenu();
++    void TeardownSystemNewlineEditMenu();
++    void InsertNewlineAtSelection(int32_t start, int32_t end);
++    static void OnCreateSystemNewlineMenu(ArkUI_TextMenuItemArray *items, void *userData);
++    static bool OnSystemNewlineMenuItemClick(const ArkUI_TextMenuItem *item, int32_t start, int32_t end,
++                                             void *userData);
++
++    ArkUI_TextEditMenuOptions *system_newline_edit_menu_options_ = nullptr;
+ };
+ 
+ #endif  // CORE_RENDER_OHOS_KRTEXTAREAVIEW_H
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h
+index e9196c71ccbd939525980b8c6dee1e160325d1de..5f7d50102c58abc657304eb7bb4d393b6c76135a 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h
+@@ -105,6 +105,17 @@ class KRTextFieldView : public IKRRenderViewExport {
+     virtual void UpdateInputNodeContentText(const std::string &text);
+     virtual std::string GetInputNodeContentText();
+ 
++    /**
++     * 获取text从u8Start到u16Count的UTF-8字节数
++     * @param text 输入文本
++     * @param u8Start UTF-8起始字节索引
++     * @param u16Count UTF-16字符数量
++     * @return 对应的UTF-8字节数
++     */
++    int GetUTF8ByteCount(const std::string &text, size_t u8Start, size_t u16Count);
++
++    int GetUTF16Length(const std::string &text);
++
+  private:
+     struct TextInputStateSnapshot {
+         std::string text;
+@@ -317,16 +328,6 @@ class KRTextFieldView : public IKRRenderViewExport {
+      */
+     int GetVisualWidthOfCodePoint(char32_t codePoint);
+     
+-    /**
+-     * 获取text从u8Start到u16Count的UTF-8字节数
+-     * @param text 输入文本
+-     * @param u8Start UTF-8起始字节索引
+-     * @param u16Count UTF-16字符数量
+-     * @return 对应的UTF-8字节数
+-     */
+-    int GetUTF8ByteCount(const std::string &text, size_t u8Start, size_t u16Count);
+-    
+-    int GetUTF16Length(const std::string &text);
+ };
+ 
+ #endif  // CORE_RENDER_OHOS_KRTEXTFIELDVIEW_H

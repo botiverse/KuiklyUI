@@ -1,0 +1,524 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:06:37 +0000
+Subject: [PATCH] fix(a11y): hide invisible and flattened semantics subtrees
+
+Add AccessibilityRole.HIDDEN and emit it for nodes marked invisibleToUser
+and for every native node under a hidden layout ancestor, including
+descendants flattened across merge/clear boundaries. Role-less nodes
+without text now get NONE, and stale label/info is always overwritten.
+Android maps "hidden" to IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS,
+also when a testTag is set, and strips focus/actions from the node info.
+
+Fork-Patch: a11y-hide-invisible-semantics-subtrees
+Origin: 191d1b93 04fa0d11 c3194762 5ea4bb32
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../extension/KuiklySemantisHandler.kt        | 95 ++++++++++++++----
+ .../NativeSemanticsNodeRegistryTest.kt        | 97 ++++++++++++++++++
+ .../android/css/ktx/KRCSSViewExtension.kt     | 47 ++++++++-
+ .../css/ktx/KRAccessibilityImportanceTest.kt  | 99 +++++++++++++++++++
+ .../kuikly/core/base/attr/IStyleAttr.kt       |  4 +-
+ 5 files changed, 318 insertions(+), 24 deletions(-)
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/css/ktx/KRAccessibilityImportanceTest.kt
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt
+index d0bd8ce3d9ad8c6ffcbb52a51370cb93d29c9d5e..ed095d1f41a5ad70d2d7f767f781ebcc86f387f9 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt
+@@ -15,6 +15,7 @@
+ 
+ package com.tencent.kuikly.compose.extension
+ 
++import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
+ import com.tencent.kuikly.compose.ui.node.KNode
+ import com.tencent.kuikly.compose.ui.semantics.Role
+ import com.tencent.kuikly.compose.ui.semantics.SemanticsActions
+@@ -43,6 +44,7 @@ class KuiklySemantisHandler {
+      * 语义树变更回调，自动为节点设置无障碍文本和角色，并感知 stateDescription 变化。
+      * @param semanticsOwner 当前 Compose 语义树的 owner
+      */
++    @OptIn(ExperimentalComposeUiApi::class)
+     fun onSemanticsChange(semanticsOwner: SemanticsOwner) {
+         val allNodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = true)
+         val currentNodeIds = mutableSetOf<Int>()
+@@ -50,6 +52,7 @@ class KuiklySemantisHandler {
+         allNodes.forEach { node ->
+             val config = node.config
+             val role = config.getOrNull(SemanticsProperties.Role)
++            val isInvisibleToUser = config.getOrNull(SemanticsProperties.InvisibleToUser) != null
+             val stateDescription = config.getOrNull(SemanticsProperties.StateDescription)
+             val nodeId = node.id
+             currentNodeIds.add(nodeId)
+@@ -59,14 +62,11 @@ class KuiklySemantisHandler {
+             (node.layoutNode as? KNode<*>)?.run {
+                 currentNativeNodes[nodeId] = this
+                 val accessibility = buildAccessibilityText(node.config)
+-                if (accessibility != "") {
+-                    view.getViewAttr().accessibility(accessibility)
+-                    val kuiklyAccRole = convertComposeRoleToKuiklyRole(role)
+-                    view.getViewAttr().accessibilityRole(kuiklyAccRole)
+-                }
+-                if (isClickable || isLongClickable) {
+-                    view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
+-                }
++                view.getViewAttr().accessibility(accessibility)
++                view.getViewAttr().accessibilityRole(
++                    resolveNativeAccessibilityRole(isInvisibleToUser, accessibility.isNotEmpty(), role)
++                )
++                view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
+ 
+                 val testTag = config.getOrNull(SemanticsProperties.TestTag)
+                 if (testTag != null) {
+@@ -85,6 +85,26 @@ class KuiklySemantisHandler {
+                 lastStateDescriptionMap[nodeId] = stateDescription
+             }
+         }
++        val unmergedNodes = semanticsOwner.getAllSemanticsNodes(mergingEnabled = false)
++        val hiddenLayoutNodes = unmergedNodes
++            .filter { node ->
++                node.config.getOrNull(SemanticsProperties.InvisibleToUser) != null
++            }
++            .mapTo(mutableSetOf()) { node -> node.layoutNode }
++        // Semantic parent links can stop at merge/clear boundaries while the flattened native
++        // views remain descendants in the LayoutNode tree. Project hidden state through that
++        // stable ancestry so every native accessibility candidate is covered.
++        effectivelyHiddenNodes(
++            nodes = (allNodes + unmergedNodes).distinctBy(SemanticsNode::id),
++            firstAncestor = { node -> node.layoutNode },
++            isHidden = hiddenLayoutNodes::contains,
++            parentOf = { layoutNode -> layoutNode.parent }
++        ).forEach { node ->
++            (node.layoutNode as? KNode<*>)?.run {
++                currentNativeNodes[node.id] = this
++                hideNativeSemantics(this)
++            }
++        }
+         nativeSemanticsNodes.reconcile(currentNativeNodes).forEach(::clearNativeSemantics)
+         val removedIds = lastStateDescriptionMap.keys - currentNodeIds
+         for (removedId in removedIds) {
+@@ -168,18 +188,6 @@ class KuiklySemantisHandler {
+         return textBuilder.toString()
+     }
+ 
+-    private fun convertComposeRoleToKuiklyRole(role: Role?): AccessibilityRole {
+-        val kuiklyAccRole = when (role) {
+-            Role.Image -> AccessibilityRole.IMAGE
+-            Role.Checkbox -> AccessibilityRole.CHECKBOX
+-            Role.Switch -> AccessibilityRole.TEXT
+-            Role.Button -> AccessibilityRole.BUTTON
+-            Role.RadioButton -> AccessibilityRole.CHECKBOX
+-            else -> AccessibilityRole.TEXT
+-        }
+-        return kuiklyAccRole
+-    }
+-
+     private fun clearNativeSemantics(node: KNode<*>) {
+         node.view.getViewAttr().apply {
+             accessibility("")
+@@ -188,6 +196,10 @@ class KuiklySemantisHandler {
+         }
+     }
+ 
++    private fun hideNativeSemantics(node: KNode<*>) {
++        node.view.getViewAttr().accessibilityRole(AccessibilityRole.HIDDEN)
++    }
++
+     fun onNodeDetached(nodeId: Int) {
+         lastStateDescriptionMap.remove(nodeId)
+         nativeSemanticsNodes.remove(nodeId)
+@@ -199,6 +211,20 @@ class KuiklySemantisHandler {
+     }
+ }
+ 
++internal fun resolveNativeAccessibilityRole(
++    isInvisibleToUser: Boolean,
++    hasAccessibilityText: Boolean,
++    role: Role?
++): AccessibilityRole = when {
++    isInvisibleToUser -> AccessibilityRole.HIDDEN
++    !hasAccessibilityText && role == null -> AccessibilityRole.NONE
++    role == Role.Image -> AccessibilityRole.IMAGE
++    role == Role.Checkbox -> AccessibilityRole.CHECKBOX
++    role == Role.Button -> AccessibilityRole.BUTTON
++    role == Role.RadioButton -> AccessibilityRole.CHECKBOX
++    else -> AccessibilityRole.TEXT
++}
++
+ internal class NativeSemanticsNodeRegistry<T : Any> {
+     private val nodes = mutableMapOf<Int, T>()
+ 
+@@ -216,3 +242,32 @@ internal class NativeSemanticsNodeRegistry<T : Any> {
+ 
+     fun remove(id: Int): T? = nodes.remove(id)
+ }
++
++internal fun <T : Any> effectivelyHiddenNodes(
++    nodes: List<T>,
++    isHidden: (T) -> Boolean,
++    parentOf: (T) -> T?
++): Set<T> = effectivelyHiddenNodes(
++    nodes = nodes,
++    firstAncestor = { node -> node },
++    isHidden = isHidden,
++    parentOf = parentOf
++)
++
++internal fun <T : Any, A : Any> effectivelyHiddenNodes(
++    nodes: List<T>,
++    firstAncestor: (T) -> A,
++    isHidden: (A) -> Boolean,
++    parentOf: (A) -> A?
++): Set<T> = buildSet {
++    nodes.forEach { node ->
++        var ancestor: A? = firstAncestor(node)
++        while (ancestor != null) {
++            if (isHidden(ancestor)) {
++                add(node)
++                break
++            }
++            ancestor = parentOf(ancestor)
++        }
++    }
++}
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt
+index 6130d2c367d57b4e8c3d3cd35e54575d305c461f..0d66b5cd272e819317a5e6ae6afe0e3c26419274 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt
+@@ -15,12 +15,109 @@
+ 
+ package com.tencent.kuikly.compose.extension
+ 
++import com.tencent.kuikly.compose.ui.semantics.Role
++import com.tencent.kuikly.core.base.attr.AccessibilityRole
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
+ import kotlin.test.assertSame
+ import kotlin.test.assertTrue
+ 
+ class NativeSemanticsNodeRegistryTest {
++    private data class ProjectionNode(
++        val name: String,
++        val hidden: Boolean = false,
++        val parent: ProjectionNode? = null
++    )
++
++    private data class LayoutProjectionNode(
++        val hidden: Boolean = false,
++        val parent: LayoutProjectionNode? = null
++    )
++
++    private data class SemanticProjectionNode(
++        val name: String,
++        val layoutNode: LayoutProjectionNode,
++        val semanticParent: SemanticProjectionNode? = null
++    )
++
++    @Test
++    fun invisibleNodeExcludesItsNativeSubtree() {
++        assertEquals(
++            AccessibilityRole.HIDDEN,
++            resolveNativeAccessibilityRole(isInvisibleToUser = true, hasAccessibilityText = false, role = null)
++        )
++    }
++
++    @Test
++    fun visibleEmptyContainerRestoresDescendantTraversal() {
++        assertEquals(
++            AccessibilityRole.NONE,
++            resolveNativeAccessibilityRole(isInvisibleToUser = false, hasAccessibilityText = false, role = null)
++        )
++    }
++
++    @Test
++    fun visibleButtonKeepsItsNativeRole() {
++        assertEquals(
++            AccessibilityRole.BUTTON,
++            resolveNativeAccessibilityRole(isInvisibleToUser = false, hasAccessibilityText = true, role = Role.Button)
++        )
++    }
++
++    @Test
++    fun hiddenAncestorProjectsToEveryFlattenedNativeDescendant() {
++        val hiddenRoot = ProjectionNode(name = "content", hidden = true)
++        val navigation = ProjectionNode(name = "navigation", parent = hiddenRoot)
++        val search = ProjectionNode(name = "search", parent = navigation)
++        val drawer = ProjectionNode(name = "drawer")
++
++        val hiddenNodes = effectivelyHiddenNodes(
++            nodes = listOf(hiddenRoot, navigation, search, drawer),
++            isHidden = ProjectionNode::hidden,
++            parentOf = ProjectionNode::parent
++        )
++
++        assertEquals(setOf(hiddenRoot, navigation, search), hiddenNodes)
++    }
++
++    @Test
++    fun clearingHiddenAncestorRestoresTheProjectedSubtree() {
++        val visibleRoot = ProjectionNode(name = "content")
++        val search = ProjectionNode(name = "search", parent = visibleRoot)
++
++        val hiddenNodes = effectivelyHiddenNodes(
++            nodes = listOf(visibleRoot, search),
++            isHidden = ProjectionNode::hidden,
++            parentOf = ProjectionNode::parent
++        )
++
++        assertTrue(hiddenNodes.isEmpty())
++    }
++
++    @Test
++    fun layoutAncestryProjectsHiddenAcrossDisconnectedSemanticBranches() {
++        val hiddenLayoutRoot = LayoutProjectionNode(hidden = true)
++        val contentLayout = LayoutProjectionNode(parent = hiddenLayoutRoot)
++        val searchLayout = LayoutProjectionNode(parent = contentLayout)
++        val drawerLayout = LayoutProjectionNode()
++        val hiddenRoot = SemanticProjectionNode(name = "content", layoutNode = hiddenLayoutRoot)
++        val search = SemanticProjectionNode(
++            name = "search",
++            layoutNode = searchLayout,
++            semanticParent = null
++        )
++        val drawer = SemanticProjectionNode(name = "drawer", layoutNode = drawerLayout)
++
++        val hiddenNodes = effectivelyHiddenNodes(
++            nodes = listOf(hiddenRoot, search, drawer),
++            firstAncestor = SemanticProjectionNode::layoutNode,
++            isHidden = LayoutProjectionNode::hidden,
++            parentOf = LayoutProjectionNode::parent
++        )
++
++        assertEquals(setOf(hiddenRoot, search), hiddenNodes)
++    }
++
+     @Test
+     fun reconcileReturnsOnlyNodesRemovedFromCurrentGeneration() {
+         val registry = NativeSemanticsNodeRegistry<Any>()
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
+index 2cab09f90e1c984702685a77f8ff2f2f8b651cb7..15bb15b47edbc8a09928aa42a1d5077a9894856b 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
+@@ -848,6 +848,7 @@ fun View.clearViewData() {
+ fun String?.toJSONObjectSafely(): JSONObject = JSONObject(this ?: "{}")
+ 
+ private const val ROLE_NONE = "none"
++private const val ROLE_HIDDEN = "hidden"
+ private fun View.setAccessibilityRole(propValue: Any) {
+     val value = when (propValue as String) {
+         "button" -> Button::class.java.name
+@@ -856,6 +857,7 @@ private fun View.setAccessibilityRole(propValue: Any) {
+         "image" -> ImageView::class.java.name
+         "checkbox" -> CheckBox::class.java.name
+         "none" -> ROLE_NONE
++        "hidden" -> ROLE_HIDDEN
+         else -> ""
+     }
+     putViewData(KRCssConst.ACCESSIBILITY_ROLE, value)
+@@ -866,24 +868,38 @@ private fun View.setAccessibilityRole(propValue: Any) {
+ private fun View.setTestTag(propValue: Any) {
+     val tag = propValue as String
+     putViewData(KRCssConst.TEST_TAG, tag)
+-    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
++    importantForAccessibility = resolveTestTagAccessibilityImportance(
++        getViewData(KRCssConst.ACCESSIBILITY_ROLE)
++    )
+     initAccessibilityDelegate()
+ }
+ 
++internal fun resolveTestTagAccessibilityImportance(role: String?): Int =
++    if (role == ROLE_HIDDEN) {
++        View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
++    } else {
++        View.IMPORTANT_FOR_ACCESSIBILITY_YES
++    }
++
+ private fun View.setAccessibilityInfo(propValue: Any) {
+     putViewData(KRCssConst.ACCESSIBILITY_INFO, propValue)
+     initAccessibilityDelegate()
+ }
+ 
+ private fun View.setAccessibilityImportance(description: String, role: String) {
+-    importantForAccessibility = if (role == ROLE_NONE) {
++    importantForAccessibility = resolveAccessibilityImportance(description, role)
++}
++
++internal fun resolveAccessibilityImportance(description: String, role: String): Int =
++    if (role == ROLE_HIDDEN) {
++        View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
++    } else if (role == ROLE_NONE) {
+         View.IMPORTANT_FOR_ACCESSIBILITY_NO
+     } else if (description.isEmpty()) {
+         View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+     } else {
+         View.IMPORTANT_FOR_ACCESSIBILITY_YES
+     }
+-}
+ 
+ private fun View.resetAccessibilityImportance() {
+     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+@@ -910,6 +926,10 @@ private fun View.initAccessibilityDelegate() {
+             if (name != null) {
+                 info.className = name
+             }
++            if (name == ROLE_HIDDEN) {
++                configureHiddenAccessibilityNodeInfo(info)
++                return
++            }
+ 
+             getViewData<String>(KRCssConst.ACCESSIBILITY_INFO)?.apply {
+                 val flags = (this as String).split(" ")
+@@ -951,6 +971,27 @@ private fun View.initAccessibilityDelegate() {
+     putViewData(KRCssConst.HAD_INIT_ACCESSIBILITY_DELEGATE, true)
+ }
+ 
++internal fun configureHiddenAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
++    info.isVisibleToUser = false
++    info.isFocusable = false
++    info.isFocused = false
++    info.isAccessibilityFocused = false
++    info.isClickable = false
++    info.isLongClickable = false
++    info.isEditable = false
++    info.isCheckable = false
++    info.isChecked = false
++    info.isSelected = false
++    info.text = null
++    info.contentDescription = null
++    info.removeAction(AccessibilityNodeInfo.ACTION_FOCUS)
++    info.removeAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
++    info.removeAction(AccessibilityNodeInfo.ACTION_CLICK)
++    info.removeAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
++    info.removeAction(AccessibilityNodeInfo.ACTION_SET_SELECTION)
++    info.removeAction(AccessibilityNodeInfo.ACTION_SET_TEXT)
++}
++
+ internal fun View.hasDebugName(): Boolean {
+     return getViewData<String>(KRCssConst.DEBUG_NAME) != null
+ }
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/css/ktx/KRAccessibilityImportanceTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/css/ktx/KRAccessibilityImportanceTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..6fef3bd8c74b2e53fa5a3aef99a4ce7ee5448ad8
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/css/ktx/KRAccessibilityImportanceTest.kt
+@@ -0,0 +1,99 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.css.ktx
++
++import android.view.View
++import android.view.accessibility.AccessibilityNodeInfo
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.annotation.Config
++import org.robolectric.RobolectricTestRunner
++
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [28])
++class KRAccessibilityImportanceTest {
++    @Test
++    fun hiddenRoleExcludesTheEntireNativeSubtree() {
++        assertEquals(
++            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS,
++            resolveAccessibilityImportance(description = "", role = "hidden")
++        )
++    }
++
++    @Test
++    fun testTagDoesNotExposeAHiddenNativeSubtree() {
++        assertEquals(
++            View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS,
++            resolveTestTagAccessibilityImportance(role = "hidden")
++        )
++    }
++
++    @Test
++    fun testTagRestoresAContainerAfterHiddenRoleIsCleared() {
++        assertEquals(
++            View.IMPORTANT_FOR_ACCESSIBILITY_YES,
++            resolveTestTagAccessibilityImportance(role = "none")
++        )
++    }
++
++    @Test
++    fun noneRoleRestoresDescendantTraversal() {
++        assertEquals(
++            View.IMPORTANT_FOR_ACCESSIBILITY_NO,
++            resolveAccessibilityImportance(description = "", role = "none")
++        )
++    }
++
++    @Test
++    fun describedRoleRemainsAccessible() {
++        assertEquals(
++            View.IMPORTANT_FOR_ACCESSIBILITY_YES,
++            resolveAccessibilityImportance(description = "Search", role = TextViewRole)
++        )
++    }
++
++    @Test
++    fun hiddenNodeInfoExposesNoFocusableOrActionableSemantics() {
++        val info = AccessibilityNodeInfo.obtain().apply {
++            isVisibleToUser = true
++            isFocusable = true
++            isClickable = true
++            isLongClickable = true
++            text = "Search"
++            contentDescription = "Search"
++            addAction(AccessibilityNodeInfo.ACTION_CLICK)
++            addAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
++        }
++
++        configureHiddenAccessibilityNodeInfo(info)
++
++        assertFalse(info.isVisibleToUser)
++        assertFalse(info.isFocusable)
++        assertFalse(info.isClickable)
++        assertFalse(info.isLongClickable)
++        assertNull(info.text)
++        assertNull(info.contentDescription)
++        assertEquals(0, info.actions and AccessibilityNodeInfo.ACTION_CLICK)
++        assertEquals(0, info.actions and AccessibilityNodeInfo.ACTION_LONG_CLICK)
++    }
++
++    private companion object {
++        const val TextViewRole = "android.widget.TextView"
++    }
++}
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/attr/IStyleAttr.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/attr/IStyleAttr.kt
+index a4aa4cdf9bb59a3373cdbc7ad9f69d0c32eda595..7052a795385e4b24c0fa1ee008d9fe243f6e7868 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/attr/IStyleAttr.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/attr/IStyleAttr.kt
+@@ -201,6 +201,8 @@ interface IStyleAttr {
+  */
+ enum class AccessibilityRole(val roleName: String) {
+     NONE("none"),
++    /** Excludes this view and its descendants from the accessibility tree. */
++    HIDDEN("hidden"),
+     /** 表示视图是一个按钮 */
+     BUTTON("button"),
+     /** 表示视图是一个搜索框 */
+@@ -213,4 +215,4 @@ enum class AccessibilityRole(val roleName: String) {
+     CHECKBOX("checkbox")
+ }
+ 
+-typealias ClipPathBuilder = PathApi.(width: Float, height: Float) -> Unit
+\ No newline at end of file
++typealias ClipPathBuilder = PathApi.(width: Float, height: Float) -> Unit

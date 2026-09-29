@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:22:26 +0000
+Subject: [PATCH] build(ohos): use kotlinx-coroutines-core 1.8.0-KBA-002
+
+Keeps the OHOS compose dependency closure identical to the one shipped
+in 2.24.0-raft.7, whose release predecessor receipt covers KBA-002.
+
+Fork-Patch: build-ohos-coroutines-kba-002
+Origin: 3509beef
+Upstream-Status: not-upstreamable
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ compose/build.2.0.ohos.gradle.kts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/compose/build.2.0.ohos.gradle.kts b/compose/build.2.0.ohos.gradle.kts
+index c0ec539bee5dab2cf50b228cf36602728384743a..ad8b16e28f5e893683142c536db9e96644149ff7 100644
+--- a/compose/build.2.0.ohos.gradle.kts
++++ b/compose/build.2.0.ohos.gradle.kts
+@@ -61,7 +61,7 @@ kotlin {
+             api("com.tencent.kuikly-open.compose.runtime:runtime-saveable:1.7.3-kuikly2")
+             api("com.tencent.kuikly-open.compose.annotation-internal:annotation:1.7.3-kuikly2")
+             api("com.tencent.kuikly-open.compose.collection-internal:collection:1.7.3-kuikly2")
+-            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0-KBA-001")
++            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0-KBA-002")
+             api("org.jetbrains.kotlinx:atomicfu:0.23.2-KBA-001")
+         }
+ 

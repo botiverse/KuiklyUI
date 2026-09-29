@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:15:19 +0000
+Subject: [PATCH] fix(android): center rich text line height on font
+ ascent/descent
+
+HRLineHeightSpan split the extra leading around top/bottom, which include
+font padding even with includePad=false, so custom fonts sat below the CSS
+baseline. Distribute the extra space around ascent/descent (CSS half-leading)
+and derive top/bottom from them. The placement stays purely metrics-based so
+editable text does not jump while typing.
+
+Fork-Patch: android-line-height-css-centering
+Origin: 0989f41e 7b9503dd b9920143 7ea6b09c 03ef5cf1 fc57a0e8
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../component/text/KRRichTextBuilder.kt       | 18 +++--
+ .../text/HRLineHeightSpanGlyphTest.kt         | 60 +++++++++++++++
+ .../component/text/HRLineHeightSpanTest.java  | 75 +++++++++++++++++++
+ 3 files changed, 147 insertions(+), 6 deletions(-)
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanGlyphTest.kt
+ create mode 100644 core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanTest.java
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+index 8f447b0b5fb70733708e161a847eee225544a8f8..2feaa649b3c8f9d3b3f1001557ac49aa360a1ec3 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+@@ -54,7 +54,6 @@ import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
+ import com.tencent.kuikly.core.views.TextConst
+ import org.json.JSONObject
+ import kotlin.math.ceil
+-import kotlin.math.floor
+ import kotlin.math.max
+ 
+ internal const val INLINE_BOX_LAYOUT_JOINER = '\u2060'
+@@ -879,6 +878,12 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
+ 
+ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
+ 
++    // CSS line-height distributes extra leading around the font's ascent and
++    // descent. Android top/bottom include font-padding extents even when
++    // StaticLayout.setIncludePad(false), which pushes custom fonts such as
++    // Space Grotesk below the equivalent browser baseline. Keep this strictly
++    // metrics-based: glyph-bounds centering makes placement depend on the text
++    // itself and causes editable content to jump while typing.
+     override fun chooseHeight(
+         text: CharSequence?,
+         start: Int,
+@@ -887,11 +892,12 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
+         lineHeight: Int,
+         fm: Paint.FontMetricsInt
+     ) {
+-        val additional: Int = height - (-fm.top + fm.bottom)
+-        fm.top -= ceil((additional / 2.0f).toDouble()).toInt()
+-        fm.bottom += floor((additional / 2.0f).toDouble()).toInt()
+-        fm.ascent = fm.top
+-        fm.descent = fm.bottom
++        val additional: Int = height - (fm.descent - fm.ascent)
++        val topExtra = additional / 2
++        fm.ascent -= topExtra
++        fm.descent += additional - topExtra
++        fm.top = fm.ascent
++        fm.bottom = fm.descent
+     }
+ }
+ 
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanGlyphTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanGlyphTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..74f867befe3c4e7fa31c1e22bef4dbf12c0c9fa4
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanGlyphTest.kt
+@@ -0,0 +1,60 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component.text
++
++import android.graphics.Paint
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class HRLineHeightSpanGlyphTest {
++
++    // Line placement must be content-independent (Slock task #355): the same
++    // font metrics must resolve to the same line box no matter which string
++    // is measured, so typing an ascender glyph ("as" -> "asf") can never
++    // re-center the line. Ink-bounds centering (b992014) is reverted.
++    @Test
++    fun sameMetricsResolveToSameLineBoxRegardlessOfText() {
++        val span = HRLineHeightSpan(20)
++        fun metrics() = Paint.FontMetricsInt().apply {
++            top = -12; ascent = -12; descent = 4; bottom = 4
++        }
++
++        val short = metrics()
++        val tall = metrics()
++        span.chooseHeight("as", 0, 2, 0, 20, short)
++        span.chooseHeight("asf", 0, 3, 0, 20, tall)
++
++        assertEquals(short.top, tall.top)
++        assertEquals(short.ascent, tall.ascent)
++        assertEquals(short.descent, tall.descent)
++        assertEquals(short.bottom, tall.bottom)
++        assertEquals(20, short.bottom - short.top)
++    }
++
++    @Test
++    fun exactLineHeightIsKeptForOddHeights() {
++        val span = HRLineHeightSpan(17)
++        val metrics = Paint.FontMetricsInt().apply {
++            top = -10; ascent = -10; descent = 3; bottom = 3
++        }
++
++        span.chooseHeight("x", 0, 1, 0, 17, metrics)
++
++        assertEquals(17, metrics.bottom - metrics.top)
++        assertEquals(metrics.top, metrics.ascent)
++        assertEquals(metrics.bottom, metrics.descent)
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanTest.java b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ddca250d67f08b6cbf94916428c0d7ce170319b
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/HRLineHeightSpanTest.java
+@@ -0,0 +1,75 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component.text;
++
++import static org.junit.Assert.assertEquals;
++
++import android.graphics.Paint;
++import org.junit.Test;
++
++public class HRLineHeightSpanTest {
++
++    @Test
++    public void oddLineHeightLeadingDoesNotPushBaselineDown() {
++        Paint.FontMetricsInt metrics = new Paint.FontMetricsInt();
++        metrics.top = -13;
++        metrics.ascent = -13;
++        metrics.descent = 4;
++        metrics.bottom = 4;
++
++        new HRLineHeightSpan(22).chooseHeight("", 0, 0, 0, 0, metrics);
++
++        assertEquals(-15, metrics.top);
++        assertEquals(-15, metrics.ascent);
++        assertEquals(7, metrics.bottom);
++        assertEquals(7, metrics.descent);
++        assertEquals(22, metrics.bottom - metrics.top);
++    }
++
++    @Test
++    public void lineHeightDistributesFromCssFontMetricsWhenFontPaddingDiffers() {
++        Paint.FontMetricsInt metrics = new Paint.FontMetricsInt();
++        metrics.top = -18;
++        metrics.ascent = -13;
++        metrics.descent = 4;
++        metrics.bottom = 6;
++
++        new HRLineHeightSpan(22).chooseHeight("", 0, 0, 0, 0, metrics);
++
++        assertEquals(-15, metrics.top);
++        assertEquals(-15, metrics.ascent);
++        assertEquals(7, metrics.bottom);
++        assertEquals(7, metrics.descent);
++        assertEquals(22, metrics.bottom - metrics.top);
++    }
++
++    @Test
++    public void compressedLineHeightStillIgnoresFontPaddingExtents() {
++        Paint.FontMetricsInt metrics = new Paint.FontMetricsInt();
++        metrics.top = -18;
++        metrics.ascent = -13;
++        metrics.descent = 4;
++        metrics.bottom = 6;
++
++        new HRLineHeightSpan(14).chooseHeight("", 0, 0, 0, 0, metrics);
++
++        assertEquals(-12, metrics.top);
++        assertEquals(-12, metrics.ascent);
++        assertEquals(2, metrics.bottom);
++        assertEquals(2, metrics.descent);
++        assertEquals(14, metrics.bottom - metrics.top);
++    }
++}

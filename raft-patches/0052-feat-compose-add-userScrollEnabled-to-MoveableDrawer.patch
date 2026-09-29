@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:17:54 +0000
+Subject: [PATCH] feat(compose): add userScrollEnabled to MoveableDrawer
+
+Let callers disable the drawer's pager gestures and pager scroll
+semantics (e.g. while a nested native pager owns the gesture) without
+affecting programmatic open()/close(). The flag is forwarded to
+DrawerHorizontalPager through a small interaction-policy helper.
+
+Fork-Patch: compose-moveable-drawer-user-scroll
+Origin: fdf43ad6
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+---
+ .../foundation/drawer/MoveableDrawer.kt       | 16 ++++++++++++++
+ .../MoveableDrawerInteractionPolicyTest.kt    | 21 +++++++++++++++++++
+ 2 files changed, 37 insertions(+)
+ create mode 100644 compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawerInteractionPolicyTest.kt
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt
+index 5d44b8a2b6c3d9f255e0a7c1cd69860e5ca68c08..9db4188040562045f4980b32c321f8a41ea4d199 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawer.kt
+@@ -176,6 +176,8 @@ fun rememberMoveableDrawerState(
+  * @param state The [MoveableDrawerState] to control this drawer. Create with [rememberMoveableDrawerState].
+  * @param modifier Modifier for the drawer container.
+  * @param scrimColor Color of the scrim overlay shown when the drawer is open.
++ * @param userScrollEnabled Whether pager gestures and pager scroll semantics are enabled. This
++ * does not affect programmatic [MoveableDrawerState.open] or [MoveableDrawerState.close] calls.
+  * @param drawerContent Content of the drawer panel.
+  * @param content Main content area.
+  */
+@@ -184,6 +186,7 @@ fun MoveableDrawer(
+     state: MoveableDrawerState,
+     modifier: Modifier = Modifier,
+     scrimColor: Color = Color.Black.copy(alpha = 0.3f),
++    userScrollEnabled: Boolean = true,
+     drawerContent: @Composable () -> Unit,
+     content: @Composable () -> Unit
+ ) {
+@@ -194,12 +197,14 @@ fun MoveableDrawer(
+     val drawerProgress by remember {
+         derivedStateOf { state.progress }
+     }
++    val interactionPolicy = moveableDrawerInteractionPolicy(userScrollEnabled)
+ 
+     Box(modifier.fillMaxSize()) {
+         DrawerHorizontalPager(
+             state = state.internalState,
+             modifier = Modifier.fillMaxSize(),
+             beyondViewportPageCount = 1,
++            userScrollEnabled = interactionPolicy.pagerUserScrollEnabled,
+         ) { page ->
+             when (page) {
+                 0 -> {
+@@ -254,3 +259,14 @@ fun MoveableDrawer(
+         }
+     }
+ }
++
++internal data class MoveableDrawerInteractionPolicy(
++    val pagerUserScrollEnabled: Boolean
++)
++
++internal fun moveableDrawerInteractionPolicy(
++    userScrollEnabled: Boolean
++): MoveableDrawerInteractionPolicy =
++    MoveableDrawerInteractionPolicy(
++        pagerUserScrollEnabled = userScrollEnabled
++    )
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawerInteractionPolicyTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawerInteractionPolicyTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..6be7aed1a080b6cbd3fe06df17505b212fc73ba3
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/drawer/MoveableDrawerInteractionPolicyTest.kt
+@@ -0,0 +1,21 @@
++package com.tencent.kuikly.compose.foundation.drawer
++
++import kotlin.test.Test
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class MoveableDrawerInteractionPolicyTest {
++    @Test
++    fun defaultPolicyPreservesExistingPagerInteraction() {
++        val policy = moveableDrawerInteractionPolicy(userScrollEnabled = true)
++
++        assertTrue(policy.pagerUserScrollEnabled)
++    }
++
++    @Test
++    fun disabledPolicyRemovesOnlyUserGestureAndScrollSemantics() {
++        val policy = moveableDrawerInteractionPolicy(userScrollEnabled = false)
++
++        assertFalse(policy.pagerUserScrollEnabled)
++    }
++}
