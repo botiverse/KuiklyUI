@@ -365,7 +365,8 @@ internal abstract class NodeCoordinator(
 //        explicitLayer: GraphicsLayer?
     ) {
         updateLayerBlock(layerBlock)
-        if (this.position != position) {
+        val positionChanged = this.position != position
+        if (positionChanged) {
             this.position = position
             layoutNode.layoutDelegate.measurePassDelegate
                 .notifyChildrenUsingCoordinatesWhilePlacing()
@@ -378,7 +379,7 @@ internal abstract class NodeCoordinator(
             invalidateAlignmentLinesFromPositionChange()
             layoutNode.owner?.onLayoutChange(layoutNode)
         }
-        if (this == layoutNode.innerCoordinator) {
+        if (this == layoutNode.innerCoordinator || positionChanged) {
             layoutNode.updateKuiklyViewFrame(this)
         }
 
