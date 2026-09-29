@@ -17,10 +17,10 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
-index 8e4a2150ca5e093e184d07b23318e7a7be832f45..666bef972f5e96ccf38d3ecc2d5ee6babc0b799f 100644
+index 94b466a4174d242a5ca093879b4b85a4a15e0d26..77578fc650bd5059ce1324e9bfa064e72c52ad44 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
-@@ -57,6 +57,51 @@ internal class ScrollViewBindingGate<T : Any> {
+@@ -58,6 +58,51 @@ internal class ScrollViewBindingGate<T : Any> {
      }
  }
  
@@ -72,7 +72,7 @@ index 8e4a2150ca5e093e184d07b23318e7a7be832f45..666bef972f5e96ccf38d3ecc2d5ee6ba
  /**
   * Scroll information management class, responsible for handling scroll-related state and calculations
   */
-@@ -200,6 +245,12 @@ class KuiklyScrollInfo {
+@@ -227,6 +272,12 @@ class KuiklyScrollInfo {
       */
      internal var appleScrollViewOffsetJob: Job? = null
  
@@ -85,7 +85,7 @@ index 8e4a2150ca5e093e184d07b23318e7a7be832f45..666bef972f5e96ccf38d3ecc2d5ee6ba
      /**
       * Coroutine scope
       */
-@@ -296,8 +347,7 @@ class KuiklyScrollInfo {
+@@ -323,8 +374,7 @@ class KuiklyScrollInfo {
       */
      fun resetForNewScrollView() {
          // Cancel and clear any pending tasks
