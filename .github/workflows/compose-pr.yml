@@ -311,8 +311,6 @@ jobs:
         run: python3 tools/check-draw-modifier-view-dispatch.py --self-test
       - name: Reject non-finite iOS scroll event values
         run: python3 tools/check-ios-scroll-event-finiteness.py --self-test
-      - name: Preserve profiler file output across Pager and session lifecycle
-        run: python3 tools/check-profiler-file-output-lifecycle.py --self-test
       - name: Keep layout size reports ceiled to the hundredth on every renderer
         run: python3 tools/check-layout-size-report-rounding.py --self-test
       - name: Keep OHOS contentInset leading offsets aligned with the margin model

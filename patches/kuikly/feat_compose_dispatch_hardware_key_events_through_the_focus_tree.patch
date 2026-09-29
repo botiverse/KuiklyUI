@@ -16,7 +16,7 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt
-index 6eca9296cf770a18a374745d85d5d1848934e561..a4b0eda9ff8f448ec4c7b22b21974d2ae164f820 100644
+index da7b3686dd9ee4ef657f83bde0344a39a796a04e..1136d033b7e4ab5408f652b3b2c0f8ffcda8ee48 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ComposeContainer.kt
 @@ -38,6 +38,9 @@ import com.tencent.kuikly.core.module.FileModule
@@ -51,7 +51,7 @@ index 6eca9296cf770a18a374745d85d5d1848934e561..a4b0eda9ff8f448ec4c7b22b21974d2a
      }
  
      override var ignoreLayout = true
-@@ -300,6 +318,15 @@ open class ComposeContainer :
+@@ -285,6 +303,15 @@ open class ComposeContainer :
          return mediator
      }
  
@@ -67,7 +67,7 @@ index 6eca9296cf770a18a374745d85d5d1848934e561..a4b0eda9ff8f448ec4c7b22b21974d2a
      override fun onReceivePagerEvent(pagerEvent: String, eventData: JSONObject) {
          super.onReceivePagerEvent(pagerEvent, eventData)
          if (pagerEvent == PAGER_EVENT_ROOT_VIEW_SIZE_CHANGED) {
-@@ -322,9 +349,35 @@ open class ComposeContainer :
+@@ -307,9 +334,35 @@ open class ComposeContainer :
              val fontWeightScale = eventData.optDouble("fontWeightScale", 1.0)
              val fontSizeScale = eventData.optDouble("fontSizeScale", 1.0)
              configuration?.onFontConfigChange(fontSizeScale, fontWeightScale)
