@@ -157,32 +157,7 @@ private inline fun ComposeUiNode.withTextAreaView(action: AutoHeightTextAreaView
 
 const val CHANGE_LINE_SPACE = 3
 
-// --- 编辑态统一转换函数 ---
-// 将 TextInputState ↔ TextFieldValue 的映射收口，配合 handleNativeEditingStateChange 使用。
-// 每个转换内部都经过 coerceToTextBounds() 确保 selection/composition 始终合法。
-
-private fun TextInputState.toCompositionRangeOrNull(): TextRange? {
-    // 调用方（handleNativeEditingStateChange / textDidChange 恢复路径）传入的已是 coerceToTextBounds 后的状态，
-    // 此处不再二次归一化，避免单事件在热路径上重复裁剪。
-    return if (
-        compositionStart != TextInputState.NO_COMPOSITION &&
-        compositionEnd != TextInputState.NO_COMPOSITION
-    ) {
-        TextRange(compositionStart, compositionEnd)
-    } else {
-        null
-    }
-}
-
-private fun TextInputState.toTextFieldValue(): TextFieldValue {
-    val normalizedState = coerceToTextBounds()
-    return TextFieldValue(
-        text = normalizedState.text,
-        selection = TextRange(normalizedState.selectionStart, normalizedState.selectionEnd),
-        composition = normalizedState.toCompositionRangeOrNull()
-    )
-}
-
+// 下发路径统一转换：TextFieldValue → TextInputState，经 coerceToTextBounds() 确保 selection/composition 合法。
 private fun TextFieldValue.toTextInputState(): TextInputState {
     return TextInputState(
         text = text,
@@ -191,11 +166,6 @@ private fun TextFieldValue.toTextInputState(): TextInputState {
         compositionStart = composition?.start ?: TextInputState.NO_COMPOSITION,
         compositionEnd = composition?.end ?: TextInputState.NO_COMPOSITION
     ).coerceToTextBounds()
-}
-
-private fun TextInputState.hasActiveComposition(): Boolean {
-    return compositionStart != TextInputState.NO_COMPOSITION &&
-            compositionEnd != TextInputState.NO_COMPOSITION
 }
 
 @Composable
@@ -251,12 +221,10 @@ internal fun CoreTextField(
     var currentLimitExceeded by remember { mutableStateOf(false) }
     // 一次性标记：收到超限事件后，等待紧随其后的真实长度回调再统一通知业务，避免先吐旧长度
     var pendingLimitChangeNotification by remember { mutableStateOf(false) }
-    // 一次性标记：仅在当前轮原生 textInputStateChange 已经覆盖同一文本变更时，跳过紧随其后的 textDidChange fallback
-    var pendingTextInputStateText by remember { mutableStateOf<String?>(null) }
     // 记录上一次原生层真实生效的编辑态，避免仅因 text 相同而误判 selection/composition 同步
     var lastSyncedTextInputState by remember { mutableStateOf<TextInputState?>(null) }
-    // 标记是否正在处理原生事件，避免 set(value) 反向同步导致选择状态被重置
-    var isProcessingNativeEvent by remember { mutableStateOf(false) }
+    val textInputCallbackArbiter = remember { TextInputCallbackArbiter() }
+    val controlledStateArbiter = remember { TextInputControlledStateArbiter() }
 
     val measurePolicy = remember(value) { object : MeasurePolicy {
         private val placementBlock: Placeable.PlacementScope.() -> Unit = {}
@@ -388,26 +356,6 @@ internal fun CoreTextField(
         if (shouldNotify) {
             onLimitChange?.invoke(safeLength, limitExceeded)
         }
-    }
-
-    /**
-     * 原生编辑事件统一处理入口：textInputStateChange / selectionChange 均走此方法。
-     * 归一化输入 → 标记处理中 → 存档 lastSyncedTextInputState → 转到 TextFieldValue 回调业务。
-     * textDidChange fallback 也依赖 lastSyncedTextInputState 恢复丢失的 selection/composition。
-     */
-    fun handleNativeEditingStateChange(
-        source: String,
-        nativeState: TextInputState,
-        shouldMarkPendingText: Boolean
-    ) {
-        val normalizedState = nativeState.coerceToTextBounds()
-        isProcessingNativeEvent = true
-        if (shouldMarkPendingText) {
-            pendingTextInputStateText = normalizedState.text
-        }
-        lastSyncedTextInputState = normalizedState
-        autoHeightTextAreaView.getViewAttr().updatePropCache(TextConst.VALUE, normalizedState.text)
-        onValueChange(normalizedState.toTextFieldValue())
     }
 
     if (keyboardActions != null) {
@@ -554,65 +502,77 @@ internal fun CoreTextField(
                         }
                     }
                     set(Triple(onValueChange, onLimitChange, maxLength)) {
-                        // 三个原生编辑事件：textInputStateChange / selectionChange / textDidChange
-                        // 前两者统一走 handleNativeEditingStateChange；textDidChange 因不带 selection，
-                        // 尝试从 lastSyncedTextInputState 恢复上一帧的合法编辑态。见 CoreTextField 顶部转换函数。
                         withTextAreaView {
                             getViewEvent().textInputStateChange {
-                                handleNativeEditingStateChange(
-                                    source = "textInputStateChange",
-                                    nativeState = TextInputState(
-                                        text = it.text,
-                                        selectionStart = it.selectionStart,
-                                        selectionEnd = it.selectionEnd,
-                                        compositionStart = it.compositionStart,
-                                        compositionEnd = it.compositionEnd,
-                                        length = it.length
-                                    ),
-                                    shouldMarkPendingText = true
+                                val textFieldValue = textInputCallbackArbiter.onCompleteState(it)
+                                lastSyncedTextInputState = TextInputState(
+                                    text = it.text,
+                                    selectionStart = it.selectionStart,
+                                    selectionEnd = it.selectionEnd,
+                                    compositionStart = it.compositionStart,
+                                    compositionEnd = it.compositionEnd,
+                                    length = it.length,
                                 )
+                                autoHeightTextAreaView.getViewAttr()
+                                    .updatePropCache(TextConst.VALUE, it.text)
+                                controlledStateArbiter.recordNativeValue(
+                                    textFieldValue,
+                                )
+                                onValueChange(textFieldValue)
                                 dispatchLimitChange(it.length, pendingLimitChangeNotification)
                             }
                             getViewEvent().selectionChange {
-                                handleNativeEditingStateChange(
-                                    source = "selectionChange",
-                                    nativeState = TextInputState(
-                                        text = it.text,
-                                        selectionStart = it.selectionStart,
-                                        selectionEnd = it.selectionEnd,
-                                        compositionStart = it.compositionStart,
-                                        compositionEnd = it.compositionEnd,
-                                        length = it.length
-                                    ),
-                                    shouldMarkPendingText = false
+                                lastSyncedTextInputState = TextInputState(
+                                    text = it.text,
+                                    selectionStart = it.selectionStart,
+                                    selectionEnd = it.selectionEnd,
+                                    compositionStart = it.compositionStart,
+                                    compositionEnd = it.compositionEnd,
+                                    length = it.length,
                                 )
+                                val composition = if (
+                                    it.compositionStart != TextInputState.NO_COMPOSITION &&
+                                    it.compositionEnd != TextInputState.NO_COMPOSITION
+                                ) {
+                                    TextRange(it.compositionStart, it.compositionEnd)
+                                } else {
+                                    null
+                                }
+                                val textFieldValue = TextFieldValue(
+                                    it.text,
+                                    selection = TextRange(it.selectionStart, it.selectionEnd),
+                                    composition = composition,
+                                )
+                                controlledStateArbiter.recordNativeValue(
+                                    textFieldValue,
+                                )
+                                onValueChange(textFieldValue)
                             }
                             getViewEvent().textDidChange {
-                                val lastNativeEditingState = lastSyncedTextInputState?.coerceToTextBounds()
-                                val coveredByPendingTextInputState = pendingTextInputStateText == it.text
-                                val coveredByNativeCompositionState = lastNativeEditingState?.let { state ->
-                                    state.text == it.text && state.hasActiveComposition()
-                                } == true
-                                val shouldIgnoreFallback =
-                                    coveredByPendingTextInputState || coveredByNativeCompositionState
-                                pendingTextInputStateText = null
-                                if (shouldIgnoreFallback) {
+                                val fallbackValue = textInputCallbackArbiter.onLegacyTextChange(
+                                    text = it.text,
+                                    lastSyncedState = lastSyncedTextInputState,
+                                )
+                                if (fallbackValue == null) {
                                     return@textDidChange
                                 }
                                 autoHeightTextAreaView.getViewAttr()
                                     .updatePropCache(TextConst.VALUE, it.text)
-                                val preservedEditingState = lastSyncedTextInputState
-                                    ?.takeIf { state -> state.text == it.text }
-                                    ?.coerceToTextBounds()
-                                onValueChange(
-                                    TextFieldValue(
-                                        text = it.text,
-                                        selection = preservedEditingState?.let { state ->
-                                            TextRange(state.selectionStart, state.selectionEnd)
-                                        } ?: TextRange(it.text.length),
-                                        composition = preservedEditingState?.toCompositionRangeOrNull()
-                                    )
+                                val fallbackComposition = fallbackValue.composition
+                                lastSyncedTextInputState = TextInputState(
+                                    text = fallbackValue.text,
+                                    selectionStart = fallbackValue.selection.start,
+                                    selectionEnd = fallbackValue.selection.end,
+                                    compositionStart = fallbackComposition?.start
+                                        ?: TextInputState.NO_COMPOSITION,
+                                    compositionEnd = fallbackComposition?.end
+                                        ?: TextInputState.NO_COMPOSITION,
+                                    length = it.length,
                                 )
+                                controlledStateArbiter.recordNativeValue(
+                                    fallbackValue,
+                                )
+                                onValueChange(fallbackValue)
                                 dispatchLimitChange(it.length, pendingLimitChangeNotification)
                             }
                         }
@@ -659,24 +619,25 @@ internal fun CoreTextField(
                         }
                     }
 
-                    set(value) {
-                        // 下发路径：业务侧 value 变更后回写原生。通过 toTextInputState() 统一转换并归一化。
-                        // 原生回流期间（isProcessingNativeEvent=true）若编辑态相同则跳过，避免回环污染。
-                        if (it == null) return@set
+                    set(value) { controlledValue ->
                         withTextAreaView {
-                            val incomingTextInputState = value.toTextInputState()
-                            getViewAttr().updatePropCache(TextConst.VALUE, incomingTextInputState.text)
-                            val hasSameEditingState =
-                                lastSyncedTextInputState?.hasSameEditingState(incomingTextInputState) ?: false
-                            val nativeCompositionActive =
-                                lastSyncedTextInputState?.hasActiveComposition() == true
-                            val shouldBlockStalePushWhileComposing =
-                                isProcessingNativeEvent && nativeCompositionActive && !hasSameEditingState
-                            val shouldSyncToNative =
-                                !shouldBlockStalePushWhileComposing &&
-                                    (!isProcessingNativeEvent || !hasSameEditingState)
+                            val incomingTextInputState = controlledValue.toTextInputState()
+
+                            // Native input can advance before an older caller-held callback object is
+                            // applied. Exact callback-object identity is the only provenance available
+                            // here: direct native echoes fail closed, while a formatter or external owner
+                            // asserts authority with a distinct, observable controlled editing state.
+                            val shouldSuppressControlledUpdate =
+                                controlledStateArbiter.shouldSuppressControlledUpdate(
+                                    value = controlledValue,
+                                )
+                            val shouldSyncToNative = !shouldSuppressControlledUpdate &&
+                                !(lastSyncedTextInputState?.hasSameEditingState(incomingTextInputState) ?: false)
 
                             if (shouldSyncToNative) {
+                                // The prop cache mirrors native state. Never poison it with a suppressed
+                                // stale down-value before the native editor has actually accepted it.
+                                getViewAttr().updatePropCache(TextConst.VALUE, incomingTextInputState.text)
                                 setTextInputState(incomingTextInputState)
                                 lastSyncedTextInputState = incomingTextInputState
                             }
@@ -684,9 +645,6 @@ internal fun CoreTextField(
                             // 长度计算统一依赖原生层回调，避免 Kotlin 层和原生层计算不一致
                             // 原生层会在 textInputStateChange 回调中返回正确的 length
 
-                            if (!shouldBlockStalePushWhileComposing) {
-                                isProcessingNativeEvent = false
-                            }
                         }
                     }
                 },
@@ -697,6 +655,115 @@ internal fun CoreTextField(
 
 internal fun FocusRequester.focusIfAttached(): Boolean =
     hasAttachedNodes() && focus()
+
+internal class TextInputCallbackArbiter {
+    private val completeTextsAwaitingLegacy = mutableListOf<String>()
+    private val legacyTextsAwaitingComplete = mutableListOf<String>()
+
+    fun onCompleteState(state: TextInputState): TextFieldValue {
+        val matchingLegacyIndex = legacyTextsAwaitingComplete.indexOf(state.text)
+        if (matchingLegacyIndex >= 0) {
+            legacyTextsAwaitingComplete.removeAt(matchingLegacyIndex)
+        } else {
+            recordPendingText(completeTextsAwaitingLegacy, state.text)
+        }
+        val composition = if (
+            state.compositionStart != TextInputState.NO_COMPOSITION &&
+            state.compositionEnd != TextInputState.NO_COMPOSITION
+        ) {
+            TextRange(state.compositionStart, state.compositionEnd)
+        } else {
+            null
+        }
+        return TextFieldValue(
+            text = state.text,
+            selection = TextRange(state.selectionStart, state.selectionEnd),
+            composition = composition,
+        )
+    }
+
+    fun onLegacyTextChange(
+        text: String,
+        lastSyncedState: TextInputState?,
+    ): TextFieldValue? {
+        // Complete callbacks own text, selection and composition. Pair by text across scheduling
+        // turns so a delayed legacy callback cannot overwrite a newer complete native state.
+        val matchingCompleteIndex = completeTextsAwaitingLegacy.indexOf(text)
+        if (matchingCompleteIndex >= 0) {
+            completeTextsAwaitingLegacy.removeAt(matchingCompleteIndex)
+            return null
+        }
+
+        // Some platforms emit legacy text before the complete state, and marked-text input may
+        // intentionally be legacy-only. Keep the unmatched callback available for one-to-one
+        // pairing without invalidating unrelated complete callbacks that may still arrive later.
+        recordPendingText(legacyTextsAwaitingComplete, text)
+
+        val preservedState = lastSyncedState?.takeIf { state -> state.text == text }
+        val preservedSelection = preservedState?.let { state ->
+            TextRange(state.selectionStart, state.selectionEnd)
+        } ?: TextRange.Zero
+        val preservedComposition = preservedState?.let { state ->
+            if (
+                state.compositionStart != TextInputState.NO_COMPOSITION &&
+                state.compositionEnd != TextInputState.NO_COMPOSITION
+            ) {
+                TextRange(state.compositionStart, state.compositionEnd)
+            } else {
+                null
+            }
+        }
+        return TextFieldValue(
+            text = text,
+            selection = preservedSelection,
+            composition = preservedComposition,
+        )
+    }
+
+    private fun recordPendingText(queue: MutableList<String>, text: String) {
+        queue += text
+        if (queue.size > MAX_PENDING_CALLBACKS) {
+            queue.removeAt(0)
+        }
+    }
+
+    private companion object {
+        const val MAX_PENDING_CALLBACKS = 64
+    }
+}
+
+internal class TextInputControlledStateArbiter {
+    private val nativeValueTokens = mutableListOf<TextFieldValue>()
+
+    fun recordNativeValue(value: TextFieldValue) {
+        if (nativeValueTokens.lastOrNull() === value) {
+            return
+        }
+        nativeValueTokens += value
+        if (nativeValueTokens.size > MAX_NATIVE_VALUE_TOKENS) {
+            nativeValueTokens.removeAt(0)
+        }
+    }
+
+    fun shouldSuppressControlledUpdate(
+        value: TextFieldValue,
+    ): Boolean {
+        // Equality is insufficient here: a formatter or external owner may intentionally
+        // produce a new value that matches an older native state. Only the exact object passed
+        // to onValueChange can carry a direct state-hoisting token.
+        // Exact native callback objects remain native-origin tokens for the mounted editor. Treat
+        // them as direct echoes inside the bounded provenance window. A formatter or external
+        // reset asserts authority with a distinct object that reaches controlled reconciliation.
+        // Retaining an exact older callback object to reject a later edit is indistinguishable
+        // from a stale echo and is outside this fence's contract; that requires an explicit,
+        // atomically observed controlled acknowledgement rather than inferred ordering.
+        return nativeValueTokens.any { it === value }
+    }
+
+    private companion object {
+        const val MAX_NATIVE_VALUE_TOKENS = 64
+    }
+}
 
 /**
  * 将 Modifier 拆分为两部分：SetPropElement/SetEventElement 和其他 Element
