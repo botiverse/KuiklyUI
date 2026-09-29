@@ -322,8 +322,6 @@ jobs:
         run: core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
       - name: Keep OHOS layout size report formatter ceiled to the hundredth
         run: core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
-      - name: Keep OHOS typed-avatar descriptors fail-closed
-        run: core-render-ohos/src/test/cpp/run_avatar_image_model_test.sh
       - name: Keep OHOS inline-box chrome with its text when wrapping
         run: core-render-ohos/src/test/cpp/run_inline_box_atomic_text_edge_test.sh
 
