@@ -271,6 +271,28 @@ internal fun Map<String, Any?>.toJSONObject(): JSONObject {
                     val list = value as List<Any>
                     serializationObject.put(key, list.toJSONArray())
                 }
+                // task #476: already-JSON values pass straight through. They
+                // used to fall out of this when silently — the key vanished
+                // while the bridge reported ok (mobile #484's root cause).
+                is JSONObject -> {
+                    serializationObject.put(key, value)
+                }
+                is JSONArray -> {
+                    serializationObject.put(key, value)
+                }
+                null -> {
+                    // Deliberately silent: absent-key-for-null is the
+                    // long-standing cross-bridge absence contract (same as
+                    // KNOI on OHOS). Callers model absence by omitting keys.
+                }
+                else -> {
+                    // task #476 fail-loud: an unrepresentable value still
+                    // cannot cross, but it must never vanish silently again.
+                    KuiklyRenderLog.e(
+                        "KuiklyRenderExtension",
+                        "toJSONObject dropped unsupported value: key=$key type=${value.javaClass.name}"
+                    )
+                }
             }
         }
     }
@@ -281,7 +303,7 @@ internal fun Map<String, Any?>.toJSONObject(): JSONObject {
  * [List]转[JSONArray]
  */
 @Suppress("UNCHECKED_CAST")
-internal fun List<Any>.toJSONArray(): JSONArray {
+internal fun List<Any?>.toJSONArray(): JSONArray {
     val serializationArray = JSONArray()
     forEach { value ->
         when (value) {
@@ -310,6 +332,25 @@ internal fun List<Any>.toJSONArray(): JSONArray {
             is List<*> -> {
                 val list = value as List<Any>
                 serializationArray.put(list.toJSONArray())
+            }
+            // task #476: mirror toJSONObject — pass JSON values through,
+            // never drop an element silently.
+            is JSONObject -> {
+                serializationArray.put(value)
+            }
+            is JSONArray -> {
+                serializationArray.put(value)
+            }
+            // Null is ABSENCE, not an unsupported type: it skips silently
+            // (same contract as toJSONObject's null branch) and must never
+            // reach the loud path — once the app persists e() logs, a loud
+            // null would turn every legal absent element into noise.
+            null -> Unit
+            else -> {
+                KuiklyRenderLog.e(
+                    "KuiklyRenderExtension",
+                    "toJSONArray dropped unsupported element: type=${value.javaClass.name}"
+                )
             }
         }
     }
