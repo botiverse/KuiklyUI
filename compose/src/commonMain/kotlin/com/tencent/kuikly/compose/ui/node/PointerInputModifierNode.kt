@@ -84,6 +84,16 @@ interface PointerInputModifierNode : DelegatableNode {
     fun sharePointerInputWithSiblings(): Boolean = false
 
     /**
+     * Return true when this node intentionally wants the host render root to
+     * capture native child dispatch for the current touch gesture.
+     *
+     * This is narrower than "a pointer input node was hit": ordinary click,
+     * scroll, and text-input modifiers must keep returning false so platform
+     * native children still receive their expected MotionEvents.
+     */
+    fun captureNativeDispatch(): Boolean = false
+
+    /**
      * Invoked when the density (pixels per inch for the screen) changes. This can impact the
      * location of pointer input events (x and y) and can affect things like touch slop detection.
      *
