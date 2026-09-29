@@ -133,7 +133,7 @@ internal class PointerInputEventProcessor(val root: LayoutNode) {
             }
 
             // Dispatch to PointerInputFilters
-            val dispatchedToSomething =
+            val dispatchResult =
                 hitPathTracker.dispatchChanges(internalPointerEvent, isInBounds)
 
             val anyMovementConsumed = if (internalPointerEvent.suppressMovementConsumption) {
@@ -149,11 +149,13 @@ internal class PointerInputEventProcessor(val root: LayoutNode) {
                 }
                 result
             }
-            val processResult = ProcessResult(dispatchedToSomething,
-                anyMovementConsumed
+            val processResult = ProcessResult(
+                dispatchedToAPointerInputModifier = dispatchResult.dispatched,
+                anyMovementConsumed = anyMovementConsumed,
+                nativeDispatchCaptured = dispatchResult.nativeDispatchCaptured
             )
 
-            if (pointerEvent.eventType == PointerEventType.Press && !dispatchedToSomething) {
+            if (pointerEvent.eventType == PointerEventType.Press && !dispatchResult.dispatched) {
                 pointerInputChangeEventProducer.clear()
             }
 
@@ -273,6 +275,9 @@ value class ProcessResult(private val value: Int) {
 
     val anyMovementConsumed
         get() = (value and (1 shl 1)) != 0
+
+    val nativeDispatchCaptured
+        get() = (value and (1 shl 2)) != 0
 }
 
 /**
@@ -284,9 +289,11 @@ value class ProcessResult(private val value: Int) {
  */
 internal fun ProcessResult(
     dispatchedToAPointerInputModifier: Boolean,
-    anyMovementConsumed: Boolean
+    anyMovementConsumed: Boolean,
+    nativeDispatchCaptured: Boolean = false
 ): ProcessResult {
     val val1 = if (dispatchedToAPointerInputModifier) 1 else 0
     val val2 = if (anyMovementConsumed) (1 shl 1) else 0
-    return ProcessResult(val1 or val2)
+    val val3 = if (nativeDispatchCaptured) (1 shl 2) else 0
+    return ProcessResult(val1 or val2 or val3)
 }

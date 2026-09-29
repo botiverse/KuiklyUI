@@ -69,6 +69,10 @@ class SuperTouchManager {
                 getView()?.getViewAttr()?.forceUpdate = true
                 getView()?.getViewAttr()?.consumeTouchDown(true)
             }
+            if (result.nativeDispatchCaptured) {
+                getView()?.getViewAttr()?.forceUpdate = true
+                getView()?.getViewAttr()?.nativeDispatchCapture(true)
+            }
         }
     }
 
@@ -76,6 +80,7 @@ class SuperTouchManager {
         touchUp(isSync) {
             touchesDelegate.onTouchesEvent(it.touches, PointerEventType.Release, it.timestamp, it.consumed)
             TouchActivityTracker.onTouchEnd(container.getPager().pageData, touchActivityOwner)
+            getView()?.getViewAttr()?.nativeDispatchCapture(false)
             if (container.getViewAttr().getProp(StyleConst.PREVENT_TOUCH) == true) {
                 container.getViewAttr().preventTouch(false)
                 if (useSyncMove) {
@@ -103,6 +108,7 @@ class SuperTouchManager {
         touchCancel(isSync) {
             touchesDelegate.onTouchesEvent(it.touches, PointerEventType.Release, it.timestamp, true)
             TouchActivityTracker.onTouchEnd(container.getPager().pageData, touchActivityOwner)
+            getView()?.getViewAttr()?.nativeDispatchCapture(false)
             if (container.getViewAttr().getProp(StyleConst.PREVENT_TOUCH) == true) {
                 container.getViewAttr().preventTouch(false)
                 if (useSyncMove) {

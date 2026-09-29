@@ -99,7 +99,7 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
     fun dispatchChanges(
         internalPointerEvent: InternalPointerEvent,
         isInBounds: Boolean = true
-    ): Boolean {
+    ): HitPathDispatchResult {
         val changed = root.buildCache(
             internalPointerEvent.changes,
             rootCoordinates,
@@ -108,8 +108,9 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
         )
         if (!changed) {
             root.cleanUpHover()
-            return false
+            return HitPathDispatchResult(dispatched = false, nativeDispatchCaptured = false)
         }
+        val nativeDispatchCaptured = root.capturesNativeDispatch()
         var dispatchHit = root.dispatchMainEventPass(
             internalPointerEvent.changes,
             rootCoordinates,
@@ -118,7 +119,10 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
         )
         dispatchHit = root.dispatchFinalEventPass(internalPointerEvent) || dispatchHit
 
-        return dispatchHit
+        return HitPathDispatchResult(
+            dispatched = dispatchHit,
+            nativeDispatchCaptured = nativeDispatchCaptured
+        )
     }
 
     /**
@@ -142,6 +146,11 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
         root.removeDetachedPointerInputFilters()
     }
 }
+
+internal data class HitPathDispatchResult(
+    val dispatched: Boolean,
+    val nativeDispatchCaptured: Boolean
+)
 
 /**
  * Represents a parent node in the [HitPathTracker]'s tree.  This primarily exists because the tree
@@ -216,6 +225,9 @@ internal open class NodeParent {
         cleanUpHover()
         return dispatched
     }
+
+    open fun capturesNativeDispatch(): Boolean =
+        children.any { it.capturesNativeDispatch() }
 
     /**
      * Dispatches the cancel event to all child [Node]s.
@@ -359,6 +371,17 @@ internal class Node(val modifierNode: Modifier.Node) : NodeParent() {
         cleanUpHits(internalPointerEvent)
         clearCache()
         return result
+    }
+
+    override fun capturesNativeDispatch(): Boolean {
+        if (relevantChanges.isEmpty() || !modifierNode.isAttached) {
+            return super.capturesNativeDispatch()
+        }
+        var captures = false
+        modifierNode.dispatchForKind(Nodes.PointerInput) {
+            captures = captures || it.captureNativeDispatch()
+        }
+        return captures || super.capturesNativeDispatch()
     }
 
     /**

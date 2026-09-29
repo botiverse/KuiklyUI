@@ -103,6 +103,8 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
 
     private var superTouch: Boolean = false
     private var superTouchCanceled: Boolean = false
+    private var nativeDispatchCaptureRequested: Boolean = false
+    private var nativeDispatchCapturedGesture: Boolean = false
 
     private fun syncComposeRootTag() {
         krRootView()?.setTag(COMPOSE_ROOT_TAG_ID, superTouch)
@@ -117,6 +119,10 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
             SUPER_TOUCH -> {
                 superTouch = propValue as Boolean
                 syncComposeRootTag()
+                true
+            }
+            NATIVE_DISPATCH_CAPTURE -> {
+                nativeDispatchCaptureRequested = propValue as Boolean
                 true
             }
             EVENT_TOUCH_DOWN -> {
@@ -260,6 +266,16 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
 
         // 以下是SuperTouch模式，意味着该View对应Compose的根节点，用于分发Touch事件给Compose
         tryFireTouchEvent(event)
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            nativeDispatchCapturedGesture = nativeDispatchCaptureRequested
+            nativeDispatchCaptureRequested = false
+        }
+        if (nativeDispatchCapturedGesture) {
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                nativeDispatchCapturedGesture = false
+            }
+            return true
+        }
         var handle = super.dispatchTouchEvent(event)
         if (handle) {
             // 子节点已经接接收了，后面的MOVE UP事件都能收到，不用兜底
@@ -524,6 +540,7 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
 
         private const val EVENT_ACTION = "action"
         private const val SUPER_TOUCH = "superTouch"
+        private const val NATIVE_DISPATCH_CAPTURE = "nativeDispatchCapture"
         private const val EVENT_TOUCH_DOWN = "touchDown"
         private const val EVENT_TOUCH_MOVE = "touchMove"
         private const val EVENT_TOUCH_UP = "touchUp"
