@@ -23,6 +23,8 @@
 // 字典key常量
 NSString *const KRFontSizeKey = @"fontSize";
 NSString *const KRFontWeightKey = @"fontWeight";
+NSString *const KRFontFamilyKey = @"fontFamily";
+NSString *const KRFontContextParamKey = @"contextParam";
 
 /*
  * @brief 暴露给Kotlin侧调用的多行输入框组件
@@ -38,6 +40,8 @@ NSString *const KRFontWeightKey = @"fontWeight";
 @property (nonatomic, strong)  NSNumber *KUIKLY_PROP(fontSize);
 /** attr is fontWeight */
 @property (nonatomic, strong)  NSString *KUIKLY_PROP(fontWeight);
+/** attr is fontFamily */
+@property (nonatomic, strong)  NSString *KUIKLY_PROP(fontFamily);
 #if TARGET_OS_OSX
 /** clipPath for macOS - 使用 KUIKLY_PROP 命名规范，仅在 macOS 声明避免覆盖 iOS 上 UIView+CSS category */
 @property (nonatomic, copy) NSString *KUIKLY_PROP(clipPath);
@@ -97,6 +101,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
 - (BOOL)p_shouldReapplyTextPostProcessorForIncomingRawText:(NSString *)rawText;
 - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
 - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
+- (void)p_updateFont;
 
 @end
 
@@ -327,14 +332,17 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
 - (void)setCss_fontSize:(NSNumber *)css_fontSize {
     _css_fontSize = css_fontSize;
-    self.font = [KRConvertUtil UIFont:@{KRFontSizeKey: css_fontSize ?: @(16),
-                                        KRFontWeightKey: _css_fontWeight ?: @"400"}];
-    [self setNeedsLayout];
+    [self p_updateFont];
 }
 
 - (void)setCss_fontWeight:(NSString *)css_fontWeight {
     _css_fontWeight = css_fontWeight;
-    [self setCss_fontSize:_css_fontSize];
+    [self p_updateFont];
+}
+
+- (void)setCss_fontFamily:(NSString *)css_fontFamily {
+    _css_fontFamily = css_fontFamily;
+    [self p_updateFont];
 }
 
 - (void)setCss_placeholder:(NSString *)css_placeholder {
@@ -990,6 +998,21 @@ NSString *const KRFontWeightKey = @"fontWeight";
 
 
 #pragma mark - private
+
+- (void)p_updateFont {
+    NSMutableDictionary *fontStyle = [@{
+        KRFontSizeKey: _css_fontSize ?: @(16),
+        KRFontWeightKey: _css_fontWeight ?: @"400"
+    } mutableCopy];
+    if (_css_fontFamily.length > 0) {
+        fontStyle[KRFontFamilyKey] = _css_fontFamily;
+    }
+    if (self.hr_rootView.contextParam) {
+        fontStyle[KRFontContextParamKey] = self.hr_rootView.contextParam;
+    }
+    self.font = [KRConvertUtil UIFont:fontStyle];
+    [self setNeedsLayout];
+}
 
 /// iOS 17+ 使用公开属性 insertionPointColor 独立设置光标颜色，避免与 tintColor（选中高亮色）冲突
 #if !TARGET_OS_OSX
