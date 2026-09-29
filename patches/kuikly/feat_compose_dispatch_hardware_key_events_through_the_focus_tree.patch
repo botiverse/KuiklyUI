@@ -8,7 +8,7 @@ pager event feeds ComposeScene.sendKeyEvent, which dispatches through
 FocusOwner (preview handlers root-to-focused, then onKeyEvent back up), so
 Modifier.onPreviewKeyEvent/onKeyEvent work (e.g. Tab traversal). Adds the
 iOS host entry point sendKeyEventWithKeyCode: on
-KuiklyRenderViewControllerBaseDelegator and KuiklyRenderView.
+KuiklyRenderViewControllerBaseDelegator.
 
 Fork-Patch: compose-hardware-key-events
 Origin: f980261f, c1d4192b
@@ -819,69 +819,4 @@ index 3c009a425332032c4e3f1fc62094d1b0dda36ec8..ae4362e5c05f17244523785eed457a52
  
  @end
  
--
-diff --git a/core-render-ios/View/KuiklyRenderView.h b/core-render-ios/View/KuiklyRenderView.h
-index bf659ebc15a5cdf63d0d6277d7c85799782e75f8..dbda2380e627af60d579579e2450d3c8fc94bd27 100644
---- a/core-render-ios/View/KuiklyRenderView.h
-+++ b/core-render-ios/View/KuiklyRenderView.h
-@@ -73,6 +73,19 @@ FOUNDATION_EXTERN NSString *const KRRootViewSizeDidChangedEventKey;
-  */
- - (void)sendWithEvent:(NSString *)event data:(NSDictionary *)data sync:(BOOL)sync;
- 
-+/*
-+ * @brief 向 Kuikly Compose 页面发送硬件键盘事件.
-+ * @param keyCode 平台 key code，对应 Kuikly Compose Native Key.keyCode 编码
-+ * @param type 事件类型：0 unknown，1 key up，2 key down
-+ */
-+- (void)sendKeyEventWithKeyCode:(NSInteger)keyCode
-+                           type:(NSInteger)type
-+                utf16CodePoint:(NSInteger)utf16CodePoint
-+                     altPressed:(BOOL)altPressed
-+                    ctrlPressed:(BOOL)ctrlPressed
-+                    metaPressed:(BOOL)metaPressed
-+                   shiftPressed:(BOOL)shiftPressed;
-+
- /*
-  * @brief 获取模块对应的实例（仅支持在主线程调用）.
-  * @param moduleName 模块名
-@@ -169,4 +182,3 @@ FOUNDATION_EXTERN NSString *const KRRootViewSizeDidChangedEventKey;
- @end
- 
- NS_ASSUME_NONNULL_END
--
-diff --git a/core-render-ios/View/KuiklyRenderView.m b/core-render-ios/View/KuiklyRenderView.m
-index 1e327c1034e5c360834d9719c391f945a3554478..ccf78ab64b45633c2e0f3f327f20016be17fe911 100644
---- a/core-render-ios/View/KuiklyRenderView.m
-+++ b/core-render-ios/View/KuiklyRenderView.m
-@@ -92,6 +92,26 @@ NSString *const KRDensity = @"density";
- - (void)sendWithEvent:(NSString *)event data:(NSDictionary *)data sync:(BOOL)sync {
-     [_renderCore sendWithEvent:event data:data sync:sync];
- }
-+
-+- (void)sendKeyEventWithKeyCode:(NSInteger)keyCode
-+                           type:(NSInteger)type
-+                utf16CodePoint:(NSInteger)utf16CodePoint
-+                     altPressed:(BOOL)altPressed
-+                    ctrlPressed:(BOOL)ctrlPressed
-+                    metaPressed:(BOOL)metaPressed
-+                   shiftPressed:(BOOL)shiftPressed {
-+    [self sendWithEvent:@"keyEvent"
-+                   data:@{
-+                       @"keyCode": @(keyCode),
-+                       @"type": @(type),
-+                       @"utf16CodePoint": @(utf16CodePoint),
-+                       @"altPressed": @(altPressed),
-+                       @"ctrlPressed": @(ctrlPressed),
-+                       @"metaPressed": @(metaPressed),
-+                       @"shiftPressed": @(shiftPressed),
-+                   }];
-+}
-+
- /*
-  * @brief 获取模块对应的实例（仅支持在主线程调用）.
-  * @param moduleName 模块名
-@@ -355,4 +375,3 @@ NSString *const KRDensity = @"density";
- }
- 
- @end
 -

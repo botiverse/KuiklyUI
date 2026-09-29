@@ -1261,10 +1261,10 @@ index 0d7c1f525378cc6197a40f5f2f43b5c4c05d9a7e..ebc18b2566a7a0f0caaec492510234d6
          private const val KEY_LENGTH = "length"
          private const val NO_COMPOSITION = -1
 diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
-index f6abdd644c5ab72c79970bd8083198d9676bfa60..b8f73d7d61256a5a078cd4c597965ee0bed78c28 100644
+index 16d25a8c4e2edd060fd8944e725a57f661409f7c..0fdfb9d77e2e4c03d63c5a66659dd5b3df6eafe4 100644
 --- a/core-render-ios/Extension/Components/KRTextAreaView.m
 +++ b/core-render-ios/Extension/Components/KRTextAreaView.m
-@@ -115,6 +115,9 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -108,6 +108,9 @@ NSString *const KRFontContextParamKey = @"contextParam";
  @implementation KRTextAreaView {
      NSString *_text;
      BOOL _didAddKeyboardNotification;
@@ -1274,7 +1274,7 @@ index f6abdd644c5ab72c79970bd8083198d9676bfa60..b8f73d7d61256a5a078cd4c597965ee0
      NSMutableDictionary *_props;
      BOOL _ignoreTextDidChanged;
      /** 显式设置的光标颜色 */
-@@ -402,13 +405,40 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -384,13 +387,40 @@ NSString *const KRFontContextParamKey = @"contextParam";
  #pragma mark - css method
  
  - (void)css_focus:(NSDictionary *)args  {
@@ -1317,7 +1317,7 @@ index f6abdd644c5ab72c79970bd8083198d9676bfa60..b8f73d7d61256a5a078cd4c597965ee0
  }
  
  - (void)css_getCursorIndex:(NSDictionary *)args {
-@@ -463,9 +493,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -445,9 +475,8 @@ NSString *const KRFontContextParamKey = @"contextParam";
      NSInteger selectionStart = MAX(0, MIN(requestedSelectionStart, (NSInteger)rawText.length));
      NSInteger selectionEnd = MAX(0, MIN(requestedSelectionEnd, (NSInteger)rawText.length));
  
@@ -1329,7 +1329,7 @@ index f6abdd644c5ab72c79970bd8083198d9676bfa60..b8f73d7d61256a5a078cd4c597965ee0
      _ignoreTextDidChanged = YES;
      // Emoji 表情输入时文字候选区闪烁
      // 关键：程序化改文本/设选区期间，临时摘掉 inputDelegate。否则 UITextView 会在 textStorage 变更、selectedTextRange 赋值时，
-@@ -515,6 +544,21 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -497,6 +526,21 @@ NSString *const KRFontContextParamKey = @"contextParam";
      if (self.css_textInputStateChange) {
          self.css_textInputStateChange([self p_currentTextInputStatePayload]);
      }
@@ -1351,7 +1351,7 @@ index f6abdd644c5ab72c79970bd8083198d9676bfa60..b8f73d7d61256a5a078cd4c597965ee0
  }
  
  - (void)css_getTextInputState:(NSDictionary *)args {
-@@ -1013,16 +1057,28 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -934,16 +978,28 @@ NSString *const KRFontContextParamKey = @"contextParam";
  }
  
  - (void)textViewDidBeginEditing:(UITextView *)textView { // 获焦

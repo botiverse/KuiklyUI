@@ -902,7 +902,7 @@ index 0000000000000000000000000000000000000000..25577853a0e0b190f542d644d473f005
 +    )
 +}
 diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
-index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b33d1d264 100644
+index 0fdfb9d77e2e4c03d63c5a66659dd5b3df6eafe4..5fee00c63a3f932daa3c2c1d87236bb46b910e93 100644
 --- a/core-render-ios/Extension/Components/KRTextAreaView.m
 +++ b/core-render-ios/Extension/Components/KRTextAreaView.m
 @@ -16,7 +16,9 @@
@@ -913,18 +913,18 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
  #import "KRRichTextView.h"
 +#import "KRTextInputEventSequencer.h"
  #import "KuiklyRenderBridge.h"
- #import "KuiklyRenderView.h"
  #import "NSObject+KR.h"
-@@ -104,6 +106,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ 
+@@ -101,6 +103,8 @@ NSString *const KRFontContextParamKey = @"contextParam";
  - (BOOL)p_shouldReapplyTextPostProcessorForIncomingRawText:(NSString *)rawText;
  - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
  - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
 +- (void)p_notifyTextChangeCallbacksWithState:(NSDictionary *)state;
 +- (void)p_recordImeTextChangeWithMarkedText:(BOOL)hasMarkedText state:(NSDictionary *)state;
- #if !TARGET_OS_OSX
- - (BOOL)p_shouldForwardHardwareTabKey;
- - (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
-@@ -120,6 +124,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ - (void)p_updateFont;
+ 
+ @end
+@@ -113,6 +117,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
      NSUInteger _focusRequestEpoch;
      NSMutableDictionary *_props;
      BOOL _ignoreTextDidChanged;
@@ -932,7 +932,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
      /** 显式设置的光标颜色 */
      UIColor *_cursorColor;
      /** 显式设置的选中高亮颜色 */
-@@ -156,6 +161,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -149,6 +154,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
          self.textContainer.lineFragmentPadding = 0;
          self.backgroundColor = [UIColor clearColor];
          _props = [NSMutableDictionary new];
@@ -940,7 +940,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
      }
      return self;
  }
-@@ -195,6 +201,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -188,6 +194,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
      NSString *lastText = self.text ?: @"";
      NSString *newText = css_text ?: @"";
      if (![lastText isEqualToString:newText]) {
@@ -948,7 +948,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
          self.text = css_text;
          [self textViewDidChange:self];
          [self updateLineHeightIfApplicable];
-@@ -267,6 +274,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -260,6 +267,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
  
  - (void)setCss_values:(NSString *)css_values {
      if (_css_values != css_values) {
@@ -956,7 +956,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
          _css_values = css_values;
          if (_css_values.length) {
              KRRichTextShadow *textShadow = [KRRichTextShadow new];
-@@ -469,6 +477,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -451,6 +459,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
      NSError *error = nil;
      NSDictionary *json = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
      if (!json) return;
@@ -964,7 +964,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
  
      NSString *requestedRawText = json[@"text"] ?: @"";
      NSInteger requestedSelectionStart = json[@"selectionStart"] ? [json[@"selectionStart"] integerValue] : requestedRawText.length;
-@@ -578,6 +587,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -560,6 +569,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
  
  - (void)css_setText:(NSDictionary *)args {
      NSString *text = args[KRC_PARAM_KEY];
@@ -972,7 +972,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
      self.text = text;
      [self textViewDidChange:self];
  }
-@@ -838,12 +848,14 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -765,12 +775,14 @@ NSString *const KRFontContextParamKey = @"contextParam";
      [self p_updatePlaceholder];
      // 如果有拼音输入，根据配置决定是否触发回调
      if (textView.markedTextRange) {
@@ -991,7 +991,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
          }
          return;
      }
-@@ -851,14 +863,15 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -778,14 +790,15 @@ NSString *const KRFontContextParamKey = @"contextParam";
      // 实时应用 textPostProcessor（emoji attachment）
      [self p_applyTextPostProcessorIfNeed];
  
@@ -1015,7 +1015,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
  }
  
  - (void)textViewDidChangeSelection:(UITextView *)textView {
-@@ -1070,6 +1083,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -991,6 +1004,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
  
  
  - (void)textViewDidEndEditing:(UITextView *)textView{ // 失焦
@@ -1023,7 +1023,7 @@ index b8f73d7d61256a5a078cd4c597965ee0bed78c28..4a27eca94b42bdd1f4746e2ed94fa15b
      _pendingFocusRequestId = nil;
      if (self.css_inputBlur) {
          NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
-@@ -1607,6 +1621,34 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -1528,6 +1542,34 @@ NSString *const KRFontContextParamKey = @"contextParam";
      return [self p_getOutputRangeWithInputRange:self.selectedRange];
  }
  

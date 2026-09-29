@@ -59,19 +59,19 @@ index e4c7b09f8b187545c43efccd2a1fad438a5ce54a..a69860d01be207f31e4b54bad2fcf14b
  fun BasicTextField(
      state: TextFieldState,
 diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
-index 3b424a30f5880f7b06d0108cd9799367b44fcc38..f6abdd644c5ab72c79970bd8083198d9676bfa60 100644
+index a9690f5806e7336e53c394cf22f4e027fd05ffa8..16d25a8c4e2edd060fd8944e725a57f661409f7c 100644
 --- a/core-render-ios/Extension/Components/KRTextAreaView.m
 +++ b/core-render-ios/Extension/Components/KRTextAreaView.m
-@@ -24,6 +24,8 @@
+@@ -23,6 +23,8 @@
  // 字典key常量
  NSString *const KRFontSizeKey = @"fontSize";
  NSString *const KRFontWeightKey = @"fontWeight";
 +NSString *const KRFontFamilyKey = @"fontFamily";
 +NSString *const KRFontContextParamKey = @"contextParam";
- static const NSInteger KRTextAreaViewKeyEventTypeDown = 2;
- static const NSInteger KRTextAreaViewKeyCodeTab = 9;
  
-@@ -41,6 +43,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ /*
+  * @brief 暴露给Kotlin侧调用的多行输入框组件
+@@ -38,6 +40,8 @@ NSString *const KRFontWeightKey = @"fontWeight";
  @property (nonatomic, strong)  NSNumber *KUIKLY_PROP(fontSize);
  /** attr is fontWeight */
  @property (nonatomic, strong)  NSString *KUIKLY_PROP(fontWeight);
@@ -80,15 +80,15 @@ index 3b424a30f5880f7b06d0108cd9799367b44fcc38..f6abdd644c5ab72c79970bd8083198d9
  #if TARGET_OS_OSX
  /** clipPath for macOS - 使用 KUIKLY_PROP 命名规范，仅在 macOS 声明避免覆盖 iOS 上 UIView+CSS category */
  @property (nonatomic, copy) NSString *KUIKLY_PROP(clipPath);
-@@ -104,6 +108,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
- - (BOOL)p_shouldForwardHardwareTabKey;
- - (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
- #endif
+@@ -97,6 +101,7 @@ NSString *const KRFontWeightKey = @"fontWeight";
+ - (BOOL)p_shouldReapplyTextPostProcessorForIncomingRawText:(NSString *)rawText;
+ - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
+ - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
 +- (void)p_updateFont;
  
  @end
  
-@@ -334,14 +339,17 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -327,14 +332,17 @@ NSString *const KRFontWeightKey = @"fontWeight";
  
  - (void)setCss_fontSize:(NSNumber *)css_fontSize {
      _css_fontSize = css_fontSize;
@@ -110,7 +110,7 @@ index 3b424a30f5880f7b06d0108cd9799367b44fcc38..f6abdd644c5ab72c79970bd8083198d9
  }
  
  - (void)setCss_placeholder:(NSString *)css_placeholder {
-@@ -1070,6 +1078,21 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -991,6 +999,21 @@ NSString *const KRFontWeightKey = @"fontWeight";
  
  #pragma mark - private
  

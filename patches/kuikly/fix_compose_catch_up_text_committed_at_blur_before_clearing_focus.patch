@@ -45,7 +45,7 @@ index 3468742af256bc8d39e00a55145df1a2e9f1c510..9d24563a5877ec31ff34061ff65c8b26
              kuiklyKeyboardController?.onNativeBlur(
                  autoHeightTextAreaView,
 diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
-index 4a27eca94b42bdd1f4746e2ed94fa15b33d1d264..e215d892ddf2830ca83e8ffa555607740f80bbe1 100644
+index 5fee00c63a3f932daa3c2c1d87236bb46b910e93..949d01d711742b470b87d73c88e730aae1b424dd 100644
 --- a/core-render-ios/Extension/Components/KRTextAreaView.m
 +++ b/core-render-ios/Extension/Components/KRTextAreaView.m
 @@ -19,6 +19,7 @@
@@ -54,9 +54,9 @@ index 4a27eca94b42bdd1f4746e2ed94fa15b33d1d264..e215d892ddf2830ca83e8ffa55560774
  #import "KRTextInputEventSequencer.h"
 +#import "KRTextBlurEventPayload.h"
  #import "KuiklyRenderBridge.h"
- #import "KuiklyRenderView.h"
  #import "NSObject+KR.h"
-@@ -1086,11 +1087,12 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ 
+@@ -1007,11 +1008,12 @@ NSString *const KRFontContextParamKey = @"contextParam";
      [_textInputEventSequencer invalidatePendingMarkedText];
      _pendingFocusRequestId = nil;
      if (self.css_inputBlur) {
@@ -74,7 +74,7 @@ index 4a27eca94b42bdd1f4746e2ed94fa15b33d1d264..e215d892ddf2830ca83e8ffa55560774
      }
      _pendingBlurRequestId = nil;
  }
-@@ -1523,30 +1525,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+@@ -1444,30 +1446,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
  }
  
  - (NSString *)p_rawTextFromAttributedText:(NSAttributedString *)attributedText {
