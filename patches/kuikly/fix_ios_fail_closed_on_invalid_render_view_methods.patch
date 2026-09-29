@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:53:00 +0000
+Subject: fix(ios): fail closed on invalid render view methods
+
+respondsToSelector: can report true right before dispatch raises
+unrecognized selector, so the layer handler now captures the concrete
+Method/IMP from the receiver's class, rejects forwarding-only or
+ABI-mismatched methods, and invokes the captured IMP directly. Rejections
+and predicate disagreements are logged with a content-free receipt.
+
+Fork-Patch: ios-render-view-method-invoker
+Origin: botiverse/KuiklyUI#128 c75b3eca0a4a1c04cf01ebe669a7a9c3ed9b3c0f
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-ios/Handler/KRRenderViewMethodInvoker.h b/core-render-ios/Handler/KRRenderViewMethodInvoker.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0a1233d97d8bea166694ae4fccc0bb65bae3c4d
+--- /dev/null
++++ b/core-render-ios/Handler/KRRenderViewMethodInvoker.h
+@@ -0,0 +1,57 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#import <Foundation/Foundation.h>
++#import <objc/runtime.h>
++
++NS_ASSUME_NONNULL_BEGIN
++
++typedef struct {
++    __unsafe_unretained Class _Nullable dynamicClass;
++    __unsafe_unretained Class _Nullable postPredicateClass;
++    __unsafe_unretained Class _Nullable metaclass;
++    __unsafe_unretained Class _Nullable declaringClass;
++    BOOL predicateEvaluated;
++    BOOL predicateResult;
++    BOOL methodFound;
++    BOOL implementationFound;
++    BOOL forwardingImplementation;
++    BOOL abiCompatible;
++    BOOL classStable;
++    BOOL methodStable;
++    BOOL implementationStable;
++    BOOL invoked;
++    Method _Nullable method;
++    IMP _Nullable implementation;
++} KRRenderViewMethodDispatchReceipt;
++
++/**
++ * Invokes a concrete Objective-C instance method with three object arguments.
++ *
++ * Capability is established from the receiver's dynamic class method table,
++ * not from the overridable `respondsToSelector:` predicate. Forwarding-only or
++ * ABI-incompatible methods fail closed. A concrete IMP is invoked directly so
++ * a later message-dispatch capability disagreement cannot re-open the call.
++ */
++FOUNDATION_EXPORT BOOL KRInvokeRenderViewMethodIfImplemented(
++    id _Nullable receiver,
++    SEL selector,
++    id _Nullable argument0,
++    id _Nullable argument1,
++    id _Nullable argument2,
++    KRRenderViewMethodDispatchReceipt *_Nullable receipt
++);
++
++NS_ASSUME_NONNULL_END
+diff --git a/core-render-ios/Handler/KRRenderViewMethodInvoker.m b/core-render-ios/Handler/KRRenderViewMethodInvoker.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..81d1a19f51255974461c4c68bd41225afac2e33e
+--- /dev/null
++++ b/core-render-ios/Handler/KRRenderViewMethodInvoker.m
+@@ -0,0 +1,139 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#import "KRRenderViewMethodInvoker.h"
++#import <ptrauth.h>
++
++@interface KRRenderViewMethodForwardingProbe : NSObject
++@end
++@implementation KRRenderViewMethodForwardingProbe
++@end
++
++static const char *KRSkipObjCTypeQualifiers(const char *type) {
++    if (!type) {
++        return "";
++    }
++    while (*type && strchr("rnNoORV", *type)) {
++        type++;
++    }
++    return type;
++}
++
++static BOOL KRMethodHasExpectedViewCallABI(Method method) {
++    if (!method || method_getNumberOfArguments(method) != 5) {
++        return NO;
++    }
++    char *returnType = method_copyReturnType(method);
++    BOOL compatible = KRSkipObjCTypeQualifiers(returnType)[0] == 'v';
++    free(returnType);
++    for (unsigned int index = 2; compatible && index < 5; index++) {
++        char *argumentType = method_copyArgumentType(method, index);
++        compatible = KRSkipObjCTypeQualifiers(argumentType)[0] == '@';
++        free(argumentType);
++    }
++    return compatible;
++}
++
++static BOOL KRImplementationsEqual(IMP lhs, IMP rhs) {
++    if (!lhs || !rhs) {
++        return NO;
++    }
++#if __has_feature(ptrauth_calls)
++    // Runtime APIs may return the same IMP with different arm64e signatures.
++    return ptrauth_strip(lhs, ptrauth_key_function_pointer) ==
++        ptrauth_strip(rhs, ptrauth_key_function_pointer);
++#else
++    return lhs == rhs;
++#endif
++}
++
++static Class KRClassDeclaringInstanceMethod(Class dynamicClass, SEL selector) {
++    for (Class candidate = dynamicClass; candidate; candidate = class_getSuperclass(candidate)) {
++        unsigned int count = 0;
++        Method *methods = class_copyMethodList(candidate, &count);
++        for (unsigned int index = 0; index < count; index++) {
++            if (sel_isEqual(method_getName(methods[index]), selector)) {
++                free(methods);
++                return candidate;
++            }
++        }
++        free(methods);
++    }
++    return Nil;
++}
++
++BOOL KRInvokeRenderViewMethodIfImplemented(
++    id receiver,
++    SEL selector,
++    id argument0,
++    id argument1,
++    id argument2,
++    KRRenderViewMethodDispatchReceipt *receipt
++) {
++    KRRenderViewMethodDispatchReceipt result = {0};
++    result.dynamicClass = receiver ? object_getClass(receiver) : Nil;
++    result.metaclass = result.dynamicClass ? object_getClass(result.dynamicClass) : Nil;
++    if (result.dynamicClass) {
++        result.method = class_getInstanceMethod(result.dynamicClass, selector);
++        result.methodFound = result.method != NULL;
++        result.implementation = result.method ? method_getImplementation(result.method) : NULL;
++        result.implementationFound = result.implementation != NULL;
++        IMP forwardingImplementation = class_getMethodImplementation(
++            [KRRenderViewMethodForwardingProbe class],
++            sel_registerName("__kr_render_view_method_invoker_missing__")
++        );
++        result.forwardingImplementation = result.implementationFound &&
++            KRImplementationsEqual(result.implementation, forwardingImplementation);
++        result.abiCompatible = KRMethodHasExpectedViewCallABI(result.method);
++    }
++    // Evaluate the overridable predicate only after capability is captured so
++    // it cannot grant admission by mutating isa or the method table.
++    if (receiver) {
++        result.predicateEvaluated = YES;
++        @try {
++            result.predicateResult = [receiver respondsToSelector:selector];
++        } @catch (__unused NSException *exception) {
++            result.predicateResult = NO;
++        }
++    }
++    result.postPredicateClass = receiver ? object_getClass(receiver) : Nil;
++    result.classStable = result.dynamicClass &&
++        result.postPredicateClass == result.dynamicClass;
++    if (result.classStable) {
++        Method postPredicateMethod = class_getInstanceMethod(result.postPredicateClass, selector);
++        IMP postPredicateImplementation = postPredicateMethod ?
++            method_getImplementation(postPredicateMethod) : NULL;
++        result.methodStable = postPredicateMethod == result.method;
++        result.implementationStable =
++            (!postPredicateImplementation && !result.implementation) ||
++            KRImplementationsEqual(postPredicateImplementation, result.implementation);
++    }
++    if (result.methodFound && result.implementationFound &&
++        !result.forwardingImplementation && result.abiCompatible &&
++        result.classStable && result.methodStable && result.implementationStable) {
++        typedef void (*KRRenderViewMethodIMP)(id, SEL, id, id, id);
++        ((KRRenderViewMethodIMP)result.implementation)(receiver, selector, argument0, argument1, argument2);
++        result.invoked = YES;
++    }
++    if (receipt && !result.invoked && result.dynamicClass) {
++        // Diagnostics only: walking every method list up the hierarchy is too
++        // costly for the hot invoke path, so resolve the owner on rejection.
++        result.declaringClass = KRClassDeclaringInstanceMethod(result.dynamicClass, selector);
++    }
++    if (receipt) {
++        *receipt = result;
++    }
++    return result.invoked;
++}
+diff --git a/core-render-ios/Handler/KuiklyRenderLayerHandler.mm b/core-render-ios/Handler/KuiklyRenderLayerHandler.mm
+index d4b7e59766fc5da3128407401071c75a45815696..54b0f26ba339214caebf40e9724c806654fd3fe4 100644
+--- a/core-render-ios/Handler/KuiklyRenderLayerHandler.mm
++++ b/core-render-ios/Handler/KuiklyRenderLayerHandler.mm
+@@ -20,6 +20,7 @@
+ #import <pthread.h>
+ #import "KRConvertUtil.h"
+ #import "KRLogModule.h"
++#import "KRRenderViewMethodInvoker.h"
+ #import "KuiklyBridgeDelegator.h"
+ #import "KuiklyRenderLayerHandler.h"
+ #import "KuiklyRenderModuleExportProtocol.h"
+@@ -122,9 +123,29 @@ Class _Nullable KRClassFromString(NSString *aClassName) {
+                      callback:(KuiklyRenderCallback _Nullable)callback {
+     NSAssert([NSThread isMainThread], @"should call on main thread");
+     id<KuiklyRenderViewExportProtocol> view = [self p_renderViewHandlerWithTag:tag];
+-    if ([view respondsToSelector:@selector(hrv_callWithMethod:params:callback:)]) {
+-        [view hrv_callWithMethod:method params:params callback:callback];
++    SEL selector = @selector(hrv_callWithMethod:params:callback:);
++    KRRenderViewMethodDispatchReceipt receipt = {0};
++    KRInvokeRenderViewMethodIfImplemented(view, selector, method, params, callback, &receipt);
++    if (receipt.invoked && receipt.predicateResult) {
++        // Healthy dispatch: keep the per-call hot path free of log formatting.
++        return;
+     }
++    [KRLogModule logInfo:[NSString stringWithFormat:
++        @"[Kuikly][ViewMethodDispatch] class=%@ postPredicateClass=%@ metaclass=%@ selector=%@ predicate=%d method=%d owner=%@ imp=%d forwarding=%d abi=%d classStable=%d methodStable=%d impStable=%d decision=%@",
++        receipt.dynamicClass ? NSStringFromClass(receipt.dynamicClass) : @"nil",
++        receipt.postPredicateClass ? NSStringFromClass(receipt.postPredicateClass) : @"nil",
++        receipt.metaclass ? NSStringFromClass(receipt.metaclass) : @"nil",
++        NSStringFromSelector(selector),
++        receipt.predicateResult,
++        receipt.methodFound,
++        receipt.declaringClass ? NSStringFromClass(receipt.declaringClass) : @"nil",
++        receipt.implementationFound,
++        receipt.forwardingImplementation,
++        receipt.abiCompatible,
++        receipt.classStable,
++        receipt.methodStable,
++        receipt.implementationStable,
++        receipt.invoked ? @"invoke" : @"skip"]];
+ }
+ 
+ - (NSString* _Nullable)callModuleMethodWithModuleName:(NSString *)moduleName
