@@ -25,6 +25,7 @@ import com.tencent.kuikly.compose.foundation.lazy.layout.PrefetchScheduler
 import com.tencent.kuikly.compose.foundation.lazy.layout.createDefaultKuiklyPrefetchScheduler
 import com.tencent.kuikly.compose.ui.ExperimentalComposeUiApi
 import com.tencent.kuikly.compose.ui.InternalComposeUiApi
+import com.tencent.kuikly.compose.ui.input.key.KeyEvent
 import com.tencent.kuikly.compose.ui.platform.WindowInfo
 import com.tencent.kuikly.compose.ui.scene.ComposeScene
 import com.tencent.kuikly.compose.ui.unit.IntOffset
@@ -137,6 +138,9 @@ class ComposeSceneMediator(
             scene.render(null, timestampNanos)
         }
     }
+
+    fun sendKeyEvent(keyEvent: KeyEvent): Boolean =
+        scene.sendKeyEvent(keyEvent)
 
     fun updateDensity(toFloat: Float) {
         scene.density = Density(toFloat)
