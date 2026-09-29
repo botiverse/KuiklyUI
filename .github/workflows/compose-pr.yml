@@ -1,0 +1,349 @@
+name: Compose PR Exact Matrix
+
+# staging4 holds only the Raft patch queue (patches/ + tooling). Every build
+# job checks out this repository, materializes src/ = upstream pin + queue
+# with script/sync (.github/actions/sync) and builds or tests inside src/.
+
+on:
+  pull_request:
+    branches:
+      - staging4
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+          fetch-depth: 0
+      - name: Verify DCO on every patches-repo commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          git diff --check "${BASE_SHA}...HEAD"
+          status=0
+          for commit in $(git rev-list --no-merges "${BASE_SHA}..HEAD"); do
+            author="$(git show -s --format='%an <%ae>' "$commit")"
+            if ! git show -s --format=%B "$commit" | grep -Fxq "Signed-off-by: ${author}"; then
+              echo "::error::$commit lacks 'Signed-off-by: ${author}'"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  patch-queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - name: Every queued patch carries Signed-off-by and Fork-Patch
+        run: script/lint-patches
+      - name: Queue applies cleanly and is in canonical export form
+        run: |
+          git config --global user.name "Kuikly CI"
+          git config --global user.email "kuikly-ci@users.noreply.github.com"
+          script/check-patches
+      - name: Record materialized identity
+        id: sync
+        uses: ./.github/actions/sync
+      - name: Upload exact identity evidence
+        shell: bash
+        run: |
+          mkdir -p build
+          {
+            echo "patches_head=$(git rev-parse HEAD)"
+            echo "patches_tree=$(git rev-parse 'HEAD^{tree}')"
+            echo "upstream_pin=$(git -C src rev-parse upstream-pin)"
+            echo "materialized_commit=${{ steps.sync.outputs.commit }}"
+            echo "materialized_tree=${{ steps.sync.outputs.tree }}"
+            echo "patch_count=$(git -C src rev-list --count upstream-pin..HEAD)"
+          } | tee build/exact-manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patch-queue-${{ env.EXPECTED_HEAD_SHA }}
+          path: build/exact-manifest.txt
+
+  release-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: python:3.8.20-slim-bookworm
+    steps:
+      - name: Install contract prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install --yes --no-install-recommends git
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: ./.github/actions/sync
+      - name: Release contract tests and script syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 script/release/test_kuikly_release_contract.py
+          bash -n script/release/stage-kuikly-release.sh
+          bash -n script/release/verify-kuikly-pom-consumer.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          release = Path("KUIKLY_RELEASE_SET").read_text(encoding="utf-8").strip()
+          expected = f"{release}-2.0.21-ohos"
+          text = Path("src/core-render-ohos/oh-package.json5").read_text(encoding="utf-8")
+          if f'"version": "{expected}"' not in text:
+              raise SystemExit(f"oh-package.json5 version must be {expected} (patch build_ohos_set_the_har_release_version)")
+          PY
+
+  common-core-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: ./.github/actions/sync
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compile metadata and run production JVM and Web fixtures
+        working-directory: src
+        run: |
+          ./gradlew \
+            :core:compileCommonMainKotlinMetadata \
+            :compose:compileCommonMainKotlinMetadata \
+            :core:testDebugUnitTest \
+            :compose:testDebugUnitTest \
+            :core-render-android:testDebugUnitTest \
+            :core-render-web:base:jsNodeTest \
+            --no-build-cache --no-daemon
+      - name: Require successful suites and report module counts
+        working-directory: src
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          modules = {
+              "core": Path("core/build/test-results"),
+              "compose": Path("compose/build/test-results"),
+              "core-render-android": Path("core-render-android/build/test-results"),
+              "core-render-web-base": Path("core-render-web/base/build/test-results"),
+          }
+          for name, root in modules.items():
+              reports = sorted(root.glob("**/TEST-*.xml"))
+              tests = failures = errors = 0
+              for report in reports:
+                  suite = ET.parse(report).getroot()
+                  tests += int(suite.attrib.get("tests", "0"))
+                  failures += int(suite.attrib.get("failures", "0"))
+                  errors += int(suite.attrib.get("errors", "0"))
+              print(f"{name}: tests={tests} failures={failures} errors={errors}")
+              # core has no JVM test sources, so :core:testDebugUnitTest is
+              # intentionally NO-SOURCE. Every other suite must stay nonzero.
+              if name != "core" and tests == 0:
+                  raise SystemExit(1)
+              if failures or errors:
+                  raise SystemExit(1)
+          PY
+      - name: Upload JVM and Web evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: common-core-android-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            src/core/build/test-results
+            src/compose/build/test-results
+            src/core-render-android/build/test-results
+            src/core-render-web/base/build/test-results
+
+  ios-renderer:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: ./.github/actions/sync
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # Gemfile (CocoaPods pin) lives in this repository, not in src/.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Select Xcode 16.2
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+      - name: Generate CocoaPods dummy framework
+        working-directory: src
+        run: ./gradlew :demo:generateDummyFramework --no-build-cache --no-daemon
+      - name: Install locked Pods
+        run: bundle exec pod install --project-directory=src/iosApp --deployment
+      - name: Compile Kotlin Native main and tests
+        working-directory: src
+        run: |
+          ./gradlew \
+            :core:compileKotlinIosSimulatorArm64 \
+            :compose:compileKotlinIosSimulatorArm64 \
+            :compose:compileTestKotlinIosSimulatorArm64 \
+            --no-build-cache --no-daemon
+      - name: Run native text-input sequencing fixture
+        run: tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
+      - name: textarea blur raw text regression
+        run: tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+      - name: Run gradient rich-text optional dispatch fixture
+        run: tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+      - name: Run layout size report formatter fixture
+        run: tools/ios-renderer-tests/run-layout-size-formatter-test.sh
+      - name: Build production renderer with warnings as errors
+        run: |
+          mkdir -p build
+          set -o pipefail
+          xcodebuild \
+            -workspace src/iosApp/iosApp.xcworkspace \
+            -scheme OpenKuiklyIOSRender \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            -derivedDataPath build/ios-derived \
+            -resultBundlePath build/ios-renderer.xcresult \
+            build | tee build/ios-renderer.log
+      - name: Run rich-text generic method contract fixture
+        run: |
+          tools/ios-renderer-tests/run-task114-release-carrier-handler-test.sh \
+            src \
+            build/ios-derived \
+            build/rich-text-generic-method-fixture
+      - name: Upload iOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-renderer-${{ env.EXPECTED_HEAD_SHA }}
+          path: |
+            build/ios-renderer.log
+            build/ios-renderer.xcresult
+            build/rich-text-generic-method-fixture
+
+  ohos-native:
+    # KuiklyUI is a personal repository, so organization-scoped Blacksmith runners never pick up
+    # these jobs. Keep the existing pinned HarmonyOS container on the official hosted runner.
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
+    timeout-minutes: 60
+    env:
+      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
+      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - name: Trust the mounted workspace inside the job container
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "Kuikly CI"
+          git config --global user.email "kuikly-ci@users.noreply.github.com"
+      - uses: ./.github/actions/sync
+      - name: Prepare OHOS native dependency metadata
+        working-directory: src/ohosApp
+        run: |
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          ohpm install --all
+          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+          hvigorw assembleHar \
+            --mode module \
+            -p module=render@default \
+            -p product=default \
+            -p buildMode=debug \
+            --analyze=normal \
+            --parallel \
+            --no-daemon
+      - name: Fresh arm64 production libkuikly compile and link
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          tools/ohos-renderer-tests/run-arm64-direct-link.sh "$GITHUB_WORKSPACE/build/ohos-evidence"
+      - name: Upload OHOS native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-native-${{ env.EXPECTED_HEAD_SHA }}
+          path: build/ohos-evidence
+
+  source-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        # Checkers read the materialized source; tools live one level up.
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXPECTED_HEAD_SHA }}
+      - uses: ./.github/actions/sync
+      - name: Reject stale native callbacks retained by Compose node initialization
+        run: python3 ../tools/check-compose-node-event-freshness.py --self-test
+      - name: Preserve active user motion when RecyclerView enters dragging
+        run: python3 ../tools/check-android-drag-entry-preserves-physical-scroll.py --self-test
+      - name: Keep DrawModifierNode view-aware production dispatch
+        run: python3 ../tools/check-draw-modifier-view-dispatch.py --self-test
+      - name: Reject non-finite iOS scroll event values
+        run: python3 ../tools/check-ios-scroll-event-finiteness.py --self-test
+      - name: Preserve profiler file output across Pager and session lifecycle
+        run: python3 ../tools/check-profiler-file-output-lifecycle.py --self-test
+      - name: Keep layout size reports ceiled to the hundredth on every renderer
+        run: python3 ../tools/check-layout-size-report-rounding.py --self-test
+      - name: Keep OHOS contentInset leading offsets aligned with the margin model
+        run: core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
+      - name: Keep OHOS layout size report formatter ceiled to the hundredth
+        run: core-render-ohos/src/test/cpp/run_layout_size_formatter_test.sh
+      - name: Keep OHOS typed-avatar descriptors fail-closed
+        run: core-render-ohos/src/test/cpp/run_avatar_image_model_test.sh
+
+  exact-matrix:
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - dco
+      - patch-queue
+      - release-contract
+      - common-core-android
+      - ios-renderer
+      - ohos-native
+      - source-contracts
+    steps:
+      - name: Require every exact-bound gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          needs = json.loads(os.environ["RESULTS"])
+          failed = {name: value["result"] for name, value in needs.items() if value["result"] != "success"}
+          print(json.dumps(needs, indent=2, sort_keys=True))
+          if failed:
+              raise SystemExit(f"exact matrix failed: {failed}")
+          PY
