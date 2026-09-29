@@ -302,7 +302,7 @@ fun View.resetCommonProp(propKey: String): Boolean {
             return true
         }
         KRCssConst.BACKGROUND_COLOR -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.TOUCH_ENABLE -> {
@@ -314,19 +314,19 @@ fun View.resetCommonProp(propKey: String): Boolean {
             return true
         }
         KRCssConst.BACKGROUND_IMAGE -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.BOX_SHADOW -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.BORDER_RADIUS -> {
-            resetHRBackground()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.BORDER -> {
-            resetBorder()
+            resetDecorationForReuse()
             return true
         }
         KRCssConst.CLICK -> {
@@ -578,16 +578,13 @@ private var View.borderStyle: String?
 /**
  * 重置View的background
  */
-private fun View.resetHRBackground() {
+private fun View.resetDecorationForReuse() {
+    optViewDecorator()?.resetForReuse()
     background = null
-    destroyViewDecorator()
-}
-
-private fun View.resetBorder() {
-    destroyViewDecorator()
     if (!isBeforeM) {
         foreground = null
     }
+    destroyViewDecorator()
 }
 
 /**
