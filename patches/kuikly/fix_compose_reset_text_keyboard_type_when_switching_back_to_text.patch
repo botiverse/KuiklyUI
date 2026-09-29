@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:51:52 +0000
+Subject: fix(compose): reset text keyboard type when switching back to Text
+
+updateKeyboardOptions only emitted Password/Number/Email, so a reused
+field switched back to Text kept the native type (iOS secureTextEntry
+stayed latched). Input/TextArea attrs gain keyboardTypeDefault(), which
+Compose emits once a non-default type was sent, so fresh multi-line
+fields on Android keep the multi-line inputType from numberOfLines.
+
+Fork-Patch: compose-text-keyboard-type-reset
+Origin: botiverse/KuiklyUI#119 c950c9ce1c5b00993892c199fccfeb3ef307bd9e
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt
+index 9d24563a5877ec31ff34061ff65c8b262daf9342..049d5d63662ac5c7223701ddb0387da91ee5eff1 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt
+@@ -814,7 +814,14 @@ private fun updateKeyboardOptions(
+         KeyboardType.Number -> attr.keyboardTypeNumber()
+         KeyboardType.Email -> attr.keyboardTypeEmail()
+         KeyboardType.Password -> attr.keyboardTypePassword()
+-        else -> {} // 默认键盘类型不需要特殊处理
++        // Native views start with their default keyboard type, but a reused view
++        // must actively reset a previously applied Password/Number/Email type.
++        // Only emit the reset once a type was sent: on Android a keyboardType
++        // write replaces inputType and would drop the multi-line flag that
++        // numberOfLines just set on a fresh multi-line field.
++        else -> if (attr.getProp(TextAreaAttr.KEYBOARD_TYPE) != null) {
++            attr.keyboardTypeDefault()
++        }
+     }
+ 
+     // 处理输入法动作
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt
+index 72d3cbdf882e79b897ba8bc78babf19c518bd590..6d1692bcdb44faf672acd4dcd7bbc266da89650c 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt
+@@ -244,6 +244,10 @@ class InputAttr : Attr() {
+         KEYBOARD_TYPE with "password"
+     }
+ 
++    fun keyboardTypeDefault() {
++        KEYBOARD_TYPE with "default"
++    }
++
+     fun keyboardTypeNumber() {
+         KEYBOARD_TYPE with "number"
+     }
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
+index b1fcf81f275441a88106452e29b36c63e1d07d0a..acb3eae010e1a18feea7fc6d4774849062bcdcbb 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
+@@ -429,6 +429,11 @@ open class TextAreaAttr : Attr() {
+         return this
+     }
+ 
++    fun keyboardTypeDefault(): TextAreaAttr {
++        KEYBOARD_TYPE with "default"
++        return this
++    }
++
+     fun keyboardTypeNumber() {
+         KEYBOARD_TYPE with "number"
+     }
