@@ -18,6 +18,7 @@
 #import "KuiklyRenderThreadManager.h"
 #import "KRConvertUtil.h"
 #import <objc/runtime.h>
+#import <stdlib.h>
 #import "KRLogModule.h"
 #define MAX_FRAMEWORK_NAME_LENGTH 100
 
@@ -124,12 +125,34 @@
 #pragma mark - KRCallNativeDelegate
 
 - (id _Nullable)callNativeMethodId:(int32_t)methodId arg0:(id _Nullable)arg0 arg1:(id _Nullable)arg1 arg2:(id _Nullable)arg2 arg3:(id _Nullable)arg3 arg4:(id _Nullable)arg4 arg5:(id _Nullable)arg5 {
+    NSArray *args = @[KRSafeObject(arg1),
+                      KRSafeObject(arg2),
+                      KRSafeObject(arg3),
+                      KRSafeObject(arg4),
+                      KRSafeObject(arg5)];
+    KuiklyRenderNativeMethod method = (KuiklyRenderNativeMethod)methodId;
+    if (![KuiklyRenderThreadManager isContextQueue]) {
+        // Fatal reporting already has a dedicated synchronous context-queue handoff in KuiklyRenderCore.
+        if (method == KuiklyRenderNativeMethodFireFatalException) {
+            id result = _nativeCallback ? _nativeCallback(method, args) : nil;
+            return [KRConvertUtil nativeObjectToKotlinObject:result];
+        }
+        if (KRNativeMethodRequiresContextThread(method, args)) {
+            [KRLogModule logError:[NSString stringWithFormat:
+                @"synchronous native method %ld called off the context queue", (long)method]];
+            abort();
+        }
+        __weak typeof(self) weakSelf = self;
+        [KuiklyRenderThreadManager performOnContextQueueWithBlock:^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf.nativeCallback) {
+                strongSelf.nativeCallback(method, args);
+            }
+        }];
+        return nil;
+    }
     if (_nativeCallback) {
-        id result = _nativeCallback(methodId, @[KRSafeObject(arg1),
-                                           KRSafeObject(arg2),
-                                           KRSafeObject(arg3),
-                                           KRSafeObject(arg4),
-                                           KRSafeObject(arg5)]);
+        id result = _nativeCallback(method, args);
         return [KRConvertUtil nativeObjectToKotlinObject:result];
     }
     return nil;

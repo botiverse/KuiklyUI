@@ -234,6 +234,14 @@ NSString *const kCustomFirstScreenTag = @"customFirstScreenTag";
     KR_WEAK_SELF
     [_contextHandler registerCallNativeWtihCallback:^id _Nullable(KuiklyRenderNativeMethod method, NSArray *_Nonnull args) {
         KR_STRONG_SELF_RETURN_NIL
+        if (![KuiklyRenderThreadManager isContextQueue] &&
+            method == KuiklyRenderNativeMethodFireFatalException) {
+            __block id result = nil;
+            [KuiklyRenderThreadManager performOnContextQueueWithBlock:^{
+                result = [strongSelf p_performNativeMethodWithMethod:method args:args];
+            } sync:YES];
+            return result;
+        }
         [KuiklyRenderThreadManager assertContextQueue]; // 线程断言，保证仅在Context线程回调
         // 执行KuiklyKotlin侧调用Native侧的事件
         return [strongSelf p_performNativeMethodWithMethod:method args:args];
@@ -265,19 +273,7 @@ NSString *const kCustomFirstScreenTag = @"customFirstScreenTag";
 
 // 判断事件是否需要同步调用
 - (BOOL)p_shouldSyncCallWithWithMethod:(KuiklyRenderNativeMethod)method args:(NSArray *)args {
-    if (method == KuiklyRenderNativeMethodCallModuleMethod) {
-        return [FIVE_ARG isKindOfClass:[NSNumber class]] ? [FIVE_ARG boolValue] : NO;  //
-    }
-    return method == KuiklyRenderNativeMethodCalculateRenderViewSize ||
-           method == KuiklyRenderNativeMethodCreateShadow ||
-           method == KuiklyRenderNativeMethodRemoveShadow ||
-           method == KuiklyRenderNativeMethodSetShadowForView ||
-           method == KuiklyRenderNativeMethodSetShadowProp ||
-           method == KuiklyRenderNativeMethodSetTimeout ||
-           method == KuiklyRenderNativeMethodCallShadowMethod ||
-           method == KuiklyRenderNativeMethodFireFatalException ||
-           method == KuiklyRenderNativeMethodSyncFlushUI ||
-           method == KuiklyRenderNativeMethodCallTDFModuleMethod;
+    return KRNativeMethodRequiresContextThread(method, args);
 }
 
 // 执行KuiklyKotlin侧调用Native侧的事件
