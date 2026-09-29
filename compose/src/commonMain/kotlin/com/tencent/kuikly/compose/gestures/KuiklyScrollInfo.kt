@@ -57,6 +57,51 @@ internal class ScrollViewBindingGate<T : Any> {
     }
 }
 
+internal class DeferredScrollOffsetAlignmentCoordinator<T>(
+    private val pendingAlignment: () -> T?,
+    private val updatePendingAlignment: (T?) -> Unit
+) {
+    private var generation = 0L
+
+    fun replacePendingAlignment(
+        cancelPendingAlignment: (T) -> Unit,
+        launchAlignment: (DeferredScrollOffsetAlignmentRequest) -> T?
+    ) {
+        val request = DeferredScrollOffsetAlignmentRequest(++generation)
+        pendingAlignment()?.let(cancelPendingAlignment)
+        updatePendingAlignment(launchAlignment(request))
+    }
+
+    fun isCurrent(request: DeferredScrollOffsetAlignmentRequest): Boolean {
+        return request.generation == generation
+    }
+
+    fun cancelAndInvalidate(cancelPendingAlignment: (T) -> Unit) {
+        generation += 1
+        pendingAlignment()?.let(cancelPendingAlignment)
+        updatePendingAlignment(null)
+    }
+
+    fun retryAfterScrollEnd(scheduleAlignment: () -> Unit) {
+        scheduleAlignment()
+    }
+}
+
+internal fun <T> invalidateDeferredScrollOffsetAlignmentOwnersOnReuse(
+    oldCoordinator: DeferredScrollOffsetAlignmentCoordinator<T>?,
+    newCoordinator: DeferredScrollOffsetAlignmentCoordinator<T>,
+    cancelPendingAlignment: (T) -> Unit
+) {
+    oldCoordinator?.cancelAndInvalidate(cancelPendingAlignment)
+    if (newCoordinator !== oldCoordinator) {
+        newCoordinator.cancelAndInvalidate(cancelPendingAlignment)
+    }
+}
+
+internal class DeferredScrollOffsetAlignmentRequest internal constructor(
+    internal val generation: Long
+)
+
 /**
  * Scroll information management class, responsible for handling scroll-related state and calculations
  */
@@ -200,6 +245,12 @@ class KuiklyScrollInfo {
      */
     internal var appleScrollViewOffsetJob: Job? = null
 
+    internal val deferredScrollOffsetAlignmentCoordinator =
+        DeferredScrollOffsetAlignmentCoordinator(
+            pendingAlignment = { appleScrollViewOffsetJob },
+            updatePendingAlignment = { appleScrollViewOffsetJob = it }
+        )
+
     /**
      * Coroutine scope
      */
@@ -296,8 +347,7 @@ class KuiklyScrollInfo {
      */
     fun resetForNewScrollView() {
         // Cancel and clear any pending tasks
-        appleScrollViewOffsetJob?.cancel()
-        appleScrollViewOffsetJob = null
+        deferredScrollOffsetAlignmentCoordinator.cancelAndInvalidate { it.cancel() }
 
         // Reset basic offset and scroll state
         ignoreScrollOffset = null
