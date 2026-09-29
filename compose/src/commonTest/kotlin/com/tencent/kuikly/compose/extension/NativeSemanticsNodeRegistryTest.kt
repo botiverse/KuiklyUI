@@ -57,6 +57,14 @@ class NativeSemanticsNodeRegistryTest {
     }
 
     @Test
+    fun rolelessNodeUsesRendererDefaultWhenRequested() {
+        assertEquals("", nativeAccessibilityRoleValue(AccessibilityRole.NONE, rolelessNodesUseRendererDefault = true))
+        assertEquals("none", nativeAccessibilityRoleValue(AccessibilityRole.NONE, rolelessNodesUseRendererDefault = false))
+        assertEquals("hidden", nativeAccessibilityRoleValue(AccessibilityRole.HIDDEN, rolelessNodesUseRendererDefault = true))
+        assertEquals("button", nativeAccessibilityRoleValue(AccessibilityRole.BUTTON, rolelessNodesUseRendererDefault = true))
+    }
+
+    @Test
     fun visibleButtonKeepsItsNativeRole() {
         assertEquals(
             AccessibilityRole.BUTTON,

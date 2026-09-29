@@ -28,6 +28,11 @@
 /// Default iOS keyboard animation curve value from UIKeyboardAnimationCurveUserInfoKey
 static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
 
+/// accessibilityRole "hidden" removes the view and its whole subtree from the accessibility tree.
+static BOOL KRIsHiddenAccessibilityRole(id role) {
+    return [role isKindOfClass:[NSString class]] && [(NSString *)role isEqualToString:@"hidden"];
+}
+
 @interface CSSBorder : NSObject
 
 @property (nonatomic, assign) KRBorderStyle borderStyle;
@@ -478,6 +483,9 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
         if (self.css_debugName.length > 0 && self.subviews.count > 0) {
             self.isAccessibilityElement = NO;
         }
+        if (KRIsHiddenAccessibilityRole(self.css_accessibilityRole)) {
+            self.isAccessibilityElement = NO;
+        }
     }
 }
 
@@ -494,6 +502,13 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
         if (self.css_debugName.length > 0 && self.subviews.count > 0) {
             self.isAccessibilityElement = NO;
         }
+        BOOL hidden = KRIsHiddenAccessibilityRole(css_accessibilityRole);
+        if (hidden) {
+            self.isAccessibilityElement = NO;
+        }
+#if !TARGET_OS_OSX
+        self.accessibilityElementsHidden = hidden;
+#endif
     }
 }
 
@@ -1275,7 +1290,10 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
                 }
 
                 // 如果有点击功能，确保组件是可访问的
-                if (isClickable || isLongClickable) {
+                if (KRIsHiddenAccessibilityRole(self.css_accessibilityRole)) {
+                    // A hidden subtree must stay out of the accessibility tree even if clickable.
+                    self.isAccessibilityElement = NO;
+                } else if (isClickable || isLongClickable) {
                     self.accessibilityTraits = traits;
                     if (![self kr_isAccessibilityContainer]) {
                         self.isAccessibilityElement = YES;

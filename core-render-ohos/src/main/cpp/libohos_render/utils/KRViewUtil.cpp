@@ -523,6 +523,16 @@ void UpdateNodeAccessibilityRole(ArkUI_NodeHandle node, const std::string &roleS
         nodeAPI->resetAttribute(node, NODE_ACCESSIBILITY_GROUP);
         return;
     }
+    // HIDDEN: remove this node and its whole subtree from the accessibility tree, matching Android
+    // IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS and iOS accessibilityElementsHidden.
+    if (roleStr == "hidden") {
+        ArkUI_NumberValue val[] = {{.i32 = ARKUI_ACCESSIBILITY_MODE_DISABLED_FOR_DESCENDANTS}};
+        ArkUI_AttributeItem item = {val, 1};
+        nodeAPI->setAttribute(node, NODE_ACCESSIBILITY_MODE, &item);
+        nodeAPI->resetAttribute(node, NODE_ACCESSIBILITY_ROLE);
+        nodeAPI->resetAttribute(node, NODE_ACCESSIBILITY_GROUP);
+        return;
+    }
     // 常规角色映射：NODE_ACCESSIBILITY_ROLE 的 value 类型是 ArkUI_NodeType。
     // SEARCH → TEXT_INPUT 是降级映射（ArkUI_NodeType 无 SEARCH 值），与 Android EditText 语义对齐。
     uint32_t nodeType = 0;
