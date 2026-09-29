@@ -55,7 +55,7 @@ internal sealed class AnimationConfig {
  * - Linear 线性动画：匀速滚动动画
  */
 internal class KRScrollAnimationManager(
-    private val recyclerView: RecyclerView
+    private val recyclerView: KRRecyclerView
 ) {
     // 当前运行的动画
     private var currentAnimation: KRScrollAnimation? = null
@@ -72,11 +72,36 @@ internal class KRScrollAnimationManager(
     fun hasRunningAnimation(): Boolean = currentAnimation != null
 
     /**
+     * Re-establishes the current custom animation's non-touch child connection after an inherited
+     * connection has been closed. NestedScrollingChildHelper clears its old parent pointer only
+     * after the parent's onStopNestedScroll callback returns, so an animation started inside that
+     * callback can observe the doomed pointer and incorrectly skip a fresh start.
+     */
+    fun ensureNestedScrollConnectionIfRunning() {
+        if (currentAnimation == null ||
+            !recyclerView.isNestScrolling() ||
+            recyclerView.hasNestedScrollingParent(ViewCompat.TYPE_NON_TOUCH)
+        ) {
+            return
+        }
+        val axis = if (isHorizontal) {
+            ViewCompat.SCROLL_AXIS_HORIZONTAL
+        } else {
+            ViewCompat.SCROLL_AXIS_VERTICAL
+        }
+        recyclerView.startNestedScroll(axis, ViewCompat.TYPE_NON_TOUCH)
+    }
+
+    /**
      * 取消动画
      */
-    fun cancel() {
-        currentAnimation?.cancel()
+    fun cancel(): Boolean {
+        val animation = currentAnimation ?: return false
+        // Revoke identity before ValueAnimator synchronously dispatches onAnimationCancel/onEnd.
+        // The manager's onEnd closure therefore cannot apply the old completion tail.
         currentAnimation = null
+        animation.cancel()
+        return true
     }
 
     /**
@@ -144,17 +169,22 @@ internal class KRScrollAnimationManager(
         }
 
         isHorizontal = horizontal
-        // 设置滚动状态
-        onScrollStateChange(RecyclerView.SCROLL_STATE_SETTLING)
-        // 启动嵌套滚动
-        startNestedScrollIfNeeded(actualDx, actualDy)
-        // 创建并启动动画
+        // Publish opaque animation identity before SETTLING callbacks. A callback may synchronously
+        // apply a newer ready contentOffset and cancel this not-yet-started animation.
         val animation = when (config) {
             is AnimationConfig.Spring -> createSpringAnimation(distance, config)
             is AnimationConfig.Linear -> createLinearAnimation(distance, config)
         }
-        
-        setupAndStartAnimation(animation, distance.toFloat())
+        setupAnimation(animation, distance.toFloat())
+
+        // 设置滚动状态
+        onScrollStateChange(RecyclerView.SCROLL_STATE_SETTLING)
+        if (currentAnimation !== animation) {
+            return
+        }
+        // 启动嵌套滚动
+        startNestedScrollIfNeeded(actualDx, actualDy)
+        animation.start()
     }
 
     /**
@@ -197,7 +227,7 @@ internal class KRScrollAnimationManager(
      * @param animation 动画实例
      * @param targetDistance 目标滚动距离（用于动画结束时修正偏差）
      */
-    private fun setupAndStartAnimation(animation: KRScrollAnimation, targetDistance: Float) {
+    private fun setupAnimation(animation: KRScrollAnimation, targetDistance: Float) {
         var consumed = 0f
 
         animation.onUpdate = { value ->
@@ -231,7 +261,6 @@ internal class KRScrollAnimationManager(
         }
 
         currentAnimation = animation
-        animation.start()
     }
 
     /**
@@ -240,9 +269,9 @@ internal class KRScrollAnimationManager(
      */
     private fun scrollRecyclerView(delta: Int) {
         if (isHorizontal) {
-            recyclerView.scrollBy(delta, 0)
+            recyclerView.scrollByFromCustomAnimation(delta, 0)
         } else {
-            recyclerView.scrollBy(0, delta)
+            recyclerView.scrollByFromCustomAnimation(0, delta)
         }
     }
 
@@ -250,7 +279,7 @@ internal class KRScrollAnimationManager(
      * 启动嵌套滚动（如果需要）
      */
     private fun startNestedScrollIfNeeded(dx: Int, dy: Int) {
-        if (recyclerView !is KRRecyclerView || !recyclerView.isNestScrolling()) {
+        if (!recyclerView.isNestScrolling()) {
             return
         }
         // 根据滚动方向组合嵌套滚动轴
