@@ -39,6 +39,24 @@ fun NoBounceList(data: List<String>) {
 }
 ```
 
+### iOS 交互式键盘收起：`Modifier.keyboardDismissModeInteractiveIOS`
+
+在 iOS 上将底层 `UIScrollView.keyboardDismissMode` 设为 `interactive`，使用户拖动列表时键盘跟随手势逐步退出。其他平台忽略此渲染提示并保持原有行为。
+
+```kotlin
+LazyColumn(
+    modifier = Modifier
+        .fillMaxSize()
+        .keyboardDismissModeInteractiveIOS(),
+) {
+    items(messages) { message ->
+        Text(message)
+    }
+}
+```
+
+传入 `false` 会把 iOS scroller 恢复为 `UIScrollViewKeyboardDismissModeNone`。
+
 ### 嵌套滚动策略：`Modifier.nestedScroll`
 
 - 扩展函数：`Modifier.nestedScroll(scrollUp: NestedScrollMode, scrollDown: NestedScrollMode)`  
