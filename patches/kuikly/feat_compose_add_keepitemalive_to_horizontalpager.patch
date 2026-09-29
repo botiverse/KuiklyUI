@@ -1,12 +1,12 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: BiSheng <raft-mobile-bisheng@mail.build>
 Date: Tue, 29 Sep 2026 06:18:07 +0000
-Subject: feat(compose): add keepItemAlive to HorizontalPager and VerticalPager
+Subject: feat(compose): add keepItemAlive to HorizontalPager
 
 Small tab/page sets need every page to stay composed and laid out while
 offscreen, like PageList's keepItemAlive(true). When enabled, raise the
 effective beyondViewportPageCount to pageCount - 1 for both the measure
-policy and the beyond-bounds modifier. Adds a demo case.
+policy and the beyond-bounds modifier.
 
 Fork-Patch: compose-pager-keep-item-alive
 Origin: 1fd3fe2d
@@ -59,7 +59,7 @@ index ddc57fb9e72d3ce02f2702d2250765cfb18364c7..2aef5b22693859ae71e9fc970e34a5a2
                  beyondBoundsInfo = state.beyondBoundsInfo,
                  reverseLayout = reverseLayout,
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/pager/Pager.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/pager/Pager.kt
-index e4b0dbb169bc2eb534f0fe3fd9776ca81aa8d82c..57f5cb12ed946c9703c5989b0e8a2ce3c7538024 100644
+index e4b0dbb169bc2eb534f0fe3fd9776ca81aa8d82c..a3f56701baf953783fc01eff3aa7b807467968fb 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/pager/Pager.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/pager/Pager.kt
 @@ -87,6 +87,8 @@ import kotlin.math.roundToInt
@@ -87,74 +87,3 @@ index e4b0dbb169bc2eb534f0fe3fd9776ca81aa8d82c..57f5cb12ed946c9703c5989b0e8a2ce3
  //        pageNestedScrollConnection = pageNestedScrollConnection,
          snapPosition = SnapPosition.Start,
          pageContent = pageContent
-@@ -174,6 +178,8 @@ fun HorizontalPager(
-  * position will be maintained based on the key, which means if you add/remove items before the
-  * current visible item the item with the given key will be kept as the first visible one. If null
-  * is passed the position in the list will represent the key.
-+ * @param keepItemAlive whether all pages should stay composed and laid out even when outside the
-+ * visible viewport, matching PageList's `keepItemAlive(true)` semantics for small tab/page sets.
-  * @param pageNestedScrollConnection A [NestedScrollConnection] that dictates how this [Pager] behaves
-  * with nested lists. The default behavior will see [Pager] to consume all nested deltas.
-  * @param snapPosition The calculation of how this Pager will perform snapping of Pages.
-@@ -196,6 +202,7 @@ fun VerticalPager(
-     userScrollEnabled: Boolean = true,
- //    reverseLayout: Boolean = false,
-     key: ((index: Int) -> Any)? = null,
-+    keepItemAlive: Boolean = false,
- //    pageNestedScrollConnection: NestedScrollConnection = PagerDefaults.pageNestedScrollConnection(
- //        state,
- //        Orientation.Vertical
-@@ -217,6 +224,7 @@ fun VerticalPager(
-         userScrollEnabled = userScrollEnabled,
- //        reverseLayout = reverseLayout,
-         key = key,
-+        keepItemAlive = keepItemAlive,
- //        pageNestedScrollConnection = pageNestedScrollConnection,
-         snapPosition = SnapPosition.Start,
-         pageContent = pageContent
-diff --git a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/HorizontalPagerDemo1.kt b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/HorizontalPagerDemo1.kt
-index e06379ed507d2ecfc687a756eb8a55edb8b90539..9cac27143b98de9254e04444f4b016b9b798e0b6 100644
---- a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/HorizontalPagerDemo1.kt
-+++ b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/HorizontalPagerDemo1.kt
-@@ -204,7 +204,31 @@ class HorizontalPagerDemo1 : ComposeContainer() {
- 
-             Spacer(Modifier.height(20.dp))
- 
--            // 7. 测试 userScrollEnabled
-+            // 7. 测试 keepItemAlive
-+            Text("7. keepItemAlive = true:")
-+            HorizontalPager(
-+                state = rememberPagerState { 3 },
-+                modifier =
-+                    Modifier
-+                        .height(100.dp)
-+                        .background(Color.LightGray),
-+                keepItemAlive = true,
-+            ) { page ->
-+                Box(
-+                    modifier =
-+                        Modifier
-+                            .fillMaxSize()
-+                            .background(Color.Yellow)
-+                            .padding(4.dp),
-+                    contentAlignment = Alignment.Center,
-+                ) {
-+                    Text("Alive Page $page")
-+                }
-+            }
-+
-+            Spacer(Modifier.height(20.dp))
-+
-+            // 8. 测试 userScrollEnabled
-             var scrollEnabled by remember { mutableStateOf(true) }
-             Box(
-                 modifier =
-@@ -212,7 +236,7 @@ class HorizontalPagerDemo1 : ComposeContainer() {
-                         scrollEnabled = !scrollEnabled
-                     },
-             ) {
--                Text("7. 点击切换滚动状态 (userScrollEnabled = $scrollEnabled):")
-+                Text("8. 点击切换滚动状态 (userScrollEnabled = $scrollEnabled):")
-             }
-             HorizontalPager(
-                 state = rememberPagerState { 5 },
