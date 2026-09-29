@@ -58,6 +58,7 @@ set(SOURCE_SET
         libohos_render/expand/components/richtext/KRCustomEmojiPixmapCache.cpp
         libohos_render/expand/components/scroller/KRScrollerView.cpp
         libohos_render/expand/components/richtext/KRRichTextView.cpp
+        libohos_render/expand/components/richtext/KRSelectableTextView.cpp
         libohos_render/expand/components/richtext/KRParagraph.cpp
         libohos_render/utils/KRLinearGradientParser.cpp
         libohos_render/expand/components/richtext/gradient_richtext/KRGradientRichTextShadow.cpp
