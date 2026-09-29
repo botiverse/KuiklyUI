@@ -54,7 +54,6 @@ import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
 import com.tencent.kuikly.core.views.TextConst
 import org.json.JSONObject
 import kotlin.math.ceil
-import kotlin.math.floor
 import kotlin.math.max
 
 internal const val INLINE_BOX_LAYOUT_JOINER = '\u2060'
@@ -879,6 +878,12 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
 
 class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
 
+    // CSS line-height distributes extra leading around the font's ascent and
+    // descent. Android top/bottom include font-padding extents even when
+    // StaticLayout.setIncludePad(false), which pushes custom fonts such as
+    // Space Grotesk below the equivalent browser baseline. Keep this strictly
+    // metrics-based: glyph-bounds centering makes placement depend on the text
+    // itself and causes editable content to jump while typing.
     override fun chooseHeight(
         text: CharSequence?,
         start: Int,
@@ -887,11 +892,12 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
         lineHeight: Int,
         fm: Paint.FontMetricsInt
     ) {
-        val additional: Int = height - (-fm.top + fm.bottom)
-        fm.top -= ceil((additional / 2.0f).toDouble()).toInt()
-        fm.bottom += floor((additional / 2.0f).toDouble()).toInt()
-        fm.ascent = fm.top
-        fm.descent = fm.bottom
+        val additional: Int = height - (fm.descent - fm.ascent)
+        val topExtra = additional / 2
+        fm.ascent -= topExtra
+        fm.descent += additional - topExtra
+        fm.top = fm.ascent
+        fm.bottom = fm.descent
     }
 }
 
