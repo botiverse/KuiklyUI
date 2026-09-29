@@ -184,8 +184,6 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
                 kuiklyContext.spToPxI(spanProps.fontSize)
             }))
         }
-        val fontWeightSpan = FontWeightSpan(spanProps.fontWeight, index)
-        textSpans.add(fontWeightSpan)
         textSpans.add(StyleSpan(spanProps.fontStyle))
         if (spanProps.fontVariant.isNotEmpty()) {
             textSpans.add(FontVariantSpan(spanProps.fontVariant))
@@ -193,6 +191,8 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
         if (spanProps.fontFamily.isNotEmpty()) {
             textSpans.add(FontFamilySpan(spanProps.fontFamily, kuiklyContext?.getTypeFaceLoader()))
         }
+        val fontWeightSpan = FontWeightSpan(spanProps.fontWeight, index)
+        textSpans.add(fontWeightSpan)
 
         // 修饰相关
         textSpans.add(ForegroundColorSpan(spanProps.color))
@@ -413,10 +413,17 @@ internal class KRSkipInkCustomUnderlineSpan(
  */
 class FontWeightSpan(fontWeight: String, val index: Int = -1) : CharacterStyle() {
 
+    private val requestedWeight = fontWeight.toIntOrNull() ?: FONT_WEIGHT_NORMAL.toInt()
     private val strokeWidth = getFontWeight(fontWeight)
+    private val fakeBold = isBoldWeight(fontWeight)
 
     override fun updateDrawState(tp: TextPaint) {
-        if (strokeWidth != 0f) {
+        val nativeTypefaceSatisfiesWeight =
+            requestedWeight == FONT_WEIGHT_BOLD.toInt() && tp.typeface?.isBold == true
+        if (fakeBold && !nativeTypefaceSatisfiesWeight) {
+            tp.isFakeBoldText = true
+        }
+        if (strokeWidth != 0f && !nativeTypefaceSatisfiesWeight) {
             tp.style = Paint.Style.FILL_AND_STROKE
             tp.strokeWidth = strokeWidth * tp.textSize
         }
@@ -449,6 +456,11 @@ class FontWeightSpan(fontWeight: String, val index: Int = -1) : CharacterStyle()
                 else -> FONT_WEIGHT_NORMAL_VALUE
             }
         }
+
+        private fun isBoldWeight(fontWeight: String): Boolean =
+            fontWeight == FONT_WEIGHT_BOLD ||
+                fontWeight == FONT_WEIGHT_EXTRA_BOLD ||
+                fontWeight == FONT_WEIGHT_BLACK
     }
 }
 
