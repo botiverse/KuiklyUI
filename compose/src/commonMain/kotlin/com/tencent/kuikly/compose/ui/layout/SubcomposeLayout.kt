@@ -346,20 +346,29 @@ fun SubcomposeLayout(
                     return@scroll
                 }
 
-                val prevOffset = kuiklyInfo.contentOffset
                 kuiklyInfo.contentOffset = offset
                 (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
 
-                if (kuiklyInfo.ignoreScrollOffset != null) {
-                    val ignoreOffset = kuiklyInfo.ignoreScrollOffset!!
-                    val epsilon = 0.5 * kuiklyInfo.getDensity()  // 使用 0.5dp 作为误差值
-                    val matched = abs(ignoreOffset.x.minus(scaleParams.offsetX)) <= epsilon
-                        && abs(ignoreOffset.y.minus(scaleParams.offsetY)) <= epsilon
-                    if (matched) {
-                        kuiklyInfo.ignoreScrollOffset = null
+                when (
+                    kuiklyInfo.resolveNativeScrollEvent(
+                        offsetX = scaleParams.offsetX,
+                        offsetY = scaleParams.offsetY,
+                        epsilon = 0.5 * kuiklyInfo.getDensity(),
+                    )
+                ) {
+                    KuiklyScrollInfo.NativeScrollEventDisposition.Consume -> return@scroll
+                    KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly -> {
+                        // Off-target echo of our own programmatic move (native
+                        // clamped or split it). Adopt the reported offset so
+                        // future deltas use the true base, but do not dispatch
+                        // a compose scroll: offsetDirty stays set, so a later
+                        // alignment pass converges once the render-side content
+                        // size has caught up (task #318 joint first-open stall).
+                        kuiklyInfo.composeOffset = offset.toFloat()
+                        return@scroll
                     }
-                    return@scroll
+                    KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch -> Unit
                 }
 
                 // 忽略较小的滑动
