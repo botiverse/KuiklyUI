@@ -19,6 +19,7 @@
 #import "KRLogModule.h"
 #import "KRRichTextView.h"
 #import "KRTextInputEventSequencer.h"
+#import "KRTextBlurEventPayload.h"
 #import "KuiklyRenderBridge.h"
 #import "NSObject+KR.h"
 
@@ -1007,11 +1008,12 @@ NSString *const KRFontContextParamKey = @"contextParam";
     [_textInputEventSequencer invalidatePendingMarkedText];
     _pendingFocusRequestId = nil;
     if (self.css_inputBlur) {
-        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
-        if (_pendingBlurRequestId) {
-            payload[@"focusRequestId"] = _pendingBlurRequestId;
-        }
-        self.css_inputBlur(payload);
+        // Raw output text (attachments restored), never the display string —
+        // otherwise a textPostProcessor field's blur would overwrite the
+        // stored raw value with its visible placeholder.
+        self.css_inputBlur(KRBlurEventPayloadFromAttributedText(self.attributedText,
+                                                                self.text,
+                                                                _pendingBlurRequestId));
     }
     _pendingBlurRequestId = nil;
 }
@@ -1444,30 +1446,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
 }
 
 - (NSString *)p_rawTextFromAttributedText:(NSAttributedString *)attributedText {
-    if (!attributedText) {
-        return self.text;
-    }
-
-    NSMutableString *outputText = [NSMutableString stringWithString:attributedText.string ?: @""];
-    __block NSInteger offset = 0;
-
-    [attributedText enumerateAttribute:NSAttachmentAttributeName
-                               inRange:NSMakeRange(0, attributedText.length)
-                               options:0
-                            usingBlock:^(NSObject *value, NSRange range, BOOL *stop) {
-        if (![value respondsToSelector:@selector(kr_originlTextBeforeTextAttachment)]) {
-            return;
-        }
-        id<KRTextAttachmentStringProtocol> attachment = (id<KRTextAttachmentStringProtocol>)value;
-        NSString *replaceText = [attachment kr_originlTextBeforeTextAttachment];
-        if (replaceText.length == 0) {
-            return;
-        }
-        NSRange replaceRange = NSMakeRange(range.location + offset, range.length);
-        [outputText replaceCharactersInRange:replaceRange withString:replaceText];
-        offset += (NSInteger)replaceText.length - (NSInteger)range.length;
-    }];
-    return outputText;
+    return KRRawTextRestoringAttachments(attributedText, self.text);
 }
 
 - (NSAttributedString *)p_processedAttributedTextForLengthCalculationWithRawText:(NSString *)rawText {

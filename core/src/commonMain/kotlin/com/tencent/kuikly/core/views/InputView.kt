@@ -397,6 +397,13 @@ data class InputParams(
     val length: Int? = null,
     val focusRequestId: Long? = null,
     val focusIntentOnly: Boolean = false,
+    /**
+     * Whether the native event actually carried a "text" key. When false, [text]
+     * is just the empty-string default and must NOT be treated as content —
+     * otherwise a blur event without text would look like the user cleared the
+     * field.
+     */
+    val hasText: Boolean = false,
 )
 
 data class KeyboardParams(
@@ -479,7 +486,7 @@ class InputEvent : Event() {
             it as JSONObject
             val text = it.optString("text")
             val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
-            handler(InputParams(text, focusRequestId = focusRequestId))
+            handler(InputParams(text, focusRequestId = focusRequestId, hasText = it.has("text")))
         }
     }
 

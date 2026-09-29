@@ -415,6 +415,22 @@ internal fun CoreTextField(
         }
     }
     val inputBlurEvent: InputEventHandlerFn = updatedNodeEvent { params ->
+        // Dictation (and other IME paths) may only commit their text at blur time:
+        // iOS textViewDidEndEditing attaches the final textView.text to this event.
+        // If we only cleared focus here, that committed text would never reach
+        // onValueChange and the draft would stay empty. Catch the value up first
+        // when the event actually carries text; platforms whose blur event has no
+        // text key (hasText == false) are completely untouched.
+        if (params.hasText && params.text != lastSyncedTextInputState?.text) {
+            val blurValue = TextFieldValue(
+                text = params.text,
+                selection = TextRange(params.text.length),
+            )
+            lastSyncedTextInputState = TextInputState(text = params.text)
+            autoHeightTextAreaView.getViewAttr().updatePropCache(TextConst.VALUE, params.text)
+            controlledStateArbiter.recordNativeValue(blurValue)
+            onValueChange(blurValue)
+        }
         if (
             kuiklyKeyboardController?.onNativeBlur(
                 autoHeightTextAreaView,
