@@ -1,0 +1,1443 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 18:34:41 +0000
+Subject: feat(compose): support reverse lazy native scroll
+
+Expose reverseLayout on LazyColumn/LazyRow (and wire it through the lazy grids) and map
+the native ScrollView offset to the Compose logical offset as maxNative - native, so item 0
+sits at the native end. A reverse list re-anchors its native offset and placed children when
+the content size changes, keeps its echo guard armed under a finger, and keeps its logical
+offset across viewport resizes. reverseLayout = false maps every offset unchanged.
+
+Fork-Patch: compose-reverse-lazy-native-scroll
+Origin: Tencent-TDS/KuiklyUI#1474
+Upstream-Status: submitted Tencent-TDS/KuiklyUI#1474
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt
+index b68264c8d2fa0959027221df8deaf53637b2f6e9..88a26f31661c55e9f28390923d15bd40ffbf91fa 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt
+@@ -19,6 +19,9 @@ import com.tencent.kuikly.compose.ui.Modifier
+ import com.tencent.kuikly.compose.ui.node.KNode
+ import com.tencent.kuikly.compose.ui.node.ModifierNodeElement
+ import com.tencent.kuikly.compose.ui.node.requireLayoutNode
++import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
++import com.tencent.kuikly.compose.views.KuiklyInfoKey
++import com.tencent.kuikly.compose.views.KuiklyUserBouncesEnableKey
+ import com.tencent.kuikly.core.views.ScrollerView
+ 
+ fun Modifier.bouncesEnable(
+@@ -49,21 +52,36 @@ private class BouncesEnableElement(
+ private class BouncesEnableNode(
+     var bouncesEnable: Boolean
+ ) : Modifier.Node() {
++    private var scrollerView: ScrollerView<*, *>? = null
+ 
+     override fun onAttach() {
+         super.onAttach()
+         update()
+     }
+ 
++    override fun onDetach() {
++        scrollerView?.extProps?.remove(KuiklyUserBouncesEnableKey)
++        scrollerView = null
++        super.onDetach()
++    }
++
+     fun update() {
+-        val layoutNode = requireLayoutNode()
+-        val kNode = layoutNode as? KNode<*> ?: return
+-        // Try current node's view first, then find the first child's ScrollerView
+-        val scrollerView = (kNode.view as? ScrollerView<*, *>)
+-            ?: layoutNode.findFirstChildScrollerView()
+-            ?: return
++        val scrollerView = findScrollerView() ?: return
++        this.scrollerView = scrollerView
++        scrollerView.extProps[KuiklyUserBouncesEnableKey] = bouncesEnable as Any
++        // A reverse lazy list keeps Android bounce off (see updateReverseLayoutBounces).
++        val kuiklyInfo = scrollerView.extProps[KuiklyInfoKey] as? KuiklyScrollInfo
++        val reverseAndroid = kuiklyInfo?.reverseLayout == true && kuiklyInfo.pageData?.isAndroid == true
+         scrollerView.getViewAttr().run {
+-            bouncesEnable(bouncesEnable)
++            bouncesEnable(bouncesEnable && !reverseAndroid)
+         }
+     }
+-}
+\ No newline at end of file
++
++    private fun findScrollerView(): ScrollerView<*, *>? {
++        val layoutNode = requireLayoutNode()
++        val kNode = layoutNode as? KNode<*> ?: return null
++        // Try current node's view first, then find the first child's ScrollerView.
++        return (kNode.view as? ScrollerView<*, *>)
++            ?: layoutNode.findFirstChildScrollerView()
++    }
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyDsl.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyDsl.kt
+index 1167b0331a940b842f9b502f5881ef67405adf1c..397b3dc66b907396e33e9538e22649fbe5c82483 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyDsl.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyDsl.kt
+@@ -332,8 +332,9 @@ fun LazyRow(
+     modifier: Modifier = Modifier,
+     state: LazyListState = rememberLazyListState(),
+     contentPadding: PaddingValues = PaddingValues(0.dp),
+-//    reverseLayout: Boolean = false,
+-    horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
++    reverseLayout: Boolean = false,
++    horizontalArrangement: Arrangement.Horizontal =
++        if (!reverseLayout) Arrangement.Start else Arrangement.End,
+     verticalAlignment: Alignment.Vertical = Alignment.Top,
+     beyondBoundsItemCount: Int = 3,
+ //    flingBehavior: FlingBehavior = ScrollableDefaults.flingBehavior(),
+@@ -349,7 +350,7 @@ fun LazyRow(
+         isVertical = false,
+         beyondBoundsItemCount = beyondBoundsItemCount,
+ //        flingBehavior = flingBehavior,
+-        reverseLayout = false,
++        reverseLayout = reverseLayout,
+         userScrollEnabled = userScrollEnabled,
+         content = content
+     )
+@@ -389,8 +390,9 @@ fun LazyColumn(
+     modifier: Modifier = Modifier,
+     state: LazyListState = rememberLazyListState(),
+     contentPadding: PaddingValues = PaddingValues(0.dp),
+-//    reverseLayout: Boolean = false,
+-    verticalArrangement: Arrangement.Vertical = Arrangement.Top,
++    reverseLayout: Boolean = false,
++    verticalArrangement: Arrangement.Vertical =
++        if (!reverseLayout) Arrangement.Top else Arrangement.Bottom,
+     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+     beyondBoundsItemCount: Int = 3,
+ //    flingBehavior: FlingBehavior = ScrollableDefaults.flingBehavior(),
+@@ -406,7 +408,7 @@ fun LazyColumn(
+         verticalArrangement = verticalArrangement,
+         isVertical = true,
+         beyondBoundsItemCount = beyondBoundsItemCount,
+-        reverseLayout = false,
++        reverseLayout = reverseLayout,
+         userScrollEnabled = userScrollEnabled,
+         content = content
+     )
+@@ -418,7 +420,7 @@ fun LazyColumn(
+     modifier: Modifier = Modifier,
+     state: LazyListState = rememberLazyListState(),
+     contentPadding: PaddingValues = PaddingValues(0.dp),
+-//    reverseLayout: Boolean = false,
++    reverseLayout: Boolean = false,
+     verticalArrangement: Arrangement.Vertical = Arrangement.Top,
+     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+     beyondBoundsItemCount: Int = 3,
+@@ -429,6 +431,7 @@ fun LazyColumn(
+         modifier = modifier,
+         state = state,
+         contentPadding = contentPadding,
++        reverseLayout = reverseLayout,
+         verticalArrangement = verticalArrangement,
+         horizontalAlignment = horizontalAlignment,
+         beyondBoundsItemCount = beyondBoundsItemCount,
+@@ -444,7 +447,7 @@ fun LazyRow(
+     modifier: Modifier = Modifier,
+     state: LazyListState = rememberLazyListState(),
+     contentPadding: PaddingValues = PaddingValues(0.dp),
+-//    reverseLayout: Boolean = false,
++    reverseLayout: Boolean = false,
+     horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
+     verticalAlignment: Alignment.Vertical = Alignment.Top,
+     beyondBoundsItemCount: Int = 3,
+@@ -455,6 +458,7 @@ fun LazyRow(
+         modifier = modifier,
+         state = state,
+         contentPadding = contentPadding,
++        reverseLayout = reverseLayout,
+         horizontalArrangement = horizontalArrangement,
+         verticalAlignment = verticalAlignment,
+         beyondBoundsItemCount = beyondBoundsItemCount,
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
+index 3c9e8b234547a464c51c37e06ef8c9332d68a763..de8d1bf7c2af22ce07d683683d7bff478b32b46f 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
+@@ -86,6 +86,7 @@ internal fun LazyList(
+     val semanticState = rememberLazyListSemanticState(state, isVertical)
+     val coroutineScope = rememberCoroutineScope()
+     state.kuiklyInfo.scope = coroutineScope
++    state.kuiklyInfo.reverseLayout = reverseLayout
+ 
+ //    val graphicsContext = LocalGraphicsContext.current
+ //    val stickyHeadersEnabled = !LocalScrollCaptureInProgress.current
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt
+index b3ae449d13bde088f4b6c08da5eed145794fad63..9bd889b061e6cfc421952014c9bf16d51c15e4ac 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyListState.kt
+@@ -500,7 +500,7 @@ class LazyListState
+                     pending = initialNativeViewportPending,
+                     hasItems = layoutInfo.totalItemsCount > 0,
+                     isComposeAtTop = isComposeAtTopForScrollSync(),
+-                    contentOffset = kuiklyInfo.contentOffset,
++                    contentOffset = kuiklyInfo.logicalContentOffset,
+                     composeOffset = kuiklyInfo.composeOffset.toInt(),
+                     isDragging = kuiklyInfo.scrollView?.isDragging == true,
+                     hasScrollView = kuiklyInfo.scrollView != null,
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGrid.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGrid.kt
+index 062c47c57a01d181dd8ede3256b1a50fe2bbc9f3..97dee0789ede0dc31a319897cf868775f3c43ec9 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGrid.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGrid.kt
+@@ -80,6 +80,7 @@ internal fun LazyGrid(
+ 
+     val coroutineScope = rememberCoroutineScope()
+     state.kuiklyInfo.scope = coroutineScope
++    state.kuiklyInfo.reverseLayout = reverseLayout
+ //    val graphicsContext = LocalGraphicsContext.current
+     val measurePolicy = rememberLazyGridMeasurePolicy(
+         itemProviderLambda,
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGridDsl.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGridDsl.kt
+index 50f8f9c62f3a5bc1c0bac9351760a65104180cb6..5551ce1ac3ea27f1202f20d3e656d875eb6043fa 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGridDsl.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/grid/LazyGridDsl.kt
+@@ -137,7 +137,7 @@ fun LazyHorizontalGrid(
+         modifier = modifier,
+         state = state,
+         contentPadding = contentPadding,
+-        reverseLayout = false,
++        reverseLayout = reverseLayout,
+         isVertical = false,
+         horizontalArrangement = horizontalArrangement,
+         verticalArrangement = verticalArrangement,
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/staggeredgrid/LazyStaggeredGrid.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/staggeredgrid/LazyStaggeredGrid.kt
+index b49746f04dd0a13b9995aa5453f7b9405d743b0a..16ea19003b12eb4ba35e4527b7f992034f5aec13 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/staggeredgrid/LazyStaggeredGrid.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/staggeredgrid/LazyStaggeredGrid.kt
+@@ -60,6 +60,7 @@ internal fun LazyStaggeredGrid(
+     val itemProviderLambda = rememberStaggeredGridItemProviderLambda(state, content)
+     val coroutineScope = rememberCoroutineScope()
+     state.kuiklyInfo.scope = coroutineScope
++    state.kuiklyInfo.reverseLayout = reverseLayout
+ //    val graphicsContext = LocalGraphicsContext.current
+     val measurePolicy = rememberStaggeredGridMeasurePolicy(
+         state,
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+index 77578fc650bd5059ce1324e9bfa064e72c52ad44..dbfb6979494dd8d5bcefb28159f1da775fb5d2ec 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+@@ -23,6 +23,7 @@ import com.tencent.kuikly.compose.foundation.gestures.Orientation
+ import com.tencent.kuikly.compose.scroller.AndroidBackgroundAlignmentState
+ import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
+ import com.tencent.kuikly.compose.ui.unit.IntOffset
++import com.tencent.kuikly.compose.views.moveNativeContentOffset
+ import com.tencent.kuikly.core.datetime.DateTime
+ import com.tencent.kuikly.core.layout.Frame
+ import com.tencent.kuikly.core.manager.BridgeManager
+@@ -162,7 +163,12 @@ class KuiklyScrollInfo {
+          *  compose scroll. */
+         SyncOnly,
+         /** Genuine scroll: dispatch to compose. */
+-        Dispatch
++        Dispatch,
++        /** Reverse layout only: callback while a programmatic move is pending.
++         *  A reverse move can change the native coordinate frame (re-anchoring
++         *  after a content size change), so a callback emitted before native
++         *  applied it is in the old frame: neither dispatch nor adopt it. */
++        Drop
+     }
+ 
+     internal fun resolveNativeScrollEvent(
+@@ -178,10 +184,10 @@ class KuiklyScrollInfo {
+                 ignoreScrollOffset = null
+                 // A pending-window SyncOnly may have moved the bookkeeping to a
+                 // stale pre-move offset; the echo confirms the move's target.
+-                composeOffset = (if (isVertical()) pending.y else pending.x).toFloat()
++                composeOffset = logicalOffsetFromNative(mainAxisOffset(pending)).toFloat()
+                 NativeScrollEventDisposition.Consume
+             }
+-            isDragging -> {
++            isDragging && !reverseLayout -> {
+                 // A finger on the screen owns the viewport: never swallow real input.
+                 ignoreScrollOffset = null
+                 NativeScrollEventDisposition.Dispatch
+@@ -192,6 +198,9 @@ class KuiklyScrollInfo {
+                 ignoreScrollOffset = null
+                 NativeScrollEventDisposition.SyncOnly
+             }
++            // A reverse list keeps the guard even under a finger: a callback in the
++            // pre-move frame would be a phantom jump of the whole re-anchor delta.
++            reverseLayout -> NativeScrollEventDisposition.Drop
+             else -> NativeScrollEventDisposition.SyncOnly
+         }
+     }
+@@ -217,6 +226,18 @@ class KuiklyScrollInfo {
+      */
+     var orientation: Orientation = Orientation.Vertical
+ 
++    /**
++     * Whether the bound lazy layout uses reverseLayout: item 0 sits at the native end and
++     * [composeOffset] is measured from the native maximum offset (see [ReverseScrollOffsetMapping]).
++     */
++    internal var reverseLayout: Boolean = false
++
++    /**
++     * Content size the native offset and placed children of a reverse list are anchored to.
++     * Null until the first bind; unused without [reverseLayout].
++     */
++    private var reverseAnchoredContentSize: Int? = null
++
+     /**
+      * Offset on the Compose side, does not exceed boundaries
+      */
+@@ -361,11 +382,20 @@ class KuiklyScrollInfo {
+     var scrollToTopCallback: (() -> Unit)? = null
+ 
+     /**
+-     * Update content size to render view
++     * Update content size to render view.
++     * A reverse list then re-anchors its native offset to the new size unless
++     * [reanchorReverse] is false (the scroll handler re-anchors after dispatching).
+      */
+     fun updateContentSizeToRender() {
++        updateContentSizeToRender(reanchorReverse = true)
++    }
++
++    internal fun updateContentSizeToRender(reanchorReverse: Boolean) {
+         val frame = createContentFrame()
+         scrollView?.contentView?.setFrameToRenderView(frame)
++        if (reanchorReverse) {
++            reanchorReverseNativeOffset()
++        }
+     }
+ 
+     /**
+@@ -382,6 +412,7 @@ class KuiklyScrollInfo {
+         contentOffset = 0
+         isDragging = false
+         offsetDirty = false
++        reverseAnchoredContentSize = null
+ 
+         // Reset content size related (reinitialize based on current density)
+         currentContentSize = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
+@@ -398,18 +429,20 @@ class KuiklyScrollInfo {
+      * Create content Frame
+      */
+     private fun createContentFrame(): Frame {
++        // A short reverse list is placed at the viewport end; keep its children inside the content view.
++        val renderedContentSize = if (reverseLayout) maxOf(currentContentSize, viewportSize) else currentContentSize
+         return if (isVertical()) {
+             Frame(
+                 x = 0f,
+                 y = 0f,
+                 width = scrollView?.renderView?.currentFrame?.width ?: 0f,
+-                height = currentContentSize / getDensity()
++                height = renderedContentSize / getDensity()
+             )
+         } else {
+             Frame(
+                 x = 0f,
+                 y = 0f,
+-                width = currentContentSize / getDensity(),
++                width = renderedContentSize / getDensity(),
+                 height = scrollView?.renderView?.currentFrame?.height ?: 0f
+             )
+         }
+@@ -449,6 +482,144 @@ class KuiklyScrollInfo {
+      */
+     fun nearScrollBottom(): Boolean {
+         val threshold = SCROLL_BOTTOM_THRESHOLD * getDensity()
+-        return contentOffset + viewportSize + threshold > currentContentSize
++        return logicalContentOffset + viewportSize + threshold > currentContentSize
++    }
++
++    /** Main-axis component of an offset pair. */
++    internal fun mainAxisOffset(offset: IntOffset): Int = if (isVertical()) offset.y else offset.x
++
++    /** Offset pair for a main-axis offset. */
++    internal fun offsetFromMainAxis(mainAxisOffset: Int): IntOffset =
++        if (isVertical()) IntOffset(0, mainAxisOffset) else IntOffset(mainAxisOffset, 0)
++
++    /** Native scroll range of the anchored coordinate frame. */
++    internal val anchoredMaxNativeOffset: Int
++        get() = ReverseScrollOffsetMapping.maxNativeOffset(
++            reverseAnchoredContentSize ?: currentContentSize,
++            viewportSize
++        )
++
++    /**
++     * Native scroll offset expressed as a logical offset: [contentOffset] itself without
++     * reverse layout, the Compose-owned [composeOffset] with it.
++     */
++    internal val logicalContentOffset: Int
++        get() = if (reverseLayout) composeOffset.toInt() else contentOffset
++
++    /** Convert a native offset reported by the ScrollView to a Compose logical offset. */
++    internal fun logicalOffsetFromNative(nativeOffset: Int): Int =
++        if (reverseLayout) {
++            ReverseScrollOffsetMapping.logicalFromNative(nativeOffset, anchoredMaxNativeOffset, true)
++        } else {
++            nativeOffset
++        }
++
++    /** Native offset to scroll to for a Compose logical offset. */
++    internal fun nativeTargetFromLogical(logicalOffset: Float): Int =
++        if (reverseLayout) {
++            ReverseScrollOffsetMapping.nativeTargetFromLogical(logicalOffset.toInt(), anchoredMaxNativeOffset, true)
++        } else {
++            logicalOffset.toInt()
++        }
++
++    /** Native content coordinate offset added to child positions in the ScrollView. */
++    internal fun renderOffset(): Float =
++        if (reverseLayout) {
++            ReverseScrollOffsetMapping.renderFromLogical(composeOffset, anchoredMaxNativeOffset, true)
++        } else {
++            composeOffset
++        }
++
++    /** Native offset the scroll handlers map: reverse lists on Android clamp (their bounce is off). */
++    internal fun boundedNativeScrollOffset(nativeOffset: Int): Int =
++        ReverseScrollOffsetMapping.boundedNativeOffset(
++            nativeOffset,
++            anchoredMaxNativeOffset,
++            clamp = reverseLayout && pageData?.isAndroid == true
++        )
++
++    /** Anchor a reverse list's native frame to the current content size (bind/restore). */
++    internal fun anchorReverseContentSize() {
++        reverseAnchoredContentSize = currentContentSize
++    }
++
++    private fun reportedNativeOffset(): Float {
++        val sv = scrollView ?: return contentOffset.toFloat()
++        return (if (isVertical()) sv.curOffsetY else sv.curOffsetX) * getDensity()
++    }
++
++    private fun needsNativeMove(target: Int): Boolean =
++        ReverseScrollOffsetMapping.needsNativeMove(
++            target = target,
++            pendingTarget = ignoreScrollOffset?.let { mainAxisOffset(it) },
++            reportedNativeOffset = reportedNativeOffset(),
++            epsilon = 0.5f * getDensity()
++        )
++
++    /**
++     * Reverse layout: move the native frame to the current content size. Children shift by the
++     * change of the native maximum and the native offset follows [composeOffset], so the items
++     * on screen stay put. With [force] the native offset is re-synced even if the size did not
++     * change (a reported offset outside the range was clamped).
++     */
++    internal fun reanchorReverseNativeOffset(force: Boolean = false) {
++        if (!reverseLayout) return
++        val sv = scrollView ?: return
++        val move = ReverseScrollOffsetMapping.reanchor(
++            anchoredContentSize = reverseAnchoredContentSize ?: currentContentSize,
++            contentSize = currentContentSize,
++            viewportSize = viewportSize,
++            logicalOffset = composeOffset.toInt()
++        )
++        reverseAnchoredContentSize = currentContentSize
++        if (move.nativeDelta == 0 && !force) return
++        val issueMove = needsNativeMove(move.nativeOffset)
++        if (!issueMove && move.nativeDelta == 0) return
++        contentOffset = move.nativeOffset
++        val target = offsetFromMainAxis(move.nativeOffset)
++        if (issueMove) {
++            ignoreScrollOffset = target
++        }
++        sv.moveNativeContentOffset(if (issueMove) target else null, move.nativeDelta, this)
++    }
++
++    /**
++     * Reverse layout: apply a logical delta (top expansion, pull-back, programmatic scroll)
++     * as the mirrored native move from the Compose-owned offset.
++     */
++    internal fun applyReverseLogicalOffsetDelta(logicalDelta: Int) {
++        val sv = scrollView ?: return
++        reanchorReverseNativeOffset()
++        val move = ReverseScrollOffsetMapping.reverseLogicalMove(
++            logicalOffset = composeOffset.toInt(),
++            logicalDelta = logicalDelta,
++            maxNativeOffset = anchoredMaxNativeOffset
++        )
++        composeOffset = move.logicalOffset.toFloat()
++        if (move.nativeDelta == 0) return
++        contentOffset = move.nativeOffset
++        val target = offsetFromMainAxis(move.nativeOffset)
++        ignoreScrollOffset = target
++        sv.moveNativeContentOffset(target, move.nativeDelta, this)
++    }
++
++    /**
++     * Reverse layout: keep the logical offset across a viewport resize and return the native
++     * target to replay once the new frame is committed, or null if native is already there.
++     */
++    internal fun prepareReverseViewportChange(newViewportSize: Int): IntOffset? {
++        val move = ReverseScrollOffsetMapping.reverseViewportChange(
++            logicalOffset = composeOffset.toInt(),
++            contentSize = reverseAnchoredContentSize ?: currentContentSize,
++            newViewportSize = newViewportSize
++        )
++        if (move.logicalOffset != composeOffset.toInt()) {
++            composeOffset = move.logicalOffset.toFloat()
++        }
++        if (!needsNativeMove(move.nativeOffset)) return null
++        contentOffset = move.nativeOffset
++        val target = offsetFromMainAxis(move.nativeOffset)
++        ignoreScrollOffset = target
++        return target
+     }
+ }
+\ No newline at end of file
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..6df0be7b6fede94faa4744e535f91f634ae3f7c3
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+@@ -0,0 +1,131 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.gestures
++
++import kotlin.math.abs
++
++/**
++ * Pure mapping between the native ScrollView offset and the Compose logical scroll offset.
++ *
++ * Compose keeps one logical offset ([KuiklyScrollInfo.composeOffset]) that grows away from
++ * item 0. With `reverseLayout = true` item 0 sits at the native bottom (or end), so the
++ * logical offset is the distance from the native maximum offset:
++ * `logical = maxNative - native`. Without reverse layout both offsets are the same value and
++ * every function here is the identity, so the default path is unchanged.
++ *
++ * The native maximum depends on the content size, which Kuikly estimates and grows while
++ * scrolling. A reverse list keeps its native coordinate frame anchored to one content size;
++ * when the content size changes, the native offset and the already placed children move by
++ * the same amount so the logical offset, and the items on screen, stay put.
++ */
++internal object ReverseScrollOffsetMapping {
++
++    /** Native scroll range for [contentSize] inside [viewportSize]. */
++    fun maxNativeOffset(contentSize: Int, viewportSize: Int): Int =
++        maxOf(0, contentSize - viewportSize)
++
++    /** Logical offset reported to Compose for a native offset (unclamped, so bounces stay visible). */
++    fun logicalFromNative(nativeOffset: Int, maxNativeOffset: Int, reverseLayout: Boolean): Int =
++        if (reverseLayout) maxNativeOffset - nativeOffset else nativeOffset
++
++    /** Native content coordinate offset used to place children for a logical offset. */
++    fun renderFromLogical(logicalOffset: Float, maxNativeOffset: Int, reverseLayout: Boolean): Float =
++        if (reverseLayout) maxNativeOffset - logicalOffset else logicalOffset
++
++    /**
++     * Native offset to scroll to for a logical offset. Reverse targets are clamped into the
++     * native range: a target outside it is clamped by the platform and never echoes exactly.
++     */
++    fun nativeTargetFromLogical(logicalOffset: Int, maxNativeOffset: Int, reverseLayout: Boolean): Int =
++        if (reverseLayout) {
++            maxNativeOffset - logicalOffset.coerceIn(0, maxNativeOffset)
++        } else {
++            logicalOffset
++        }
++
++    /** Native delta for a logical delta. */
++    fun nativeDeltaFromLogical(logicalDelta: Int, reverseLayout: Boolean): Int =
++        if (reverseLayout) -logicalDelta else logicalDelta
++
++    /**
++     * Native offset the scroll handlers map. Only reverse lists without native bounce (Android)
++     * clamp: an Android over-scroll translates the content view past the range, which a reverse
++     * mapping would read as a jump at the list start.
++     */
++    fun boundedNativeOffset(nativeOffset: Int, maxNativeOffset: Int, clamp: Boolean): Int =
++        if (clamp) nativeOffset.coerceIn(0, maxNativeOffset) else nativeOffset
++
++    /** A programmatic move of a reverse list: logical result and the native move that realises it. */
++    data class Move(val logicalOffset: Int, val nativeOffset: Int, val nativeDelta: Int)
++
++    /**
++     * Apply a logical delta to a reverse list at [logicalOffset]. The result stays inside the
++     * native range so its echo can be matched exactly.
++     */
++    fun reverseLogicalMove(logicalOffset: Int, logicalDelta: Int, maxNativeOffset: Int): Move {
++        val from = nativeTargetFromLogical(logicalOffset, maxNativeOffset, reverseLayout = true)
++        val toLogical = (logicalOffset + logicalDelta).coerceIn(0, maxNativeOffset)
++        val to = nativeTargetFromLogical(toLogical, maxNativeOffset, reverseLayout = true)
++        return Move(logicalOffset = toLogical, nativeOffset = to, nativeDelta = to - from)
++    }
++
++    /**
++     * Re-anchor a reverse list after its content size changed from [anchoredContentSize] to
++     * [contentSize]: children shift by [Move.nativeDelta] and the native offset moves to
++     * [Move.nativeOffset], keeping [logicalOffset].
++     */
++    fun reanchor(
++        anchoredContentSize: Int,
++        contentSize: Int,
++        viewportSize: Int,
++        logicalOffset: Int,
++    ): Move {
++        val oldMax = maxNativeOffset(anchoredContentSize, viewportSize)
++        val newMax = maxNativeOffset(contentSize, viewportSize)
++        return Move(
++            logicalOffset = logicalOffset,
++            nativeOffset = nativeTargetFromLogical(logicalOffset, newMax, reverseLayout = true),
++            nativeDelta = newMax - oldMax,
++        )
++    }
++
++    /**
++     * Keep the logical offset of a reverse list across a viewport resize (for example the
++     * keyboard): item 0 stays at the bottom edge. Children need no shift, because Compose
++     * re-places them relative to the new viewport, which cancels the change of the native maximum.
++     */
++    fun reverseViewportChange(logicalOffset: Int, contentSize: Int, newViewportSize: Int): Move {
++        val newMax = maxNativeOffset(contentSize, newViewportSize)
++        val logical = logicalOffset.coerceIn(0, newMax)
++        return Move(
++            logicalOffset = logical,
++            nativeOffset = nativeTargetFromLogical(logical, newMax, reverseLayout = true),
++            nativeDelta = 0,
++        )
++    }
++
++    /**
++     * Whether a native offset move to [target] must be issued (and its echo guarded).
++     * A move to where native already is, or already heading, emits no scroll callback,
++     * so arming the echo guard for it would swallow user input until the guard times out.
++     */
++    fun needsNativeMove(target: Int, pendingTarget: Int?, reportedNativeOffset: Float, epsilon: Float): Boolean =
++        if (pendingTarget != null) {
++            pendingTarget != target
++        } else {
++            abs(reportedNativeOffset - target) > epsilon
++        }
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt
+index 4fc48bcb5a38dbbd6eb2e972002ba238ab954fda..145834a61deff8faee2189f9255b6c590495f55f 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/layout/SubcomposeLayoutEx.kt
+@@ -169,7 +169,14 @@ internal fun restoreScrollerViewOnReuse(
+     kuiklyInfo.realContentSize = null
+ 
+     // Restore contentSize first (UIKit clamps contentOffset to contentSize bounds)
+-    kuiklyInfo.updateContentSizeToRender()
++    kuiklyInfo.updateContentSizeToRender(reanchorReverse = false)
++
++    if (kuiklyInfo.reverseLayout) {
++        // A reverse list derives its native offset from the restored logical offset
++        // in the frame of the restored content size (item 0 at the native end).
++        kuiklyInfo.anchorReverseContentSize()
++        kuiklyInfo.contentOffset = kuiklyInfo.nativeTargetFromLogical(kuiklyInfo.composeOffset)
++    }
+ 
+     // Restore contentOffset with ignoreScrollOffset protection.
+     // Skip ignoreScrollOffset when oldSvOffset == restoreOffset, because setContentOffset
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+index cd3a2e504980e8c405c68484ca0c8a31b39fbb3f..85e911cec1c9452e0dd74b41290279fae3e95d8a 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+@@ -89,7 +89,7 @@ internal fun ScrollableState.calculateContentSize(): Int {
+     return contentSize.toInt()
+ }
+ 
+-internal fun ScrollableState.calculateAndUpdateContentSize() {
++internal fun ScrollableState.calculateAndUpdateContentSize(reanchorReverse: Boolean = true) {
+     // 更新当前的contentSize大小
+     val oldContentSize = kuiklyInfo.currentContentSize
+     val newContentSize = calculateContentSize()
+@@ -107,7 +107,7 @@ internal fun ScrollableState.calculateAndUpdateContentSize() {
+     } else {
+         kuiklyInfo.currentContentSize = newContentSize
+     }
+-    kuiklyInfo.updateContentSizeToRender()
++    kuiklyInfo.updateContentSizeToRender(reanchorReverse)
+ }
+ 
+ internal fun PaddingValues.totalPadding(orientation: Orientation): Dp {
+@@ -344,7 +344,7 @@ internal fun ScrollableState.tryExpandStartSize(offset: Int, isScrolling: Boolea
+         delta = max(delta ?: minDelta, minDelta)
+ 
+         val littleDelta = (ScrollableStateConstants.SCROLL_THRESHOLD * density).toInt()
+-        val maxDelta = kuiklyInfo.currentContentSize - kuiklyInfo.viewportSize - kuiklyInfo.contentOffset
++        val maxDelta = kuiklyInfo.currentContentSize - kuiklyInfo.viewportSize - kuiklyInfo.logicalContentOffset
+ 
+         if ((delta + littleDelta) > maxDelta) {
+             // 不够直接扩容offset，先扩容contentSize
+@@ -379,13 +379,13 @@ internal fun ScrollableState.tryExpandStartSizeNoScroll(forceExpand: Boolean = f
+             applyAlignment = applyAlignment@{ isCurrent ->
+                 val minDelta = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
+                 val epsilon = 0.5 * getDensity()  // 使用 0.5dp 作为误差值
+-                val reachBtm = contentOffset + viewportSize - currentContentSize >= -epsilon
++                val reachBtm = logicalContentOffset + viewportSize - currentContentSize >= -epsilon
+ 
+-                if (contentOffset <= 0 && !isComposeAtTopForScrollSync() && (forceExpand || scrollView?.isDragging != true)) {
++                if (logicalContentOffset <= 0 && !isComposeAtTopForScrollSync() && (forceExpand || scrollView?.isDragging != true)) {
+                     // 整体把offset 加一下
+-                    var delta = calculateBackExpandSize(contentOffset)
++                    var delta = calculateBackExpandSize(logicalContentOffset)
+                     delta = max(delta ?: minDelta, minDelta)
+-                    val maxDelta = currentContentSize - viewportSize - contentOffset
++                    val maxDelta = currentContentSize - viewportSize - logicalContentOffset
+                     if (delta > maxDelta) {
+                         // 不够直接扩容offset，先扩容contentSize
+                         currentContentSize += (delta - maxDelta + minDelta)
+@@ -407,9 +407,9 @@ internal fun ScrollableState.tryExpandStartSizeNoScroll(forceExpand: Boolean = f
+                     }
+                     applyScrollViewOffsetDelta(delta)
+                     offsetDirty = true
+-                } else if (contentOffset > 0 && isComposeAtTopForScrollSync()) {
++                } else if (logicalContentOffset > 0 && isComposeAtTopForScrollSync()) {
+                     // compose 到顶了，但是scrollview没到顶
+-                    applyScrollViewOffsetDelta(-contentOffset)
++                    applyScrollViewOffsetDelta(-logicalContentOffset)
+                     offsetDirty = false
+                 } else if (isAtTop() && realContentSize == null && lastItemVisible() && scrollView?.isDragging != true) {
+                     // 更新当前的contentSize大小
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt
+index 99451f7a816c40c42d0abf9e2c00182f98703568..5713cf6170835b167ec0ea463111019dfe2240ad 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ScrollableStateExtensions.kt
+@@ -139,7 +139,7 @@ internal fun ScrollableState.lastItemVisible(): Boolean = when(this) {
+  */
+ internal fun ScrollableState.isValidOffsetDelta(delta: Int): Boolean {
+     if (kuiklyInfo.scrollView?.renderView == null || delta == 0) return false
+-    val newOffset = kuiklyInfo.contentOffset + delta
++    val newOffset = kuiklyInfo.logicalContentOffset + delta
+     return newOffset >= 0 && newOffset <= (kuiklyInfo.currentContentSize - kuiklyInfo.viewportSize)
+ }
+ 
+@@ -180,6 +180,12 @@ internal fun ScrollableState.applyScrollViewOffsetDelta(delta: Int) {
+         return
+     }
+ 
++    if (kuiklyInfo.reverseLayout) {
++        // Logical delta; the reverse native move is mirrored from the Compose-owned offset.
++        kuiklyInfo.applyReverseLogicalOffsetDelta(delta)
++        return
++    }
++
+     val newOffset = kuiklyInfo.scrollView!!.applyOffsetDelta(delta, kuiklyInfo)
+     kuiklyInfo.composeOffset = if (kuiklyInfo.orientation == Orientation.Vertical) {
+         newOffset.y.toFloat()
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+index 38bffc90891506c0d5b7d4fdc96618634929eec9..8834bfbb08690ff7e76dcbe04d3ab0d007062775 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+@@ -73,6 +73,7 @@ import com.tencent.kuikly.compose.ui.unit.LayoutDirection
+ import com.tencent.kuikly.compose.ui.util.fastForEach
+ import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
+ import com.tencent.kuikly.compose.views.KuiklyInfoKey
++import com.tencent.kuikly.compose.views.KuiklyUserBouncesEnableKey
+ import com.tencent.kuikly.compose.views.VirtualNodeView
+ import com.tencent.kuikly.compose.layout.bindKuiklyInfo
+ import com.tencent.kuikly.compose.layout.checkOffScreenNode
+@@ -247,6 +248,8 @@ fun SubcomposeLayout(
+ 
+     LaunchedEffect(scrollViewSize) {
+         scrollableState.calculateAndUpdateContentSize()
++        // Reverse lists: make sure native follows the logical offset in the resized viewport.
++        scrollableState.kuiklyInfo.reanchorReverseNativeOffset(force = true)
+     }
+ 
+     // 更新kuiklyInfo和scrollview
+@@ -307,10 +310,14 @@ fun SubcomposeLayout(
+             }
+             scrollEnd {
+                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
+-                val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
++                val rawOffset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
++                val offset = kuiklyInfo.boundedNativeScrollOffset(rawOffset)
+                 kuiklyInfo.contentOffset = offset
+                 (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
+                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
++                if (offset != rawOffset) {
++                    kuiklyInfo.reanchorReverseNativeOffset(force = true)
++                }
+ 
+                 // 仅触摸滑动结束会回调，api调用和bounce回弹都不会触发
+                 // / back是回滑,forward是前滑
+@@ -321,14 +328,21 @@ fun SubcomposeLayout(
+             }
+             dragEnd {
+                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
+-                val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
++                val rawOffset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
++                val offset = kuiklyInfo.boundedNativeScrollOffset(rawOffset)
+                 kuiklyInfo.contentOffset = offset
++                if (offset != rawOffset) {
++                    kuiklyInfo.reanchorReverseNativeOffset(force = true)
++                }
+                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
+                 (scrollableState as? PagerState)?.onNativeDragEnd()
+             }
+             scroll {
+                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
+-                val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
++                val rawOffset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
++                // Identity unless a reverse list on Android reports an offset outside the range.
++                val offset = kuiklyInfo.boundedNativeScrollOffset(rawOffset)
++                val nativeOffsetOutOfBounds = offset != rawOffset
+                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
+                 (scrollableState as? PagerState)?.onNativeScroll()
+ 
+@@ -359,6 +373,8 @@ fun SubcomposeLayout(
+                     )
+                 ) {
+                     KuiklyScrollInfo.NativeScrollEventDisposition.Consume -> return@scroll
++                    // Reverse layout: pre-move frame, the pending move's echo settles it.
++                    KuiklyScrollInfo.NativeScrollEventDisposition.Drop -> return@scroll
+                     KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly -> {
+                         // Off-target echo of our own programmatic move (native
+                         // clamped or split it). Adopt the reported offset so
+@@ -366,20 +382,27 @@ fun SubcomposeLayout(
+                         // a compose scroll: offsetDirty stays set, so a later
+                         // alignment pass converges once the render-side content
+                         // size has caught up (task #318 joint first-open stall).
+-                        kuiklyInfo.composeOffset = offset.toFloat()
++                        kuiklyInfo.composeOffset = kuiklyInfo.logicalOffsetFromNative(offset).toFloat()
+                         return@scroll
+                     }
+                     KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch -> Unit
+                 }
+ 
++                // Compose logical offset: the native offset itself unless reverseLayout.
++                val logicalOffset = kuiklyInfo.logicalOffsetFromNative(offset)
++
+                 // 忽略较小的滑动
+-                val delta = offset - kuiklyInfo.composeOffset
++                val delta = logicalOffset - kuiklyInfo.composeOffset
+                 if (delta.toInt() == 0) {
++                    if (nativeOffsetOutOfBounds) {
++                        kuiklyInfo.reanchorReverseNativeOffset(force = true)
++                    }
+                     return@scroll
+                 }
+ 
+                 // 更新当前的contentSize大小
+-                scrollableState.calculateAndUpdateContentSize()
++                // (a reverse list re-anchors below, once Compose has consumed this delta)
++                scrollableState.calculateAndUpdateContentSize(reanchorReverse = false)
+ 
+                 val toButtomDelta = if (kuiklyInfo.realContentSize == null) {
+                     null
+@@ -387,11 +410,13 @@ fun SubcomposeLayout(
+                     kuiklyInfo.realContentSize!! - kuiklyInfo.viewportSize - kuiklyInfo.composeOffset
+                 }
+                 // 判断是否滑出边界
+-                if (offset < 0 && scrollableState.isAtTop()) {
++                if (logicalOffset < 0 && scrollableState.isAtTop()) {
++                    kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
+                     return@scroll
+                 } else if (toButtomDelta != null && delta > toButtomDelta) {
+                     if (toButtomDelta.toInt() <= 0) {
+-                        scrollableState.tryExpandStartSize(offset, true)
++                        kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
++                        scrollableState.tryExpandStartSize(logicalOffset, true)
+                         return@scroll
+                     }
+                     kuiklyInfo.composeOffset += min(delta, toButtomDelta)
+@@ -401,9 +426,10 @@ fun SubcomposeLayout(
+ 
+                 // 触发compose滑动，并重新布局
+                 val comsumedDelta = scrollableState.kuiklyOnScroll(delta)
++                kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
+ 
+                 // 尝试扩容
+-                scrollableState.tryExpandStartSize(offset, true)
++                scrollableState.tryExpandStartSize(logicalOffset, true)
+             }
+ 
+             // Listen to native "scroll to top" event and scroll to index 0
+@@ -476,6 +502,7 @@ fun SubcomposeLayout(
+                 val newKuiklyInfo = scrollableState.kuiklyInfo
+                 invalidateDeferredScrollOffsetAlignmentOnReuse(oldKuiklyInfo, newKuiklyInfo)
+                 val kuiklyInfo = bindKuiklyInfo(sv, scrollableState, orientation)
++                updateReverseLayoutBounces(sv, oldKuiklyInfo, kuiklyInfo)
+                 transferScrollToTopCallback(oldKuiklyInfo, kuiklyInfo)
+                 restoreScrollerViewOnReuse(sv, kuiklyInfo, isPagerView, orientation, oldKuiklyInfo?.contentOffset)
+ 
+@@ -1600,6 +1627,25 @@ internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotActivation() {
+     (this as? KNode<*>)?.invalidateDrawAndForceAncestors()
+ }
+ 
++/**
++ * Android over-scroll translates the content view past the native range, which a reverse
++ * list would read as a jump at its start: keep bounce off while a reverse list is bound,
++ * and restore the user's [com.tencent.kuikly.compose.extension.bouncesEnable] choice after.
++ */
++private fun updateReverseLayoutBounces(
++    sv: ScrollerView<ScrollerAttr, ScrollerEvent>,
++    oldKuiklyInfo: KuiklyScrollInfo?,
++    kuiklyInfo: KuiklyScrollInfo,
++) {
++    val reverseAndroid = kuiklyInfo.pageData?.isAndroid == true && kuiklyInfo.reverseLayout
++    if (reverseAndroid) {
++        sv.getViewAttr().bouncesEnable(false)
++    } else if (oldKuiklyInfo?.pageData?.isAndroid == true && oldKuiklyInfo.reverseLayout) {
++        val userBouncesEnable = sv.extProps[KuiklyUserBouncesEnableKey] as? Boolean
++        sv.getViewAttr().bouncesEnable(userBouncesEnable ?: true)
++    }
++}
++
+ private val ReusedSlotId =
+     object {
+         override fun toString(): String = "ReusedSlotId"
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/KNode.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/KNode.kt
+index b8a210a26173152c967072811634e1d7efd16b88..6fe19754b6635e9b34c53cb38b5ba4c4d35dcc45 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/KNode.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/KNode.kt
+@@ -314,7 +314,7 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
+         if (ksScrollSubView && needFixScrollOffset) {
+             val scrollerView = (parent as KNode<*>).view
+             ((scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo)?.apply {
+-                val deltaOffset = composeOffset + snapAnchorOffsetCorrection
++                val deltaOffset = renderOffset() + snapAnchorOffsetCorrection
+                 pos = if (orientation == Orientation.Vertical) {
+                     Offset(pos.x, pos.y + deltaOffset)
+                 } else {
+@@ -401,6 +401,15 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
+             (newFrame.width * kuiklyInfo.getDensity()).toInt()
+         }
+ 
++        if (kuiklyInfo.reverseLayout) {
++            // Item 0 stays at the native end: keep the logical offset and replay the mirrored
++            // native offset once the new frame is committed (for growth as well as shrink).
++            // Same rounding as KuiklyScrollInfo.viewportSize, which maps the echo later.
++            return kuiklyInfo.prepareReverseViewportChange(
++                newViewportSize = (newHeight * kuiklyInfo.getDensity()).roundToInt()
++            )
++        }
++
+         val pendingProgrammaticOffset = kuiklyInfo.ignoreScrollOffset
+         correctedComposeOffsetForViewportChange(
+             composeOffset = kuiklyInfo.composeOffset.toInt(),
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/views/ScrollViewEx.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/views/ScrollViewEx.kt
+index 55638f1eb2f392c30996011ab483d68bd4423439..901c497639b84ed42f75dc6a4c56dca970525859 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/views/ScrollViewEx.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/views/ScrollViewEx.kt
+@@ -28,6 +28,7 @@ import com.tencent.kuikly.core.views.ScrollerView
+ import kotlin.math.max
+ 
+ internal val KuiklyInfoKey = "KuiklyInfoKey"
++internal val KuiklyUserBouncesEnableKey = "KuiklyUserBouncesEnableKey"
+ 
+ internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.calNewOffset(curOffset: IntOffset, delta: Int, kuiklyInfo: KuiklyScrollInfo): IntOffset {
+     // 注意不能够越界
+@@ -64,6 +65,22 @@ internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.applyOffsetDelta(delta: I
+         }
+     }
+ 
++    moveNativeContentOffset(newOffset, delta, kuiklyInfo)
++
++    return IntOffset(newOffset.x, newOffset.y)
++}
++
++/**
++ * Shift the placed children by [childDelta] on the main axis and scroll the native view to
++ * [newOffset] (skipped when null), with nested scrolling held on this view meanwhile.
++ */
++internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.moveNativeContentOffset(
++    newOffset: IntOffset?,
++    childDelta: Int,
++    kuiklyInfo: KuiklyScrollInfo
++) {
++    val density = kuiklyInfo.getDensity()
++
+     // 避免嵌套滚动的影响
+     val originNestSetting = getViewAttr().getProp(NESTED_SCROLL)
+     if (originNestSetting != null) {
+@@ -73,28 +90,30 @@ internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.applyOffsetDelta(delta: I
+     }
+ 
+     // 然后更新子节点的offset
+-    contentView?.domChildren()?.forEach { subview ->
+-        if (subview.renderView == null) {
+-            return@forEach
++    if (childDelta != 0) {
++        contentView?.domChildren()?.forEach { subview ->
++            if (subview.renderView == null) {
++                return@forEach
++            }
++            val curRect = subview.renderView!!.currentFrame.toIntRect(density)
++            val newChildOffset = calNewOffset(IntOffset(curRect.left, curRect.top), childDelta, kuiklyInfo)
++            val newFrame = Frame(newChildOffset.x / density, newChildOffset.y / density,
++                curRect.width / density, curRect.height / density)
++            subview.setFrameToRenderView(newFrame)
+         }
+-        val curRect = subview.renderView!!.currentFrame.toIntRect(density)
+-        val newChildOffset = calNewOffset(IntOffset(curRect.left, curRect.top), delta, kuiklyInfo)
+-        val newFrame = Frame(newChildOffset.x / density, newChildOffset.y / density,
+-            curRect.width / density, curRect.height / density)
+-        subview.setFrameToRenderView(newFrame)
+     }
+     // 更新offset
+-    if (contentView?.getPager()?.pageData?.isAndroid == true) {
+-        // 安卓有个bug，刚好滚到最末尾的时候，是不成功的，临时处理下
+-        setContentOffset(max(0f, newOffset.x / density - 0.01f), max(0f, newOffset.y / density - 0.01f))
+-    } else {
+-        setContentOffset(newOffset.x / density, newOffset.y / density)
++    if (newOffset != null) {
++        if (contentView?.getPager()?.pageData?.isAndroid == true) {
++            // 安卓有个bug，刚好滚到最末尾的时候，是不成功的，临时处理下
++            setContentOffset(max(0f, newOffset.x / density - 0.01f), max(0f, newOffset.y / density - 0.01f))
++        } else {
++            setContentOffset(newOffset.x / density, newOffset.y / density)
++        }
+     }
+ 
+     // 恢复嵌套滚动设置
+     originNestSetting?.run {
+         getViewAttr().setProp(NESTED_SCROLL, originNestSetting)
+     }
+-
+-    return IntOffset(newOffset.x, newOffset.y)
+-}
+\ No newline at end of file
++}
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
+index e63449439326fec6be5d0f9371b2f045ef00854a..abfd141937df7e8386ca0b3e14b4aeac455bd070 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
+@@ -106,4 +106,72 @@ class KuiklyScrollInfoTest {
+ 
+         assertEquals(KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch, info.resolve(118f))
+     }
++
++    // Reverse layout (no bound ScrollView: viewport 0, so the native range is the content size).
++    private fun reverseInfo(pending: IntOffset?, contentSize: Int = 9_000, dragging: Boolean = false) =
++        KuiklyScrollInfo().apply {
++            nanoClock = { nowNanos }
++            reverseLayout = true
++            currentContentSize = contentSize
++            isDragging = dragging
++            ignoreScrollOffset = pending
++        }
++
++    @Test
++    fun reverseMappingIsDerivedFromTheComposeOffset() {
++        val info = reverseInfo(null).apply { composeOffset = 1_500f }
++
++        assertEquals(7_500, info.nativeTargetFromLogical(info.composeOffset))
++        assertEquals(1_500, info.logicalOffsetFromNative(7_500))
++        assertEquals(7_500f, info.renderOffset())
++        assertEquals(1_500, info.logicalContentOffset)
++        // No page data: not Android, so no clamp (an iOS bounce stays visible).
++        assertEquals(9_030, info.boundedNativeScrollOffset(9_030))
++    }
++
++    @Test
++    fun normalLayoutHelpersAreTheIdentity() {
++        val info = info(null).apply {
++            composeOffset = 1_500f
++            contentOffset = 1_480
++        }
++
++        assertEquals(1_500, info.nativeTargetFromLogical(info.composeOffset))
++        assertEquals(7_500, info.logicalOffsetFromNative(7_500))
++        assertEquals(1_500f, info.renderOffset())
++        assertEquals(1_480, info.logicalContentOffset)
++        assertEquals(-30, info.boundedNativeScrollOffset(-30))
++    }
++
++    @Test
++    fun reverseEchoRestoresTheLogicalTarget() {
++        // Target 7500 in a 9000 frame is logical 1500.
++        val info = reverseInfo(IntOffset(x = 0, y = 7_500)).apply { composeOffset = 20f }
++
++        assertEquals(KuiklyScrollInfo.NativeScrollEventDisposition.Consume, info.resolve(7_500f))
++        assertNull(info.ignoreScrollOffset)
++        assertEquals(1_500f, info.composeOffset)
++    }
++
++    // A re-anchor moves the reverse native frame; a callback emitted before native applied it
++    // is in the old frame. Dispatching it under a finger was the fast-drag index jump.
++    @Test
++    fun reverseOffTargetCallbackIsDroppedEvenWhileDragging() {
++        val info = reverseInfo(IntOffset(x = 0, y = 7_500), dragging = true).apply { composeOffset = 1_500f }
++
++        assertEquals(KuiklyScrollInfo.NativeScrollEventDisposition.Drop, info.resolve(6_000f))
++        assertEquals(IntOffset(x = 0, y = 7_500), info.ignoreScrollOffset)
++        assertEquals(1_500f, info.composeOffset)
++        assertEquals(KuiklyScrollInfo.NativeScrollEventDisposition.Consume, info.resolve(7_500f))
++        assertEquals(KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch, info.resolve(7_400f))
++    }
++
++    @Test
++    fun reverseLostEchoStillExpiresIntoSync() {
++        val info = reverseInfo(IntOffset(x = 0, y = 7_500), dragging = true)
++
++        nowNanos += KuiklyScrollInfo.IGNORE_SCROLL_OFFSET_TIMEOUT_NANOS
++        assertEquals(KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly, info.resolve(6_000f))
++        assertNull(info.ignoreScrollOffset)
++    }
+ }
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..26d2c2ac6e0efe81eb9ec3745600f8da3dcf40b1
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+@@ -0,0 +1,164 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.gestures
++
++import com.tencent.kuikly.compose.gestures.ReverseScrollOffsetMapping.Move
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class ReverseScrollOffsetMappingTest {
++    private val mapping = ReverseScrollOffsetMapping
++
++    // A 9000px list in a 2400px viewport: native range 0..6600.
++    private val contentSize = 9_000
++    private val viewportSize = 2_400
++    private val max = 6_600
++
++    @Test
++    fun normalLayoutMapsEveryOffsetUnchanged() {
++        for (native in listOf(-120, 0, 1_234, max, max + 90)) {
++            assertEquals(native, mapping.logicalFromNative(native, max, reverseLayout = false))
++            assertEquals(native, mapping.nativeTargetFromLogical(native, max, reverseLayout = false))
++            assertEquals(native.toFloat(), mapping.renderFromLogical(native.toFloat(), max, reverseLayout = false))
++            assertEquals(native, mapping.boundedNativeOffset(native, max, clamp = false))
++        }
++        assertEquals(37, mapping.nativeDeltaFromLogical(37, reverseLayout = false))
++    }
++
++    @Test
++    fun reverseLayoutMirrorsOffsetsAroundTheNativeMaximum() {
++        assertEquals(max, mapping.maxNativeOffset(contentSize, viewportSize))
++        // Item 0 at the native bottom: logical start is the native maximum.
++        assertEquals(0, mapping.logicalFromNative(max, max, reverseLayout = true))
++        assertEquals(max, mapping.logicalFromNative(0, max, reverseLayout = true))
++        assertEquals(max, mapping.nativeTargetFromLogical(0, max, reverseLayout = true))
++        assertEquals(6_100, mapping.nativeTargetFromLogical(500, max, reverseLayout = true))
++        assertEquals(6_100f, mapping.renderFromLogical(500f, max, reverseLayout = true))
++        assertEquals(-37, mapping.nativeDeltaFromLogical(37, reverseLayout = true))
++        for (logical in listOf(0, 1, 2_500, max)) {
++            val native = mapping.nativeTargetFromLogical(logical, max, reverseLayout = true)
++            assertEquals(logical, mapping.logicalFromNative(native, max, reverseLayout = true))
++        }
++    }
++
++    @Test
++    fun reverseBounceStaysVisibleButTargetsAreClamped() {
++        // An iOS bounce past the list start reads as a negative logical offset (ignored at top).
++        assertEquals(-30, mapping.logicalFromNative(max + 30, max, reverseLayout = true))
++        assertEquals(max + 30, mapping.logicalFromNative(-30, max, reverseLayout = true))
++        // Programmatic targets never leave the native range, so their echo can match.
++        assertEquals(max, mapping.nativeTargetFromLogical(-30, max, reverseLayout = true))
++        assertEquals(0, mapping.nativeTargetFromLogical(max + 30, max, reverseLayout = true))
++        // Android reverse lists (bounce off) clamp the reported offset.
++        assertEquals(max, mapping.boundedNativeOffset(max + 30, max, clamp = true))
++        assertEquals(0, mapping.boundedNativeOffset(-30, max, clamp = true))
++    }
++
++    @Test
++    fun reverseTopExpansionMovesNativeUpByTheLogicalDelta() {
++        // Native reached the list start (logical 0) while Compose is not at item 0: the top
++        // expansion adds logical offset, i.e. moves native away from the bottom edge.
++        assertEquals(
++            Move(logicalOffset = 3_000, nativeOffset = 3_600, nativeDelta = -3_000),
++            mapping.reverseLogicalMove(logicalOffset = 0, logicalDelta = 3_000, maxNativeOffset = max),
++        )
++        // Pull-back when Compose reached item 0 but native did not: back to the native end.
++        assertEquals(
++            Move(logicalOffset = 0, nativeOffset = max, nativeDelta = 1_200),
++            mapping.reverseLogicalMove(logicalOffset = 1_200, logicalDelta = -1_200, maxNativeOffset = max),
++        )
++    }
++
++    @Test
++    fun reverseMoveIsClampedToTheNativeRange() {
++        assertEquals(
++            Move(logicalOffset = max, nativeOffset = 0, nativeDelta = -1_600),
++            mapping.reverseLogicalMove(logicalOffset = 5_000, logicalDelta = 4_000, maxNativeOffset = max),
++        )
++        assertEquals(
++            Move(logicalOffset = 0, nativeOffset = max, nativeDelta = 0),
++            mapping.reverseLogicalMove(logicalOffset = 0, logicalDelta = -50, maxNativeOffset = max),
++        )
++    }
++
++    @Test
++    fun contentGrowthAtTheLogicalStartKeepsItemZeroAtTheBottom() {
++        // Index 0 at the bottom (logical 0) and the estimate grows by 1500px: native and the
++        // placed children move down together, native stays at the new maximum.
++        val move = mapping.reanchor(
++            anchoredContentSize = contentSize,
++            contentSize = contentSize + 1_500,
++            viewportSize = viewportSize,
++            logicalOffset = 0,
++        )
++        assertEquals(Move(logicalOffset = 0, nativeOffset = max + 1_500, nativeDelta = 1_500), move)
++        assertEquals(0, mapping.logicalFromNative(move.nativeOffset, max + 1_500, reverseLayout = true))
++    }
++
++    @Test
++    fun contentChangeMidListKeepsTheLogicalOffset() {
++        val grown = mapping.reanchor(contentSize, contentSize + 4_500, viewportSize, logicalOffset = 2_000)
++        assertEquals(Move(logicalOffset = 2_000, nativeOffset = 9_100, nativeDelta = 4_500), grown)
++        // The exact size pin can shrink the estimate: everything moves up by the same amount.
++        val shrunk = mapping.reanchor(contentSize, 7_000, viewportSize, logicalOffset = 2_000)
++        assertEquals(Move(logicalOffset = 2_000, nativeOffset = 2_600, nativeDelta = -2_000), shrunk)
++        assertEquals(Move(2_000, 4_600, 0), mapping.reanchor(contentSize, contentSize, viewportSize, 2_000))
++    }
++
++    @Test
++    fun shortReverseListHasNoNativeRange() {
++        val move = mapping.reanchor(anchoredContentSize = 800, contentSize = 1_600, viewportSize = viewportSize, logicalOffset = 0)
++        assertEquals(Move(logicalOffset = 0, nativeOffset = 0, nativeDelta = 0), move)
++        // Growing past the viewport opens the range below the anchored children.
++        assertEquals(
++            Move(logicalOffset = 0, nativeOffset = 600, nativeDelta = 600),
++            mapping.reanchor(anchoredContentSize = 1_600, contentSize = 3_000, viewportSize = viewportSize, logicalOffset = 0),
++        )
++    }
++
++    @Test
++    fun viewportShrinkKeepsTheLogicalOffsetAndMovesNativeDown() {
++        // Keyboard opens (2400 -> 1500): item 0 stays at the bottom edge.
++        assertEquals(
++            Move(logicalOffset = 0, nativeOffset = 7_500, nativeDelta = 0),
++            mapping.reverseViewportChange(logicalOffset = 0, contentSize = contentSize, newViewportSize = 1_500),
++        )
++        assertEquals(
++            Move(logicalOffset = 1_000, nativeOffset = 6_500, nativeDelta = 0),
++            mapping.reverseViewportChange(logicalOffset = 1_000, contentSize = contentSize, newViewportSize = 1_500),
++        )
++    }
++
++    @Test
++    fun viewportGrowthClampsTheLogicalOffsetToTheNewRange() {
++        assertEquals(
++            Move(logicalOffset = 5_000, nativeOffset = 0, nativeDelta = 0),
++            mapping.reverseViewportChange(logicalOffset = 6_000, contentSize = contentSize, newViewportSize = 4_000),
++        )
++    }
++
++    @Test
++    fun nativeMoveIsSkippedWhenNoEchoWouldFollow() {
++        // Already there: no callback would arrive to release the echo guard.
++        assertFalse(mapping.needsNativeMove(target = 600, pendingTarget = null, reportedNativeOffset = 600.9f, epsilon = 1.5f))
++        assertTrue(mapping.needsNativeMove(target = 600, pendingTarget = null, reportedNativeOffset = 540f, epsilon = 1.5f))
++        // Already heading there: the pending echo settles it.
++        assertFalse(mapping.needsNativeMove(target = 600, pendingTarget = 600, reportedNativeOffset = 0f, epsilon = 1.5f))
++        assertTrue(mapping.needsNativeMove(target = 600, pendingTarget = 900, reportedNativeOffset = 600f, epsilon = 1.5f))
++    }
++}
+diff --git a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt
+index b35881e1dd69eb331995000dc1865cd74bd08e86..f80ccc0354f74bb14bbcb42b8c8775b13ed55724 100644
+--- a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt
++++ b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt
+@@ -99,6 +99,7 @@ internal class ComposeAllSample : ComposeContainer() {
+             DemoItem("Animation", "Compose常见动画API示例", "ComposeAnimateDemo1"),
+             DemoItem("Gesture", "pointerInput内各种手势示例", "GestureTestDemo"),
+             DemoItem("LazyColumn", "LazyColumn各种状态信息示例", "LazyColumnDemo3"),
++            DemoItem("ReverseLazyList", "LazyColumn reverseLayout 原生滚动验证", "ReverseLazyListScrollDemo"),
+             DemoItem("LazyRow", "LazyRow基本用法示例", "LazyRowDemo1"),
+             DemoItem("BoxWithConstraints", "BoxWithConstraints 响应式布局组件示例", "BoxWithConstraintsDemo"),
+             DemoItem("Dialog", "Dialog 组件示例", "DialogDemo"),
+diff --git a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ReverseLazyListScrollDemo.kt b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ReverseLazyListScrollDemo.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..a3ca846e2c149f4a23cedab391e8240a6b14158d
+--- /dev/null
++++ b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ReverseLazyListScrollDemo.kt
+@@ -0,0 +1,173 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.demo.pages.compose
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import com.tencent.kuikly.compose.ComposeContainer
++import com.tencent.kuikly.compose.foundation.background
++import com.tencent.kuikly.compose.foundation.border
++import com.tencent.kuikly.compose.foundation.layout.Arrangement
++import com.tencent.kuikly.compose.foundation.layout.Box
++import com.tencent.kuikly.compose.foundation.layout.Column
++import com.tencent.kuikly.compose.foundation.layout.PaddingValues
++import com.tencent.kuikly.compose.foundation.layout.Row
++import com.tencent.kuikly.compose.foundation.layout.Spacer
++import com.tencent.kuikly.compose.foundation.layout.fillMaxSize
++import com.tencent.kuikly.compose.foundation.layout.fillMaxWidth
++import com.tencent.kuikly.compose.foundation.layout.height
++import com.tencent.kuikly.compose.foundation.layout.padding
++import com.tencent.kuikly.compose.foundation.layout.width
++import com.tencent.kuikly.compose.foundation.lazy.LazyColumn
++import com.tencent.kuikly.compose.foundation.lazy.LazyListState
++import com.tencent.kuikly.compose.foundation.lazy.rememberLazyListState
++import com.tencent.kuikly.compose.material3.Text
++import com.tencent.kuikly.compose.setContent
++import com.tencent.kuikly.compose.ui.Alignment
++import com.tencent.kuikly.compose.ui.Modifier
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.semantics.testTag
++import com.tencent.kuikly.compose.ui.text.font.FontWeight
++import com.tencent.kuikly.compose.ui.unit.dp
++import com.tencent.kuikly.compose.ui.unit.sp
++import com.tencent.kuikly.core.annotations.Page
++import com.tencent.kuikly.core.log.KLog
++
++private const val ReverseLazyListScrollTag = "ReverseLazyListScrollDemo"
++
++@Page("ReverseLazyListScrollDemo")
++class ReverseLazyListScrollDemo : ComposeContainer() {
++
++    override fun willInit() {
++        super.willInit()
++        setContent {
++            ComposeNavigationBar("Reverse Lazy Scroll") {
++                ReverseLazyListScrollContent()
++            }
++        }
++    }
++
++    @Composable
++    private fun ReverseLazyListScrollContent() {
++        val normalState = rememberLazyListState()
++        val reverseState = rememberLazyListState()
++
++        LogScrollState("normal", normalState)
++        LogScrollState("reverse", reverseState)
++
++        Column(
++            modifier =
++                Modifier
++                    .fillMaxSize()
++                    .background(Color.White)
++                    .padding(horizontal = 12.dp, vertical = 8.dp),
++        ) {
++            Text(
++                "ADB native scroll check",
++                fontSize = 18.sp,
++                fontWeight = FontWeight.Bold,
++                color = Color(0xFF202124),
++            )
++            Spacer(Modifier.height(8.dp))
++            Row(modifier = Modifier.fillMaxWidth()) {
++                LazyListPanel(
++                    title = "NORMAL",
++                    state = normalState,
++                    reverseLayout = false,
++                    modifier = Modifier.weight(1f),
++                )
++                Spacer(Modifier.width(12.dp))
++                LazyListPanel(
++                    title = "REVERSE",
++                    state = reverseState,
++                    reverseLayout = true,
++                    modifier = Modifier.weight(1f),
++                )
++            }
++        }
++    }
++
++    @Composable
++    private fun LogScrollState(label: String, state: LazyListState) {
++        val firstIndex = state.firstVisibleItemIndex
++        val firstOffset = state.firstVisibleItemScrollOffset
++        val visible = state.layoutInfo.visibleItemsInfo.joinToString(limit = 4) { it.index.toString() }
++        LaunchedEffect(label, firstIndex, firstOffset, visible) {
++            KLog.i(
++                ReverseLazyListScrollTag,
++                "$label first=$firstIndex offset=$firstOffset visible=$visible",
++            )
++        }
++    }
++
++    @Composable
++    private fun LazyListPanel(
++        title: String,
++        state: LazyListState,
++        reverseLayout: Boolean,
++        modifier: Modifier = Modifier,
++    ) {
++        val panelColor = if (reverseLayout) Color(0xFFE8F0FE) else Color(0xFFE6F4EA)
++        val itemColor = if (reverseLayout) Color(0xFF1967D2) else Color(0xFF188038)
++        Column(
++            modifier =
++                modifier
++                    .background(panelColor)
++                    .border(1.dp, Color(0xFF5F6368))
++                    .padding(8.dp),
++        ) {
++            Text(title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color(0xFF202124))
++            Text(
++                "first=${state.firstVisibleItemIndex} offset=${state.firstVisibleItemScrollOffset}",
++                modifier = Modifier.testTag("${title.lowercase()}_scroll_state"),
++                fontSize = 13.sp,
++                color = Color(0xFF3C4043),
++            )
++            Spacer(Modifier.height(8.dp))
++            LazyColumn(
++                state = state,
++                reverseLayout = reverseLayout,
++                modifier =
++                    Modifier
++                        .fillMaxWidth()
++                        .height(600.dp)
++                        .background(Color.White)
++                        .testTag("${title.lowercase()}_lazy_column"),
++                contentPadding = PaddingValues(vertical = 12.dp),
++                verticalArrangement = Arrangement.spacedBy(8.dp),
++            ) {
++                items(80) { index ->
++                    Box(
++                        modifier =
++                            Modifier
++                                .fillMaxWidth()
++                                .height(72.dp)
++                                .background(itemColor)
++                                .padding(8.dp),
++                        contentAlignment = Alignment.Center,
++                    ) {
++                        Text(
++                            "$title item $index",
++                            fontSize = 15.sp,
++                            fontWeight = FontWeight.Bold,
++                            color = Color.White,
++                        )
++                    }
++                }
++            }
++        }
++    }
++}
