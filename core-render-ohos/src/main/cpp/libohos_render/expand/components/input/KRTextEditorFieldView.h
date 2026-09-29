@@ -75,8 +75,8 @@ class KRTextEditorFieldView : public IKRRenderViewExport {
     void SetSelectionStartPosition(uint32_t index);
 
     // Focus/Blur
-    void Focus();
-    void Blur();
+    void Focus(int64_t request_id = 0);
+    void Blur(int64_t request_id = 0);
     void GetCursorIndex(const KRRenderCallback &callback);
     void SetCursorIndex(uint32_t index);
 

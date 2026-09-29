@@ -92,15 +92,21 @@ class AutoHeightTextAreaView(val singleLine: Boolean = false) :
         return true
     }
 
-    fun focus() {
+    fun focus(requestId: Long? = null) {
         performTaskWhenRenderViewDidLoad {
-            renderView?.callMethod("focus", "")
+            renderView?.callMethod("focus", requestId?.toString().orEmpty())
         }
     }
 
-    fun blur() {
+    fun blur(requestId: Long? = null) {
         performTaskWhenRenderViewDidLoad {
-            renderView?.callMethod("blur", "")
+            renderView?.callMethod("blur", requestId?.toString().orEmpty())
+        }
+    }
+
+    fun cancelPendingFocus(requestId: Long) {
+        performTaskWhenRenderViewDidLoad {
+            renderView?.callMethod("cancelPendingFocus", requestId.toString())
         }
     }
 
