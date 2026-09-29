@@ -55,6 +55,8 @@ export { KRConvertUtil } from './src/main/ets/utils/KRConvertUtil';
 // 兼容旧版本
 export { KRConvertUtil as KTConvertUtil } from './src/main/ets/utils/KRConvertUtil';
 
+export { KRAvatarCacheManager, KRAvatarCacheBridgePayload } from './src/main/ets/utils/KRAvatarCacheManager';
+
 export { IKuiklyRenderContextHandler,
   IKuiklyContextNativeCommunicator } from './src/main/ets/context/IKuiklyRenderContextHandler';
 

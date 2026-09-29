@@ -14,16 +14,19 @@
  */
 
 #include "libohos_render/expand/modules/cache/KRMemoryCacheModule.h"
+#include "libohos_render/expand/modules/cache/KRAvatarImageModel.h"
 #include "libohos_render/expand/components/image/KRImageView.h"
 #include "libohos_render/expand/modules/codec/KRCodec.h"
 #include "libohos_render/expand/modules/network/KRNetworkModule.h"
 #include "libohos_render/utils/KRURIHelper.h"
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <multimedia/image_framework/image/image_source_native.h>
 #include <multimedia/image_framework/image/pixelmap_native.h>
 #include <new>
 #include <shared_mutex>
+#include <unordered_set>
 #include <vector>
 
 #ifdef __cplusplus
@@ -56,6 +59,7 @@ constexpr char kStatusKeyHeight[] = "height";
 constexpr char kCacheStateComplete[] = "Complete";
 constexpr char kCacheStateInProgress[] = "InProgress";
 constexpr char kCacheKeyPrefix[] = "data:image_Md5_";
+constexpr char kAvatarImageModelPrefix[] = "slock-avatar-cache-v1:";
 
 constexpr char kHttpPrefix[] = "http:";
 constexpr char kHttpsPrefix[] = "https:";
@@ -63,6 +67,17 @@ constexpr char kHttpsPrefix[] = "https:";
 static bool isNetwork(const std::string &src) {
     return src.compare(0, strlen(kHttpsPrefix), kHttpsPrefix) == 0 ||
            src.compare(0, strlen(kHttpPrefix), kHttpPrefix) == 0;
+}
+
+static std::mutex g_avatar_cache_modules_mutex;
+static std::unordered_set<KRMemoryCacheModule *> g_avatar_cache_modules;
+
+static KRAvatarImageModel ParseAvatarImageModel(const std::string &src) {
+    KRAvatarImageModel model;
+    if (src.compare(0, strlen(kAvatarImageModelPrefix), kAvatarImageModelPrefix) != 0) return model;
+    model.typed = true;
+    const std::string encoded = src.substr(strlen(kAvatarImageModelPrefix));
+    return KRParseAvatarImageModelJson(kuikly::KRBase64Decode(encoded));
 }
 
 static bool isAssets(const std::string &src) { return src.compare(0, KR_ASSET_PREFIX.size(), KR_ASSET_PREFIX) == 0; }
@@ -209,6 +224,87 @@ KRAnyValue KRMemoryCacheModule::Get(const std::string &key) {
     }
 }
 
+KRMemoryCacheModule::KRMemoryCacheModule() {
+    std::lock_guard<std::mutex> lock(g_avatar_cache_modules_mutex);
+    g_avatar_cache_modules.insert(this);
+}
+
+bool KRMemoryCacheModule::RemoveManagedImage(const std::string &native_bytes_key,
+                                              const std::string &commit_generation,
+                                              const std::string &caller_authority) {
+    if (!KRIsOpaqueAvatarKey(native_bytes_key)) return false;
+    if (!commit_generation.empty() && !KRIsPositiveAvatarGeneration(commit_generation)) return false;
+    if (!caller_authority.empty() && !KRIsOpaqueAvatarKey(caller_authority)) return false;
+    if (!caller_authority.empty() && commit_generation.empty()) return false;
+    std::lock_guard<std::mutex> lock(g_avatar_cache_modules_mutex);
+    const std::string cache_key_prefix = std::string(kCacheKeyPrefix) + native_bytes_key + ".g";
+    for (KRMemoryCacheModule *module : g_avatar_cache_modules) {
+        if (module == nullptr) continue;
+        if (commit_generation.empty()) {
+            module->RemoveImagesWithPrefix(cache_key_prefix);
+        } else {
+            const std::string generation_prefix = cache_key_prefix + commit_generation;
+            if (caller_authority.empty()) {
+                module->RemoveImagesWithPrefix(generation_prefix + ".a");
+            } else {
+                module->RemoveImage(generation_prefix + ".a" + caller_authority);
+            }
+        }
+    }
+    return true;
+}
+
+bool KRMemoryCacheModule::PromoteManagedImage(const std::string &native_bytes_key,
+                                               const std::string &commit_generation,
+                                               const std::string &caller_authority) {
+    if (!KRIsOpaqueAvatarKey(native_bytes_key) || !KRIsPositiveAvatarGeneration(commit_generation) ||
+        !KRIsOpaqueAvatarKey(caller_authority)) return false;
+    // Admission happens before the callback-driven decode stores the PixelMap. The exact
+    // authority-qualified key prevents this acknowledgement from pruning another caller's
+    // same-generation candidate; identity-wide cleanup remains an explicit retirement action.
+    return true;
+}
+
+bool KRMemoryCacheModule::RetainManagedImages(const std::string &native_bytes_key,
+                                               const std::string &commit_generation,
+                                               const std::string &caller_authority,
+                                               const std::string &prior_generation,
+                                               const std::string &prior_caller_authority) {
+    if (!KRIsOpaqueAvatarKey(native_bytes_key) || !KRIsPositiveAvatarGeneration(commit_generation) ||
+        !KRIsOpaqueAvatarKey(caller_authority)) return false;
+    if (!prior_generation.empty() && (!KRIsPositiveAvatarGeneration(prior_generation) ||
+        !KRIsOpaqueAvatarKey(prior_caller_authority))) return false;
+    if (prior_generation.empty() && !prior_caller_authority.empty()) return false;
+    std::lock_guard<std::mutex> lock(g_avatar_cache_modules_mutex);
+    const std::string cache_key_prefix = std::string(kCacheKeyPrefix) + native_bytes_key + ".g";
+    const std::string retained_cache_key = cache_key_prefix + commit_generation + ".a" + caller_authority;
+    const std::string prior_cache_key = prior_generation.empty() ? "" :
+        cache_key_prefix + prior_generation + ".a" + prior_caller_authority;
+    bool retained_present = false;
+    bool prior_present = prior_generation.empty();
+    for (KRMemoryCacheModule *module : g_avatar_cache_modules) {
+        if (module == nullptr) continue;
+        if (module->GetImage(retained_cache_key) != nullptr) retained_present = true;
+        if (!prior_cache_key.empty() && module->GetImage(prior_cache_key) != nullptr) prior_present = true;
+    }
+    if (!retained_present || !prior_present) return false;
+    return true;
+}
+
+bool KRMemoryCacheModule::HasManagedImage(const std::string &native_bytes_key,
+                                          const std::string &commit_generation,
+                                          const std::string &caller_authority) {
+    if (!KRIsOpaqueAvatarKey(native_bytes_key) || !KRIsPositiveAvatarGeneration(commit_generation) ||
+        !KRIsOpaqueAvatarKey(caller_authority)) return false;
+    std::lock_guard<std::mutex> lock(g_avatar_cache_modules_mutex);
+    const std::string cache_key = std::string(kCacheKeyPrefix) + native_bytes_key + ".g" + commit_generation +
+        ".a" + caller_authority;
+    for (KRMemoryCacheModule *module : g_avatar_cache_modules) {
+        if (module != nullptr && module->GetImage(cache_key) != nullptr) return true;
+    }
+    return false;
+}
+
 OH_PixelmapNative *KRMemoryCacheModule::GetImage(const std::string &key) {
     std::shared_lock<std::shared_mutex> lock(mtx_);
     auto it = image_cache_map_.find(key);
@@ -280,10 +376,17 @@ OH_PixelmapNative *KRMemoryCacheModule::LoadPixelmapFromLocal(std::string &src) 
 KRAnyValue KRMemoryCacheModule::CacheImage(const KRAnyValue &params, const KRRenderCallback &callback) {
     auto map = params->toMap();
     auto src = map[kParamNameSrc]->toString();
-    auto cache_key = GenerateCacheKey(src);
+    const auto avatar_model = ParseAvatarImageModel(src);
+    if (avatar_model.typed && !avatar_model.valid) {
+        KRRenderValueMap result = GenerateError(-1, "invalid typed avatar model");
+        if (callback) callback(NewKRRenderValue(result));
+        return NewKRRenderValue(std::move(result));
+    }
+    auto cache_key = avatar_model.valid ? std::string(kCacheKeyPrefix) + KRAvatarDecodedKeySuffix(avatar_model)
+                                        : GenerateCacheKey(src);
 
-    OH_PixelmapNative *pixelmap = GetImage(cache_key);
-    if (pixelmap) {
+    OH_PixelmapNative *pixelmap = KRAvatarMayUseDecodedHit(avatar_model) ? GetImage(cache_key) : nullptr;
+    if (pixelmap != nullptr) {
         // already cached, return directly
         auto result = GenerateResult(cache_key, pixelmap);
         if (callback) {
@@ -302,7 +405,7 @@ KRAnyValue KRMemoryCacheModule::CacheImage(const KRAnyValue &params, const KRRen
             }
         }
     }
-    if (!isNetwork(src)) {
+    if (!isNetwork(src) && !avatar_model.valid) {
         pixelmap = LoadPixelmapFromLocal(src);
         if (pixelmap) {
             SetImage(cache_key, pixelmap);
@@ -381,6 +484,52 @@ void KRMemoryCacheModule::SetImage(const std::string &cache_key, OH_PixelmapNati
     }
 }
 
+void KRMemoryCacheModule::RemoveImage(const std::string &cache_key) {
+    OH_PixelmapNative *pixelmap = nullptr;
+    {
+        std::unique_lock<std::shared_mutex> lock(mtx_);
+        auto it = image_cache_map_.find(cache_key);
+        if (it != image_cache_map_.end()) {
+            pixelmap = it->second;
+            image_cache_map_.erase(it);
+        }
+    }
+    if (pixelmap != nullptr) ReleasePixelmap(pixelmap);
+}
+
+void KRMemoryCacheModule::RemoveImagesWithPrefix(const std::string &cache_key_prefix) {
+    std::vector<OH_PixelmapNative *> pixelmaps;
+    {
+        std::unique_lock<std::shared_mutex> lock(mtx_);
+        for (auto it = image_cache_map_.begin(); it != image_cache_map_.end();) {
+            if (it->first.rfind(cache_key_prefix, 0) == 0) {
+                if (it->second != nullptr) pixelmaps.push_back(it->second);
+                it = image_cache_map_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (OH_PixelmapNative *pixelmap : pixelmaps) ReleasePixelmap(pixelmap);
+}
+
+void KRMemoryCacheModule::RemoveImagesWithPrefixExcept(const std::string &cache_key_prefix,
+                                                        const std::string &retained_cache_key) {
+    std::vector<OH_PixelmapNative *> pixelmaps;
+    {
+        std::unique_lock<std::shared_mutex> lock(mtx_);
+        for (auto it = image_cache_map_.begin(); it != image_cache_map_.end();) {
+            if (it->first.rfind(cache_key_prefix, 0) == 0 && it->first != retained_cache_key) {
+                if (it->second != nullptr) pixelmaps.push_back(it->second);
+                it = image_cache_map_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (OH_PixelmapNative *pixelmap : pixelmaps) ReleasePixelmap(pixelmap);
+}
+
 std::string KRMemoryCacheModule::GenerateCacheKey(const std::string &src) {
     std::ostringstream oss;
     oss << kCacheKeyPrefix;
@@ -421,6 +570,10 @@ KRRenderValueMap KRMemoryCacheModule::GenerateError(int32_t code, const std::str
 }
 
 void KRMemoryCacheModule::OnDestroy() {
+    {
+        std::lock_guard<std::mutex> lock(g_avatar_cache_modules_mutex);
+        g_avatar_cache_modules.erase(this);
+    }
     std::vector<OH_PixelmapNative *> to_destroy;
     {
         std::unique_lock<std::shared_mutex> lock(mtx_);

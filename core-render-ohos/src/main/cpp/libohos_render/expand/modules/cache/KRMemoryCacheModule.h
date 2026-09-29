@@ -25,13 +25,22 @@ constexpr char kMemoryCacheModuleName[] = "KRMemoryCacheModule";
 
 class KRMemoryCacheModule : public IKRRenderModuleExport {
  public:
-    KRMemoryCacheModule() = default;
+    KRMemoryCacheModule();
     KRAnyValue CallMethod(bool sync, const std::string &method, KRAnyValue params,
                           const KRRenderCallback &callback) override;
 
     KRAnyValue Get(const std::string &key);
     OH_PixelmapNative *GetImage(const std::string &key);
     void OnDestroy() override;
+    static bool RemoveManagedImage(const std::string &native_bytes_key, const std::string &commit_generation = "",
+                                   const std::string &caller_authority = "");
+    static bool PromoteManagedImage(const std::string &native_bytes_key, const std::string &commit_generation,
+                                    const std::string &caller_authority);
+    static bool RetainManagedImages(const std::string &native_bytes_key, const std::string &commit_generation,
+                                    const std::string &caller_authority, const std::string &prior_generation,
+                                    const std::string &prior_caller_authority);
+    static bool HasManagedImage(const std::string &native_bytes_key, const std::string &commit_generation,
+                                const std::string &caller_authority);
 
  private:
     KRAnyValue SetObject(const KRAnyValue &params);
@@ -42,6 +51,9 @@ class KRMemoryCacheModule : public IKRRenderModuleExport {
     KRRenderValueMap GenerateError(int32_t code, const std::string &message);
     OH_PixelmapNative *LoadPixelmapFromLocal(std::string &src);
     void ReleasePixelmap(OH_PixelmapNative *pixelmap);
+    void RemoveImage(const std::string &cache_key);
+    void RemoveImagesWithPrefix(const std::string &cache_key_prefix);
+    void RemoveImagesWithPrefixExcept(const std::string &cache_key_prefix, const std::string &retained_cache_key);
 
  private:
     std::unordered_map<std::string, KRAnyValue> cache_map_;
