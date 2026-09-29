@@ -76,6 +76,9 @@ class KRTextAreaView : public KRTextFieldView {
                                              void *userData);
 
     ArkUI_TextEditMenuOptions *system_newline_edit_menu_options_ = nullptr;
+    // Composer sets this before numberOfLines.  When false, Enter must remain a
+    // newline even if a suggestion panel temporarily requests an IME action.
+    bool ime_action_requested_ = true;
 };
 
 #endif  // CORE_RENDER_OHOS_KRTEXTAREAVIEW_H
