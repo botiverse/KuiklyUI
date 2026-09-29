@@ -15,6 +15,8 @@
 
 #include "libohos_render/expand/components/richtext/KRRichTextView.h"
 
+#include "libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h"
+
 #include <algorithm>
 #include <cmath>
 #include <codecvt>
@@ -132,11 +134,24 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
     OH_Drawing_Brush *brush = OH_Drawing_BrushCreate();
     OH_Drawing_BrushSetAntiAlias(brush, drawFill);
 
+    // Zero-font edge carriers displace every rect reported after them on the
+    // same line; runs arrive in document order, so track what each line has
+    // passed so far and move each fragment back over its ink.
+    kuikly::richtext::KRInlineBoxLineReservedWidths reservedPassed;
     for (const auto &run : runs) {
         auto fragments = KRCollectSlockChromeFragments(typography, run);
         if (fragments.empty()) {
             continue;
         }
+        const bool atomicEdges = !run.includes_reserved_edges;
+        const float leadingReserved = atomicEdges
+            ? kuikly::richtext::KRInlineBoxLeadingReservedWidth(
+                  run.margin_start_px, run.border_width_px, run.padding_start_px)
+            : 0.0f;
+        const float trailingReserved = atomicEdges
+            ? kuikly::richtext::KRInlineBoxTrailingReservedWidth(
+                  run.padding_end_px, run.border_width_px, run.margin_end_px)
+            : 0.0f;
         // Native Drawing captures the brush state when it is attached to the
         // canvas. Set the per-run color first; mutating an already attached
         // brush leaves some HarmonyOS versions drawing the default black.
@@ -148,13 +163,31 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
             const auto &fragment = fragments[i];
             const bool isSpanStart = i == 0;
             const bool isSpanEnd = i + 1 == fragments.size();
-            const float left = run.includes_reserved_edges
-                ? fragment.left + (isSpanStart ? run.margin_start_px : 0.0f)
-                : fragment.left - (isSpanStart ? run.padding_start_px + borderWidth : 0.0f);
-            const float right = run.includes_reserved_edges
-                ? fragment.right - (isSpanEnd ? run.margin_end_px : 0.0f)
-                : fragment.right + (isSpanEnd ? run.padding_end_px + borderWidth : 0.0f);
-            const float centerY = (fragment.top + fragment.bottom) / 2.0f - drawOffsetY;
+            const float lineCenterY = (fragment.top + fragment.bottom) / 2.0f;
+            const float passed = reservedPassed.Before(lineCenterY);
+            float left = 0.0f;
+            float right = 0.0f;
+            if (run.includes_reserved_edges) {
+                left = fragment.left + passed + (isSpanStart ? run.margin_start_px : 0.0f);
+                right = fragment.right + passed - (isSpanEnd ? run.margin_end_px : 0.0f);
+            } else {
+                // Children-only range (see KRMakeInlineBoxAtomicChromeEdges):
+                // the fragment that starts the box also sits behind its own
+                // leading carrier; a wrapped continuation starts its line.
+                const auto edges = kuikly::richtext::KRMakeInlineBoxAtomicChromeEdges(
+                    fragment.left, fragment.right, isSpanStart, isSpanEnd,
+                    passed + (isSpanStart ? leadingReserved : 0.0f),
+                    run.padding_start_px, run.padding_end_px, borderWidth);
+                left = edges.left;
+                right = edges.right;
+            }
+            if (isSpanStart) {
+                reservedPassed.Add(lineCenterY, leadingReserved);
+            }
+            if (isSpanEnd) {
+                reservedPassed.Add(lineCenterY, trailingReserved);
+            }
+            const float centerY = lineCenterY - drawOffsetY;
             const float top = centerY - chipHeight / 2.0f;
             const float bottom = centerY + chipHeight / 2.0f;
             if (drawFill && run.fill_color != 0) {
