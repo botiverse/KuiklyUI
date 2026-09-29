@@ -298,7 +298,7 @@ internal class RootNodeOwner(
             measureAndLayoutDelegate.onNodeDetached(node)
             snapshotObserver.clear(node)
             needClearObservations = true
-            semanticsKuiklyHandler.clearCache()
+            semanticsKuiklyHandler.onNodeDetached(node.semanticsId)
         }
 
         override fun measureAndLayout(sendPointerUpdate: Boolean) {
