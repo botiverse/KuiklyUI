@@ -26,6 +26,7 @@ import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
 import com.tencent.kuikly.core.render.android.css.ktx.toPxF
 import kotlin.math.abs
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
@@ -394,8 +395,27 @@ internal class OverScrollHandler(
     /**
      * 处理overScroll的值，随着currentTranslation越来越大, newOffset会越来越小，起到一个阻尼的效果
      */
-    private fun getNewOffset(currentTranslation: Float, offset: Float): Float =
-        offset / (NEW_OFFSET_ADD_FACTOR + abs(currentTranslation) / recyclerView.kuiklyRenderContext.toPxF(NEW_OFFSET_SCALE_FACTOR))
+    private fun getNewOffset(currentTranslation: Float, offset: Float): Float {
+        val resistanceScalePx = recyclerView.kuiklyRenderContext.toPxF(NEW_OFFSET_SCALE_FACTOR)
+        val maxVerticalTranslationPx = if (
+            isVertical &&
+            ((offset > 0f && isInStart()) || (offset < 0f && isInEnd()))
+        ) {
+            maxOf(
+                recyclerView.height * MAX_VERTICAL_OVER_SCROLL_VIEWPORT_FRACTION,
+                recyclerView.kuiklyRenderContext.toPxF(MIN_VERTICAL_OVER_SCROLL_DP)
+            )
+        } else {
+            null
+        }
+        return calculateOverScrollDelta(
+            currentTranslation = currentTranslation,
+            translationOffset = offset,
+            resistanceScalePx = resistanceScalePx,
+            maxTranslationPx = maxVerticalTranslationPx,
+            addFactor = NEW_OFFSET_ADD_FACTOR
+        )
+    }
 
     private fun getTranslation(): Float {
         return if (isVertical) {
@@ -449,8 +469,8 @@ internal class OverScrollHandler(
     }
 
     internal fun setTranslationByNestScrollTouch(parentDy: Float) {
-        val newOffset = getNewOffset(getTranslation(), parentDy)
-        setTranslation(-newOffset)
+        val translationOffset = getNewOffset(getTranslation(), -parentDy)
+        setTranslation(translationOffset)
         if (!overScrolling) {
             dragging = true
             fireBeginOverScrollCallback()
@@ -466,12 +486,62 @@ internal class OverScrollHandler(
 
     companion object {
         private const val BOUND_BACK_DURATION = 250L
-        private const val NEW_OFFSET_ADD_FACTOR = 2
+        private const val NEW_OFFSET_ADD_FACTOR = 2f
         private const val NEW_OFFSET_SCALE_FACTOR = 500f
+        private const val MAX_VERTICAL_OVER_SCROLL_VIEWPORT_FRACTION = 1f / 3f
+        private const val MIN_VERTICAL_OVER_SCROLL_DP = 160f
 
         private const val DIRECTION_SCROLL_UP = -1
         private const val DIRECTION_SCROLL_DOWN = 1
     }
+}
+
+/**
+ * Returns the rendered translation delta for one pointer move.
+ *
+ * [maxTranslationPx] is supplied only while moving farther past a vertical edge. The
+ * remaining-distance multiplier preserves the existing short-drag resistance while making a long
+ * held drag approach a finite boundary smoothly instead of accumulating an unbounded blank region.
+ */
+internal fun calculateOverScrollDelta(
+    currentTranslation: Float,
+    translationOffset: Float,
+    resistanceScalePx: Float,
+    maxTranslationPx: Float? = null,
+    addFactor: Float = 2f
+): Float {
+    val resistance = addFactor + abs(currentTranslation) / resistanceScalePx
+    val dampedDelta = translationOffset / resistance
+    val maxTranslation = maxTranslationPx?.takeIf { it > 0f } ?: return dampedDelta
+    if (currentTranslation * translationOffset < 0f) {
+        val offsetToZero = -currentTranslation * resistance
+        val crossesZero = if (translationOffset < 0f) {
+            translationOffset < offsetToZero
+        } else {
+            translationOffset > offsetToZero
+        }
+        if (!crossesZero) return dampedDelta
+
+        val remainingOffset = translationOffset - offsetToZero
+        return -currentTranslation + calculateOverScrollDelta(
+            currentTranslation = 0f,
+            translationOffset = remainingOffset,
+            resistanceScalePx = resistanceScalePx,
+            maxTranslationPx = maxTranslation,
+            addFactor = addFactor
+        )
+    }
+    val remaining = (maxTranslation - abs(currentTranslation)).coerceAtLeast(0f)
+    if (remaining == 0f) return 0f
+
+    val remainingRatio = (remaining / maxTranslation).coerceIn(0f, 1f)
+    return min(abs(dampedDelta) * remainingRatio, remaining) * translationOffset.signOrZero()
+}
+
+private fun Float.signOrZero(): Float = when {
+    this > 0f -> 1f
+    this < 0f -> -1f
+    else -> 0f
 }
 
 internal interface OverScrollEventCallback {
