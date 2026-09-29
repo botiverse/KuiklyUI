@@ -73,6 +73,7 @@ import com.tencent.kuikly.compose.ui.unit.LayoutDirection
 import com.tencent.kuikly.compose.ui.util.fastForEach
 import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
 import com.tencent.kuikly.compose.views.KuiklyInfoKey
+import com.tencent.kuikly.compose.views.KuiklyUserBouncesEnableKey
 import com.tencent.kuikly.compose.views.VirtualNodeView
 import com.tencent.kuikly.compose.layout.bindKuiklyInfo
 import com.tencent.kuikly.compose.layout.checkOffScreenNode
@@ -247,6 +248,8 @@ fun SubcomposeLayout(
 
     LaunchedEffect(scrollViewSize) {
         scrollableState.calculateAndUpdateContentSize()
+        // Reverse lists: make sure native follows the logical offset in the resized viewport.
+        scrollableState.kuiklyInfo.reanchorReverseNativeOffset(force = true)
     }
 
     // 更新kuiklyInfo和scrollview
@@ -307,10 +310,14 @@ fun SubcomposeLayout(
             }
             scrollEnd {
                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
-                val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                val rawOffset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                val offset = kuiklyInfo.boundedNativeScrollOffset(rawOffset)
                 kuiklyInfo.contentOffset = offset
                 (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
+                if (offset != rawOffset) {
+                    kuiklyInfo.reanchorReverseNativeOffset(force = true)
+                }
 
                 // 仅触摸滑动结束会回调，api调用和bounce回弹都不会触发
                 // / back是回滑,forward是前滑
@@ -321,14 +328,21 @@ fun SubcomposeLayout(
             }
             dragEnd {
                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
-                val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                val rawOffset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                val offset = kuiklyInfo.boundedNativeScrollOffset(rawOffset)
                 kuiklyInfo.contentOffset = offset
+                if (offset != rawOffset) {
+                    kuiklyInfo.reanchorReverseNativeOffset(force = true)
+                }
                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
                 (scrollableState as? PagerState)?.onNativeDragEnd()
             }
             scroll {
                 val scaleParams = it.scaleWithDensity(kuiklyInfo.getDensity())
-                val offset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                val rawOffset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                // Identity unless a reverse list on Android reports an offset outside the range.
+                val offset = kuiklyInfo.boundedNativeScrollOffset(rawOffset)
+                val nativeOffsetOutOfBounds = offset != rawOffset
                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
                 (scrollableState as? PagerState)?.onNativeScroll()
 
@@ -359,6 +373,8 @@ fun SubcomposeLayout(
                     )
                 ) {
                     KuiklyScrollInfo.NativeScrollEventDisposition.Consume -> return@scroll
+                    // Reverse layout: pre-move frame, the pending move's echo settles it.
+                    KuiklyScrollInfo.NativeScrollEventDisposition.Drop -> return@scroll
                     KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly -> {
                         // Off-target echo of our own programmatic move (native
                         // clamped or split it). Adopt the reported offset so
@@ -366,20 +382,27 @@ fun SubcomposeLayout(
                         // a compose scroll: offsetDirty stays set, so a later
                         // alignment pass converges once the render-side content
                         // size has caught up (task #318 joint first-open stall).
-                        kuiklyInfo.composeOffset = offset.toFloat()
+                        kuiklyInfo.composeOffset = kuiklyInfo.logicalOffsetFromNative(offset).toFloat()
                         return@scroll
                     }
                     KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch -> Unit
                 }
 
+                // Compose logical offset: the native offset itself unless reverseLayout.
+                val logicalOffset = kuiklyInfo.logicalOffsetFromNative(offset)
+
                 // 忽略较小的滑动
-                val delta = offset - kuiklyInfo.composeOffset
+                val delta = logicalOffset - kuiklyInfo.composeOffset
                 if (delta.toInt() == 0) {
+                    if (nativeOffsetOutOfBounds) {
+                        kuiklyInfo.reanchorReverseNativeOffset(force = true)
+                    }
                     return@scroll
                 }
 
                 // 更新当前的contentSize大小
-                scrollableState.calculateAndUpdateContentSize()
+                // (a reverse list re-anchors below, once Compose has consumed this delta)
+                scrollableState.calculateAndUpdateContentSize(reanchorReverse = false)
 
                 val toButtomDelta = if (kuiklyInfo.realContentSize == null) {
                     null
@@ -387,11 +410,13 @@ fun SubcomposeLayout(
                     kuiklyInfo.realContentSize!! - kuiklyInfo.viewportSize - kuiklyInfo.composeOffset
                 }
                 // 判断是否滑出边界
-                if (offset < 0 && scrollableState.isAtTop()) {
+                if (logicalOffset < 0 && scrollableState.isAtTop()) {
+                    kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
                     return@scroll
                 } else if (toButtomDelta != null && delta > toButtomDelta) {
                     if (toButtomDelta.toInt() <= 0) {
-                        scrollableState.tryExpandStartSize(offset, true)
+                        kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
+                        scrollableState.tryExpandStartSize(logicalOffset, true)
                         return@scroll
                     }
                     kuiklyInfo.composeOffset += min(delta, toButtomDelta)
@@ -401,9 +426,10 @@ fun SubcomposeLayout(
 
                 // 触发compose滑动，并重新布局
                 val comsumedDelta = scrollableState.kuiklyOnScroll(delta)
+                kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
 
                 // 尝试扩容
-                scrollableState.tryExpandStartSize(offset, true)
+                scrollableState.tryExpandStartSize(logicalOffset, true)
             }
 
             // Listen to native "scroll to top" event and scroll to index 0
@@ -476,6 +502,7 @@ fun SubcomposeLayout(
                 val newKuiklyInfo = scrollableState.kuiklyInfo
                 invalidateDeferredScrollOffsetAlignmentOnReuse(oldKuiklyInfo, newKuiklyInfo)
                 val kuiklyInfo = bindKuiklyInfo(sv, scrollableState, orientation)
+                updateReverseLayoutBounces(sv, oldKuiklyInfo, kuiklyInfo)
                 transferScrollToTopCallback(oldKuiklyInfo, kuiklyInfo)
                 restoreScrollerViewOnReuse(sv, kuiklyInfo, isPagerView, orientation, oldKuiklyInfo?.contentOffset)
 
@@ -1598,6 +1625,25 @@ private interface PausedPrecompositionImpl : SubcomposeLayoutState.PausedPrecomp
  */
 internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotActivation() {
     (this as? KNode<*>)?.invalidateDrawAndForceAncestors()
+}
+
+/**
+ * Android over-scroll translates the content view past the native range, which a reverse
+ * list would read as a jump at its start: keep bounce off while a reverse list is bound,
+ * and restore the user's [com.tencent.kuikly.compose.extension.bouncesEnable] choice after.
+ */
+private fun updateReverseLayoutBounces(
+    sv: ScrollerView<ScrollerAttr, ScrollerEvent>,
+    oldKuiklyInfo: KuiklyScrollInfo?,
+    kuiklyInfo: KuiklyScrollInfo,
+) {
+    val reverseAndroid = kuiklyInfo.pageData?.isAndroid == true && kuiklyInfo.reverseLayout
+    if (reverseAndroid) {
+        sv.getViewAttr().bouncesEnable(false)
+    } else if (oldKuiklyInfo?.pageData?.isAndroid == true && oldKuiklyInfo.reverseLayout) {
+        val userBouncesEnable = sv.extProps[KuiklyUserBouncesEnableKey] as? Boolean
+        sv.getViewAttr().bouncesEnable(userBouncesEnable ?: true)
+    }
 }
 
 private val ReusedSlotId =

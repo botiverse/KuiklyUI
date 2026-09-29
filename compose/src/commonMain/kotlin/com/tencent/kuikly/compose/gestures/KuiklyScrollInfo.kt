@@ -23,6 +23,7 @@ import com.tencent.kuikly.compose.foundation.gestures.Orientation
 import com.tencent.kuikly.compose.scroller.AndroidBackgroundAlignmentState
 import com.tencent.kuikly.compose.ui.node.StickyHeaderCacheManager
 import com.tencent.kuikly.compose.ui.unit.IntOffset
+import com.tencent.kuikly.compose.views.moveNativeContentOffset
 import com.tencent.kuikly.core.datetime.DateTime
 import com.tencent.kuikly.core.layout.Frame
 import com.tencent.kuikly.core.manager.BridgeManager
@@ -162,7 +163,12 @@ class KuiklyScrollInfo {
          *  compose scroll. */
         SyncOnly,
         /** Genuine scroll: dispatch to compose. */
-        Dispatch
+        Dispatch,
+        /** Reverse layout only: callback while a programmatic move is pending.
+         *  A reverse move can change the native coordinate frame (re-anchoring
+         *  after a content size change), so a callback emitted before native
+         *  applied it is in the old frame: neither dispatch nor adopt it. */
+        Drop
     }
 
     internal fun resolveNativeScrollEvent(
@@ -178,10 +184,10 @@ class KuiklyScrollInfo {
                 ignoreScrollOffset = null
                 // A pending-window SyncOnly may have moved the bookkeeping to a
                 // stale pre-move offset; the echo confirms the move's target.
-                composeOffset = (if (isVertical()) pending.y else pending.x).toFloat()
+                composeOffset = logicalOffsetFromNative(mainAxisOffset(pending)).toFloat()
                 NativeScrollEventDisposition.Consume
             }
-            isDragging -> {
+            isDragging && !reverseLayout -> {
                 // A finger on the screen owns the viewport: never swallow real input.
                 ignoreScrollOffset = null
                 NativeScrollEventDisposition.Dispatch
@@ -192,6 +198,9 @@ class KuiklyScrollInfo {
                 ignoreScrollOffset = null
                 NativeScrollEventDisposition.SyncOnly
             }
+            // A reverse list keeps the guard even under a finger: a callback in the
+            // pre-move frame would be a phantom jump of the whole re-anchor delta.
+            reverseLayout -> NativeScrollEventDisposition.Drop
             else -> NativeScrollEventDisposition.SyncOnly
         }
     }
@@ -216,6 +225,18 @@ class KuiklyScrollInfo {
      * Scroll orientation
      */
     var orientation: Orientation = Orientation.Vertical
+
+    /**
+     * Whether the bound lazy layout uses reverseLayout: item 0 sits at the native end and
+     * [composeOffset] is measured from the native maximum offset (see [ReverseScrollOffsetMapping]).
+     */
+    internal var reverseLayout: Boolean = false
+
+    /**
+     * Content size the native offset and placed children of a reverse list are anchored to.
+     * Null until the first bind; unused without [reverseLayout].
+     */
+    private var reverseAnchoredContentSize: Int? = null
 
     /**
      * Offset on the Compose side, does not exceed boundaries
@@ -361,11 +382,20 @@ class KuiklyScrollInfo {
     var scrollToTopCallback: (() -> Unit)? = null
 
     /**
-     * Update content size to render view
+     * Update content size to render view.
+     * A reverse list then re-anchors its native offset to the new size unless
+     * [reanchorReverse] is false (the scroll handler re-anchors after dispatching).
      */
     fun updateContentSizeToRender() {
+        updateContentSizeToRender(reanchorReverse = true)
+    }
+
+    internal fun updateContentSizeToRender(reanchorReverse: Boolean) {
         val frame = createContentFrame()
         scrollView?.contentView?.setFrameToRenderView(frame)
+        if (reanchorReverse) {
+            reanchorReverseNativeOffset()
+        }
     }
 
     /**
@@ -382,6 +412,7 @@ class KuiklyScrollInfo {
         contentOffset = 0
         isDragging = false
         offsetDirty = false
+        reverseAnchoredContentSize = null
 
         // Reset content size related (reinitialize based on current density)
         currentContentSize = (DEFAULT_CONTENT_SIZE * getDensity()).toInt()
@@ -398,18 +429,20 @@ class KuiklyScrollInfo {
      * Create content Frame
      */
     private fun createContentFrame(): Frame {
+        // A short reverse list is placed at the viewport end; keep its children inside the content view.
+        val renderedContentSize = if (reverseLayout) maxOf(currentContentSize, viewportSize) else currentContentSize
         return if (isVertical()) {
             Frame(
                 x = 0f,
                 y = 0f,
                 width = scrollView?.renderView?.currentFrame?.width ?: 0f,
-                height = currentContentSize / getDensity()
+                height = renderedContentSize / getDensity()
             )
         } else {
             Frame(
                 x = 0f,
                 y = 0f,
-                width = currentContentSize / getDensity(),
+                width = renderedContentSize / getDensity(),
                 height = scrollView?.renderView?.currentFrame?.height ?: 0f
             )
         }
@@ -449,6 +482,144 @@ class KuiklyScrollInfo {
      */
     fun nearScrollBottom(): Boolean {
         val threshold = SCROLL_BOTTOM_THRESHOLD * getDensity()
-        return contentOffset + viewportSize + threshold > currentContentSize
+        return logicalContentOffset + viewportSize + threshold > currentContentSize
+    }
+
+    /** Main-axis component of an offset pair. */
+    internal fun mainAxisOffset(offset: IntOffset): Int = if (isVertical()) offset.y else offset.x
+
+    /** Offset pair for a main-axis offset. */
+    internal fun offsetFromMainAxis(mainAxisOffset: Int): IntOffset =
+        if (isVertical()) IntOffset(0, mainAxisOffset) else IntOffset(mainAxisOffset, 0)
+
+    /** Native scroll range of the anchored coordinate frame. */
+    internal val anchoredMaxNativeOffset: Int
+        get() = ReverseScrollOffsetMapping.maxNativeOffset(
+            reverseAnchoredContentSize ?: currentContentSize,
+            viewportSize
+        )
+
+    /**
+     * Native scroll offset expressed as a logical offset: [contentOffset] itself without
+     * reverse layout, the Compose-owned [composeOffset] with it.
+     */
+    internal val logicalContentOffset: Int
+        get() = if (reverseLayout) composeOffset.toInt() else contentOffset
+
+    /** Convert a native offset reported by the ScrollView to a Compose logical offset. */
+    internal fun logicalOffsetFromNative(nativeOffset: Int): Int =
+        if (reverseLayout) {
+            ReverseScrollOffsetMapping.logicalFromNative(nativeOffset, anchoredMaxNativeOffset, true)
+        } else {
+            nativeOffset
+        }
+
+    /** Native offset to scroll to for a Compose logical offset. */
+    internal fun nativeTargetFromLogical(logicalOffset: Float): Int =
+        if (reverseLayout) {
+            ReverseScrollOffsetMapping.nativeTargetFromLogical(logicalOffset.toInt(), anchoredMaxNativeOffset, true)
+        } else {
+            logicalOffset.toInt()
+        }
+
+    /** Native content coordinate offset added to child positions in the ScrollView. */
+    internal fun renderOffset(): Float =
+        if (reverseLayout) {
+            ReverseScrollOffsetMapping.renderFromLogical(composeOffset, anchoredMaxNativeOffset, true)
+        } else {
+            composeOffset
+        }
+
+    /** Native offset the scroll handlers map: reverse lists on Android clamp (their bounce is off). */
+    internal fun boundedNativeScrollOffset(nativeOffset: Int): Int =
+        ReverseScrollOffsetMapping.boundedNativeOffset(
+            nativeOffset,
+            anchoredMaxNativeOffset,
+            clamp = reverseLayout && pageData?.isAndroid == true
+        )
+
+    /** Anchor a reverse list's native frame to the current content size (bind/restore). */
+    internal fun anchorReverseContentSize() {
+        reverseAnchoredContentSize = currentContentSize
+    }
+
+    private fun reportedNativeOffset(): Float {
+        val sv = scrollView ?: return contentOffset.toFloat()
+        return (if (isVertical()) sv.curOffsetY else sv.curOffsetX) * getDensity()
+    }
+
+    private fun needsNativeMove(target: Int): Boolean =
+        ReverseScrollOffsetMapping.needsNativeMove(
+            target = target,
+            pendingTarget = ignoreScrollOffset?.let { mainAxisOffset(it) },
+            reportedNativeOffset = reportedNativeOffset(),
+            epsilon = 0.5f * getDensity()
+        )
+
+    /**
+     * Reverse layout: move the native frame to the current content size. Children shift by the
+     * change of the native maximum and the native offset follows [composeOffset], so the items
+     * on screen stay put. With [force] the native offset is re-synced even if the size did not
+     * change (a reported offset outside the range was clamped).
+     */
+    internal fun reanchorReverseNativeOffset(force: Boolean = false) {
+        if (!reverseLayout) return
+        val sv = scrollView ?: return
+        val move = ReverseScrollOffsetMapping.reanchor(
+            anchoredContentSize = reverseAnchoredContentSize ?: currentContentSize,
+            contentSize = currentContentSize,
+            viewportSize = viewportSize,
+            logicalOffset = composeOffset.toInt()
+        )
+        reverseAnchoredContentSize = currentContentSize
+        if (move.nativeDelta == 0 && !force) return
+        val issueMove = needsNativeMove(move.nativeOffset)
+        if (!issueMove && move.nativeDelta == 0) return
+        contentOffset = move.nativeOffset
+        val target = offsetFromMainAxis(move.nativeOffset)
+        if (issueMove) {
+            ignoreScrollOffset = target
+        }
+        sv.moveNativeContentOffset(if (issueMove) target else null, move.nativeDelta, this)
+    }
+
+    /**
+     * Reverse layout: apply a logical delta (top expansion, pull-back, programmatic scroll)
+     * as the mirrored native move from the Compose-owned offset.
+     */
+    internal fun applyReverseLogicalOffsetDelta(logicalDelta: Int) {
+        val sv = scrollView ?: return
+        reanchorReverseNativeOffset()
+        val move = ReverseScrollOffsetMapping.reverseLogicalMove(
+            logicalOffset = composeOffset.toInt(),
+            logicalDelta = logicalDelta,
+            maxNativeOffset = anchoredMaxNativeOffset
+        )
+        composeOffset = move.logicalOffset.toFloat()
+        if (move.nativeDelta == 0) return
+        contentOffset = move.nativeOffset
+        val target = offsetFromMainAxis(move.nativeOffset)
+        ignoreScrollOffset = target
+        sv.moveNativeContentOffset(target, move.nativeDelta, this)
+    }
+
+    /**
+     * Reverse layout: keep the logical offset across a viewport resize and return the native
+     * target to replay once the new frame is committed, or null if native is already there.
+     */
+    internal fun prepareReverseViewportChange(newViewportSize: Int): IntOffset? {
+        val move = ReverseScrollOffsetMapping.reverseViewportChange(
+            logicalOffset = composeOffset.toInt(),
+            contentSize = reverseAnchoredContentSize ?: currentContentSize,
+            newViewportSize = newViewportSize
+        )
+        if (move.logicalOffset != composeOffset.toInt()) {
+            composeOffset = move.logicalOffset.toFloat()
+        }
+        if (!needsNativeMove(move.nativeOffset)) return null
+        contentOffset = move.nativeOffset
+        val target = offsetFromMainAxis(move.nativeOffset)
+        ignoreScrollOffset = target
+        return target
     }
 }

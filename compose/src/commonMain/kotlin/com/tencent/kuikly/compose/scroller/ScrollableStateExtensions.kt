@@ -139,7 +139,7 @@ internal fun ScrollableState.lastItemVisible(): Boolean = when(this) {
  */
 internal fun ScrollableState.isValidOffsetDelta(delta: Int): Boolean {
     if (kuiklyInfo.scrollView?.renderView == null || delta == 0) return false
-    val newOffset = kuiklyInfo.contentOffset + delta
+    val newOffset = kuiklyInfo.logicalContentOffset + delta
     return newOffset >= 0 && newOffset <= (kuiklyInfo.currentContentSize - kuiklyInfo.viewportSize)
 }
 
@@ -177,6 +177,12 @@ internal fun ScrollableState.applyScrollViewOffsetDelta(delta: Int) {
 
     if (shouldDeferAndroidOffsetAlignment()) {
         kuiklyInfo.offsetDirty = true
+        return
+    }
+
+    if (kuiklyInfo.reverseLayout) {
+        // Logical delta; the reverse native move is mirrored from the Compose-owned offset.
+        kuiklyInfo.applyReverseLogicalOffsetDelta(delta)
         return
     }
 

@@ -314,7 +314,7 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
         if (ksScrollSubView && needFixScrollOffset) {
             val scrollerView = (parent as KNode<*>).view
             ((scrollerView.renderProperties as? RenderProperties)?.kuiklyScrollInfo)?.apply {
-                val deltaOffset = composeOffset + snapAnchorOffsetCorrection
+                val deltaOffset = renderOffset() + snapAnchorOffsetCorrection
                 pos = if (orientation == Orientation.Vertical) {
                     Offset(pos.x, pos.y + deltaOffset)
                 } else {
@@ -399,6 +399,15 @@ internal class KNode<T : DeclarativeBaseView<*, *>>(
             (newHeight * kuiklyInfo.getDensity()).toInt()
         } else {
             (newFrame.width * kuiklyInfo.getDensity()).toInt()
+        }
+
+        if (kuiklyInfo.reverseLayout) {
+            // Item 0 stays at the native end: keep the logical offset and replay the mirrored
+            // native offset once the new frame is committed (for growth as well as shrink).
+            // Same rounding as KuiklyScrollInfo.viewportSize, which maps the echo later.
+            return kuiklyInfo.prepareReverseViewportChange(
+                newViewportSize = (newHeight * kuiklyInfo.getDensity()).roundToInt()
+            )
         }
 
         val pendingProgrammaticOffset = kuiklyInfo.ignoreScrollOffset

@@ -28,6 +28,7 @@ import com.tencent.kuikly.core.views.ScrollerView
 import kotlin.math.max
 
 internal val KuiklyInfoKey = "KuiklyInfoKey"
+internal val KuiklyUserBouncesEnableKey = "KuiklyUserBouncesEnableKey"
 
 internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.calNewOffset(curOffset: IntOffset, delta: Int, kuiklyInfo: KuiklyScrollInfo): IntOffset {
     // 注意不能够越界
@@ -64,6 +65,22 @@ internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.applyOffsetDelta(delta: I
         }
     }
 
+    moveNativeContentOffset(newOffset, delta, kuiklyInfo)
+
+    return IntOffset(newOffset.x, newOffset.y)
+}
+
+/**
+ * Shift the placed children by [childDelta] on the main axis and scroll the native view to
+ * [newOffset] (skipped when null), with nested scrolling held on this view meanwhile.
+ */
+internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.moveNativeContentOffset(
+    newOffset: IntOffset?,
+    childDelta: Int,
+    kuiklyInfo: KuiklyScrollInfo
+) {
+    val density = kuiklyInfo.getDensity()
+
     // 避免嵌套滚动的影响
     val originNestSetting = getViewAttr().getProp(NESTED_SCROLL)
     if (originNestSetting != null) {
@@ -73,28 +90,30 @@ internal fun ScrollerView<ScrollerAttr, ScrollerEvent>.applyOffsetDelta(delta: I
     }
 
     // 然后更新子节点的offset
-    contentView?.domChildren()?.forEach { subview ->
-        if (subview.renderView == null) {
-            return@forEach
+    if (childDelta != 0) {
+        contentView?.domChildren()?.forEach { subview ->
+            if (subview.renderView == null) {
+                return@forEach
+            }
+            val curRect = subview.renderView!!.currentFrame.toIntRect(density)
+            val newChildOffset = calNewOffset(IntOffset(curRect.left, curRect.top), childDelta, kuiklyInfo)
+            val newFrame = Frame(newChildOffset.x / density, newChildOffset.y / density,
+                curRect.width / density, curRect.height / density)
+            subview.setFrameToRenderView(newFrame)
         }
-        val curRect = subview.renderView!!.currentFrame.toIntRect(density)
-        val newChildOffset = calNewOffset(IntOffset(curRect.left, curRect.top), delta, kuiklyInfo)
-        val newFrame = Frame(newChildOffset.x / density, newChildOffset.y / density,
-            curRect.width / density, curRect.height / density)
-        subview.setFrameToRenderView(newFrame)
     }
     // 更新offset
-    if (contentView?.getPager()?.pageData?.isAndroid == true) {
-        // 安卓有个bug，刚好滚到最末尾的时候，是不成功的，临时处理下
-        setContentOffset(max(0f, newOffset.x / density - 0.01f), max(0f, newOffset.y / density - 0.01f))
-    } else {
-        setContentOffset(newOffset.x / density, newOffset.y / density)
+    if (newOffset != null) {
+        if (contentView?.getPager()?.pageData?.isAndroid == true) {
+            // 安卓有个bug，刚好滚到最末尾的时候，是不成功的，临时处理下
+            setContentOffset(max(0f, newOffset.x / density - 0.01f), max(0f, newOffset.y / density - 0.01f))
+        } else {
+            setContentOffset(newOffset.x / density, newOffset.y / density)
+        }
     }
 
     // 恢复嵌套滚动设置
     originNestSetting?.run {
         getViewAttr().setProp(NESTED_SCROLL, originNestSetting)
     }
-
-    return IntOffset(newOffset.x, newOffset.y)
 }

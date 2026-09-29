@@ -500,7 +500,7 @@ class LazyListState
                     pending = initialNativeViewportPending,
                     hasItems = layoutInfo.totalItemsCount > 0,
                     isComposeAtTop = isComposeAtTopForScrollSync(),
-                    contentOffset = kuiklyInfo.contentOffset,
+                    contentOffset = kuiklyInfo.logicalContentOffset,
                     composeOffset = kuiklyInfo.composeOffset.toInt(),
                     isDragging = kuiklyInfo.scrollView?.isDragging == true,
                     hasScrollView = kuiklyInfo.scrollView != null,

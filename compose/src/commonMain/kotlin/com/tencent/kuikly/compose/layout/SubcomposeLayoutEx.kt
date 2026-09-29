@@ -169,7 +169,14 @@ internal fun restoreScrollerViewOnReuse(
     kuiklyInfo.realContentSize = null
 
     // Restore contentSize first (UIKit clamps contentOffset to contentSize bounds)
-    kuiklyInfo.updateContentSizeToRender()
+    kuiklyInfo.updateContentSizeToRender(reanchorReverse = false)
+
+    if (kuiklyInfo.reverseLayout) {
+        // A reverse list derives its native offset from the restored logical offset
+        // in the frame of the restored content size (item 0 at the native end).
+        kuiklyInfo.anchorReverseContentSize()
+        kuiklyInfo.contentOffset = kuiklyInfo.nativeTargetFromLogical(kuiklyInfo.composeOffset)
+    }
 
     // Restore contentOffset with ignoreScrollOffset protection.
     // Skip ignoreScrollOffset when oldSvOffset == restoreOffset, because setContentOffset

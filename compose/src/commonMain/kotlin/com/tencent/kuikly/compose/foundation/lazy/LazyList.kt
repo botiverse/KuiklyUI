@@ -86,6 +86,7 @@ internal fun LazyList(
     val semanticState = rememberLazyListSemanticState(state, isVertical)
     val coroutineScope = rememberCoroutineScope()
     state.kuiklyInfo.scope = coroutineScope
+    state.kuiklyInfo.reverseLayout = reverseLayout
 
 //    val graphicsContext = LocalGraphicsContext.current
 //    val stickyHeadersEnabled = !LocalScrollCaptureInProgress.current
