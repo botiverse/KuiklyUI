@@ -315,13 +315,16 @@ open class RichTextView : DeclarativeBaseView<RichTextAttr, RichTextEvent>(),
 
     // 分发span布局位置变化
     private fun dispatchPlaceholderSpanLayoutEventIfNeed() {
-        attr.spans.forEach { child ->
-            if (child is PlaceholderSpan && child.spanFrameDidChangedHandlerFn != null) {
-                val placeholderSpan = child
-                getPager().addTaskWhenPagerUpdateLayoutFinish {
-                    val index = attr.spans.indexOf(placeholderSpan)
-                    if (index >= 0) {
-                        val rectStr = shadow?.callMethod("spanRect", index.toString())
+        attr.spans.forEachIndexed { index, child ->
+            child.visitPlaceholders { childIndex, placeholderSpan ->
+                if (placeholderSpan.spanFrameDidChangedHandlerFn != null) {
+                    getPager().addTaskWhenPagerUpdateLayoutFinish {
+                        val rectTarget = if (childIndex == null) {
+                            index.toString()
+                        } else {
+                            "$index $childIndex"
+                        }
+                        val rectStr = shadow?.callMethod("spanRect", rectTarget)
                         if (rectStr?.isNotEmpty() == true) {
                             rectStr.split(" ").apply {
                                 if (this.size >= 4) {
@@ -430,6 +433,77 @@ interface ISpan {
     fun performLongPressHandler(longPressParams: LongPressParams): Boolean { return false }
     fun hasLongPressEvent(): Boolean { return false }
     abstract fun willDestroy()
+}
+
+private inline fun ISpan.visitPlaceholders(
+    visitor: (childIndex: Int?, placeholder: PlaceholderSpan) -> Unit,
+) {
+    when (this) {
+        is PlaceholderSpan -> visitor(null, this)
+        is InlineBoxGroupSpan -> children.forEachIndexed { index, child ->
+            if (child is PlaceholderSpan) visitor(index, child)
+        }
+    }
+}
+
+/**
+ * First-class RichText group. Unlike applying [InlineBoxSpanStyle] to each
+ * flattened text fragment, this preserves one exact range and its styled
+ * children across the common/native boundary.
+ */
+open class InlineBoxGroupSpan(
+    private val style: InlineBoxSpanStyle,
+) : ISpan {
+    companion object {
+        const val PROP_KEY_CHILDREN = "inlineBoxChildren"
+        const val PROP_KEY_SEMANTIC_TEXT = "inlineBoxSemanticText"
+    }
+
+    var pagerId: String = ""
+    internal val children = fastArrayListOf<ISpan>()
+    private var semanticText: String? = null
+
+    fun addChild(span: ISpan) {
+        if (!span.isEmptySpan()) children.add(span)
+    }
+
+    fun childrenForLayout(): List<ISpan> = children
+
+    fun semanticText(text: String) {
+        semanticText = text
+    }
+
+    override fun isEmptySpan(): Boolean = children.isEmpty()
+
+    override fun spanPropsMap(): Map<String, Any> = fastHashMapOf<String, Any>().apply {
+        style.backgroundColor?.let { put(TextConst.INLINE_BOX_BACKGROUND_COLOR, it.toString()) }
+        style.borderColor?.let { put(TextConst.INLINE_BOX_BORDER_COLOR, it.toString()) }
+        put(TextConst.INLINE_BOX_BORDER_WIDTH, style.borderWidth)
+        put(TextConst.INLINE_BOX_PADDING_START, style.paddingStart)
+        put(TextConst.INLINE_BOX_PADDING_END, style.paddingEnd)
+        put(TextConst.INLINE_BOX_PADDING_TOP, style.paddingTop)
+        put(TextConst.INLINE_BOX_PADDING_BOTTOM, style.paddingBottom)
+        put(TextConst.INLINE_BOX_MARGIN_START, style.marginStart)
+        put(TextConst.INLINE_BOX_MARGIN_END, style.marginEnd)
+        put(TextConst.INLINE_BOX_CORNER_RADIUS, style.cornerRadius)
+        put(PROP_KEY_CHILDREN, children.map { it.spanPropsMap() })
+        semanticText?.let { put(PROP_KEY_SEMANTIC_TEXT, it) }
+    }
+
+    override fun performClickHandler(clickParams: ClickParams): Boolean =
+        children.any { it.performClickHandler(clickParams) }
+
+    override fun hasClickEvent(): Boolean = children.any { it.hasClickEvent() }
+
+    override fun performLongPressHandler(longPressParams: LongPressParams): Boolean =
+        children.any { it.performLongPressHandler(longPressParams) }
+
+    override fun hasLongPressEvent(): Boolean = children.any { it.hasLongPressEvent() }
+
+    override fun willDestroy() {
+        children.forEach { it.willDestroy() }
+        children.clear()
+    }
 }
 
 open class TextSpan : TextAttr(), ISpan {

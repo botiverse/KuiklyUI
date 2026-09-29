@@ -62,6 +62,7 @@ import com.tencent.kuikly.compose.ui.unit.constrain
 import com.tencent.kuikly.core.layout.Frame
 import com.tencent.kuikly.core.manager.BridgeManager
 import com.tencent.kuikly.core.views.PlaceholderSpan
+import com.tencent.kuikly.core.views.InlineBoxGroupSpan
 import com.tencent.kuikly.core.views.RichTextAttr
 import com.tencent.kuikly.core.views.RichTextView
 import com.tencent.kuikly.core.views.TextConst
@@ -233,10 +234,17 @@ internal class TextStringRichNode(
         val pageDensity = textView!!.getPager().pagerDensity()
         // 遍历所有文本片段,处理占位符
         textView?.getViewAttr()?.getSpans()?.forEachIndexed { index, span ->
-            if (span !is PlaceholderSpan) return@forEachIndexed
-
+            val placeholders = when (span) {
+                is PlaceholderSpan -> listOf(null to span)
+                is InlineBoxGroupSpan -> span.childrenForLayout().mapIndexedNotNull { childIndex, child ->
+                    (child as? PlaceholderSpan)?.let { childIndex to it }
+                }
+                else -> emptyList()
+            }
+            placeholders.forEach { (childIndex, placeholderSpan) ->
             // 获取占位符的位置和大小信息
-            val rectStr = textView.shadow?.callMethod("spanRect", index.toString())
+            val rectTarget = childIndex?.let { "$index $it" } ?: index.toString()
+            val rectStr = textView.shadow?.callMethod("spanRect", rectTarget)
             if (rectStr.isNullOrEmpty()) return@forEachIndexed
 
             // 解析位置和大小信息
@@ -249,13 +257,14 @@ internal class TextStringRichNode(
             }
 
             // 更新占位符的frame并添加到矩形列表
-            span.spanFrame = Frame(x, y, width, height)
+            placeholderSpan.spanFrame = Frame(x, y, width, height)
             placeholderRects.add(
                 Rect(
                     offset = Offset(x * pageDensity, y * pageDensity),
                     size = Size(width * pageDensity, height * pageDensity)
                 )
             )
+            }
         }
 
         val effectiveAnnotated = annotatedText ?: AnnotatedString(plainText ?: "")
