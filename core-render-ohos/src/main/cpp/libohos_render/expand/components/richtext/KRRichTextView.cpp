@@ -113,7 +113,9 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
     // shadow->StyledStringEnabled()（含 image span 时返 false），本处只读一个结果。
     bool use_styled_string = textShadow && textShadow->StyledStringEnabled();
     bool has_image_span = textShadow && textShadow->HasImageSpans();
+    use_styled_string_ = use_styled_string;
     if(use_styled_string){
+        KREventDispatchCenter::GetInstance().UnregisterCustomEvent(shared_from_this());
         ArkUI_AttributeItem item;
         if(std::shared_ptr<KRParagraph> paragraph = std::dynamic_pointer_cast<KRRichTextShadow>(shadow)->GetParagraph()){
             item.object = paragraph->GetStyledString();
@@ -127,6 +129,8 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
             paragraph_ = paragraph;
         }
     }else {
+        kuikly::util::GetNodeApi()->resetAttribute(GetNode(), NODE_TEXT_CONTENT_WITH_STYLED_STRING);
+        paragraph_ = nullptr;
         KREventDispatchCenter::GetInstance().RegisterCustomEvent(shared_from_this(), ARKUI_NODE_CUSTOM_EVENT_ON_FOREGROUND_DRAW);
         kuikly::util::GetNodeApi()->markDirty(GetNode(), NODE_NEED_RENDER);
     }
@@ -149,6 +153,9 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
 
 void KRRichTextView::DidMoveToParentView() {
     IKRRenderViewExport::DidMoveToParentView();
+    if (use_styled_string_) {
+        return;
+    }
     auto self = shared_from_this();
     KREventDispatchCenter::GetInstance().RegisterCustomEvent(self, ARKUI_NODE_CUSTOM_EVENT_ON_FOREGROUND_DRAW);
 }
@@ -158,10 +165,14 @@ void KRRichTextView::DidRemoveFromParentView() {
     IKRRenderViewExport::DidRemoveFromParentView();
     shadow_ = nullptr;
     paragraph_ = nullptr;
+    use_styled_string_ = false;
     last_draw_frame_width_ = -1.0;
 }
 
 void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
+    if (use_styled_string_) {
+        return;
+    }
     if (shadow_ == nullptr || GetFrame().width == 0) {
         KR_LOG_ERROR << "OnForegroundDraw, shadow or frame not ready, shadow:" << shadow_.get()
                      << ", frame width:" << GetFrame().width;
