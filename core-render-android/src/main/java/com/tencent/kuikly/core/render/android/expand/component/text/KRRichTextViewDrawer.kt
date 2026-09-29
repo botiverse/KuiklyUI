@@ -51,6 +51,16 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     private var selectionStart = -1
     private var selectionEnd = -1
     internal val hasSelection: Boolean get() = 0 <= selectionStart && selectionStart < selectionEnd
+    private val inlineBoxFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val inlineBoxBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
+    private val inlineBoxRect = RectF()
+    private val inlineBoxSelectionPath = Path()
+    private val inlineBoxLineClipPath = Path()
+    private val inlineBoxSelectionBounds = RectF()
     private val customUnderlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
     }
@@ -86,8 +96,10 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
      * 将文本内容绘制到 [canvas]，对接到 [Layout.draw]。
      */
     fun draw(canvas: Canvas) {
+        drawInlineBoxChrome(canvas, drawFill = true, drawBorder = false)
         textLayout.draw(canvas)
         drawCustomUnderlines(canvas)
+        drawInlineBoxChrome(canvas, drawFill = false, drawBorder = true)
     }
 
     private fun drawCustomUnderlines(canvas: Canvas) {
@@ -233,6 +245,144 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
             (paint.textSize / 9f).coerceAtLeast(1f)
         }
 
+    private fun drawInlineBoxChrome(canvas: Canvas, drawFill: Boolean, drawBorder: Boolean) {
+        val spanned = textLayout.text as? Spanned ?: return
+        val spans = spanned.getSpans(0, spanned.length, KRInlineBoxSpan::class.java)
+        if (spans.isEmpty()) return
+
+        val layoutLeft = 0f
+        val layoutRight = textLayout.width.toFloat()
+        val metrics = textLayout.paint.fontMetrics
+        spans.forEach { span ->
+            val start = spanned.getSpanStart(span)
+            val end = spanned.getSpanEnd(span)
+            if (start < 0 || end <= start) return@forEach
+            val style = span.style
+            val atomicSpan =
+                spanned.getSpans(start, end, KRInlineBoxAtomicTextSpan::class.java)
+                    .firstOrNull { atomicSpan ->
+                        spanned.getSpanStart(atomicSpan) == start &&
+                            spanned.getSpanEnd(atomicSpan) == end
+                    }
+            val startLine = textLayout.getLineForOffset((start + 1).coerceAtMost(end - 1))
+            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val lineStart = textLayout.getLineStart(line)
+                val lineVisibleEnd = textLayout.slockInlineCodeVisibleEnd(line)
+                val segmentStart = max(start, lineStart)
+                val segmentEnd = min(end, lineVisibleEnd)
+                if (segmentEnd <= segmentStart) continue
+                val atomicBounds =
+                    atomicSpan?.let { atomicInlineBoxBounds(start, end, line, it) }
+                val clipToSelectionPath = atomicBounds == null
+                val segmentLeft: Float
+                val segmentRight: Float
+                if (atomicBounds != null) {
+                    // ReplacementSpan caret affinity can still resolve to adjacent
+                    // text. The selection path keeps the visual anchor, while the
+                    // span's measured width avoids line-end selection expansion.
+                    segmentLeft = atomicBounds.left
+                    segmentRight = atomicBounds.right
+                } else {
+                    val segmentBounds = inlineBoxSelectionBounds(segmentStart, segmentEnd, line)
+                        ?: continue
+                    segmentLeft = segmentBounds.left
+                    segmentRight = segmentBounds.right
+                }
+                val left = (
+                    segmentLeft + if (segmentStart == start) style.marginStart else 0f
+                    )
+                    .coerceAtLeast(layoutLeft)
+                val right = (
+                    segmentRight - if (segmentEnd == end) style.marginEnd else 0f
+                    )
+                    .coerceAtMost(layoutRight)
+                if (right <= left) continue
+
+                val baseline = textLayout.getLineBaseline(line).toFloat()
+                val top = baseline + metrics.ascent - style.paddingTop - style.borderWidth
+                val bottom = baseline + metrics.descent + style.paddingBottom + style.borderWidth
+                if (bottom <= top) continue
+                inlineBoxRect.set(left, top, right, bottom)
+                val saveCount =
+                    if (clipToSelectionPath) {
+                        canvas.save().also { canvas.clipPath(inlineBoxSelectionPath) }
+                    } else {
+                        null
+                    }
+                if (drawFill && style.backgroundColor != null) {
+                    inlineBoxFillPaint.color = style.backgroundColor
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        style.cornerRadius,
+                        style.cornerRadius,
+                        inlineBoxFillPaint
+                    )
+                }
+                if (drawBorder && style.borderColor != null && style.borderWidth > 0f) {
+                    inlineBoxBorderPaint.color = style.borderColor
+                    inlineBoxBorderPaint.strokeWidth = style.borderWidth
+                    val inset = style.borderWidth / 2f
+                    inlineBoxRect.inset(inset, inset)
+                    canvas.drawRoundRect(
+                        inlineBoxRect,
+                        max(0f, style.cornerRadius - inset),
+                        max(0f, style.cornerRadius - inset),
+                        inlineBoxBorderPaint
+                    )
+                }
+                if (saveCount != null) canvas.restoreToCount(saveCount)
+            }
+        }
+    }
+
+    private fun atomicInlineBoxBounds(
+        start: Int,
+        end: Int,
+        line: Int,
+        atomicSpan: KRInlineBoxAtomicTextSpan,
+    ): RectF? {
+        val measuredWidth = atomicSpan.measuredWidth.toFloat()
+        if (measuredWidth <= 0f) return null
+        val bounds = inlineBoxSelectionBounds(start, end, line) ?: return null
+        if (textLayout.getParagraphDirection(line) >= 0) {
+            bounds.right = min(textLayout.width.toFloat(), bounds.left + measuredWidth)
+        } else {
+            bounds.left = max(0f, bounds.right - measuredWidth)
+        }
+        return bounds
+    }
+
+    private fun inlineBoxSelectionBounds(start: Int, end: Int, line: Int): RectF? {
+        inlineBoxSelectionPath.reset()
+        textLayout.getSelectionPath(start, end, inlineBoxSelectionPath)
+        inlineBoxLineClipPath.reset()
+        val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+        val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
+        inlineBoxLineClipPath.addRect(
+            lineLeft,
+            textLayout.getLineTop(line).toFloat(),
+            lineRight,
+            textLayout.getLineBottom(line).toFloat(),
+            Path.Direction.CW,
+        )
+        if (!inlineBoxSelectionPath.op(inlineBoxLineClipPath, Path.Op.INTERSECT)) {
+            return null
+        }
+        inlineBoxSelectionPath.computeBounds(inlineBoxSelectionBounds, true)
+        if (inlineBoxSelectionBounds.isEmpty) return null
+        return inlineBoxSelectionBounds
+    }
+
+    private fun Layout.slockInlineCodeVisibleEnd(line: Int): Int {
+        val lineStart = getLineStart(line)
+        val ellipsisCount = getEllipsisCount(line)
+        if (ellipsisCount > 0) {
+            return (lineStart + getEllipsisStart(line)).coerceAtLeast(lineStart)
+        }
+        return getLineVisibleEnd(line)
+    }
+
     internal fun setSelectionByCoordinate(
         x: Float,
         y: Float,
@@ -357,7 +507,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     internal fun getSelectionText(): String? {
         return if (hasSelection) {
-            textLayout.text.substring(selectionStart, selectionEnd)
+            textLayout.text.inlineBoxSemanticSubstring(selectionStart, selectionEnd)
         } else {
             null
         }
@@ -365,7 +515,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     internal fun getPreSelectionText(): String? {
         return if (hasSelection && selectionStart > 0) {
-            textLayout.text.substring(0, selectionStart)
+            textLayout.text.inlineBoxSemanticSubstring(0, selectionStart)
         } else {
             null
         }
@@ -374,7 +524,7 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
     internal fun getPostSelectionText(): String? {
         val length = textLayout.text.length
         return if (hasSelection && selectionEnd < length) {
-            textLayout.text.substring(selectionEnd, length)
+            textLayout.text.inlineBoxSemanticSubstring(selectionEnd, length)
         } else {
             null
         }
@@ -625,4 +775,37 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
 
     }
 
+}
+
+private fun String.withoutInlineBoxLayoutCharacters(): String =
+    replace("\uFFFC", "").replace(INLINE_BOX_LAYOUT_JOINER.toString(), "")
+
+private fun CharSequence.inlineBoxSemanticSubstring(start: Int, end: Int): String {
+    if (start >= end) return ""
+    val spanned = this as? Spanned
+        ?: return substring(start, end).withoutInlineBoxLayoutCharacters()
+    val semanticSpans = spanned.getSpans(start, end, KRInlineBoxSemanticSpan::class.java)
+    if (semanticSpans.isEmpty()) return substring(start, end).withoutInlineBoxLayoutCharacters()
+
+    val result = StringBuilder()
+    var cursor = start
+    semanticSpans.sortedBy(spanned::getSpanStart).forEach { span ->
+        val spanStart = spanned.getSpanStart(span)
+        val spanEnd = spanned.getSpanEnd(span)
+        if (spanStart > cursor) {
+            result.append(substring(cursor, min(spanStart, end)).withoutInlineBoxLayoutCharacters())
+        }
+        val overlapStart = max(cursor, spanStart)
+        val overlapEnd = min(end, spanEnd)
+        if (overlapEnd > overlapStart) {
+            if (overlapStart == spanStart && overlapEnd == spanEnd && span.text.isNotEmpty()) {
+                result.append(span.text)
+            } else {
+                result.append(substring(overlapStart, overlapEnd).withoutInlineBoxLayoutCharacters())
+            }
+            cursor = overlapEnd
+        }
+    }
+    if (cursor < end) result.append(substring(cursor, end).withoutInlineBoxLayoutCharacters())
+    return result.toString()
 }
