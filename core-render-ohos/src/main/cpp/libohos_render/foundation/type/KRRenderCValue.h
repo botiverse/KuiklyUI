@@ -63,6 +63,8 @@ __attribute__((visibility("default"))) extern void com_tencent_kuikly_CallNative
                                                           const KRRenderCValue *arg5, KRRenderCValue *result);
 __attribute__((visibility("default"))) extern void com_tencent_kuikly_ScheduleContextTask(const char *pagerId,
                                                           void (*onSchedule)(const char *pagerId));
+__attribute__((visibility("default"))) extern void com_tencent_kuikly_ScheduleContextIdleTask(const char *pagerId,
+                                                          void (*onSchedule)(const char *pagerId));
 __attribute__((visibility("default"))) extern bool com_tencent_kuikly_IsCurrentOnContextThread(const char *pagerId);
 
 #ifdef __cplusplus

@@ -38,6 +38,20 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
     })
 }
 
+/**
+ * iOS stub for the idle lane. The #1566 context thread has no native idle
+ * admission yet, so an idle admission is posted as a normal context task on
+ * the dedicated thread. The common admission logic in [KuiklyContextScheduler]
+ * still runs idle callbacks one at a time, only after the pager's normal
+ * Kotlin work has drained; it is just not preempted by native-side work.
+ */
+internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
+    com_tencent_kuikly_ScheduleContextTask(pagerId, staticCFunction { pagerIdBytes: CPointer<ByteVar>? ->
+        val idStr = pagerIdBytes?.toKString() ?: return@staticCFunction
+        KuiklyContextScheduler.runIdleTask(idStr)
+    })
+}
+
 internal actual inline fun platformNotifyKuiklyException(t: Throwable) {
     BridgeManager.callExceptionMethod(t.stackTraceToString())
 }

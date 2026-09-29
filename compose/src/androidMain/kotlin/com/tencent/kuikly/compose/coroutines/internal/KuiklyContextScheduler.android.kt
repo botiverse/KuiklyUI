@@ -30,6 +30,12 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
     }
 }
 
+internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
+    KuiklyRenderCoreContextScheduler.scheduleIdleTask {
+        KuiklyContextScheduler.runIdleTask(pagerId)
+    }
+}
+
 internal actual inline fun platformNotifyKuiklyException(t: Throwable) {
     // todo support notify exception
     BridgeManager.callExceptionMethod(t.stackTraceToString())
