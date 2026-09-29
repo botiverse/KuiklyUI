@@ -594,6 +594,10 @@ void KRCanvasView::DrawImage(const std::string &params) {
         auto obj = kuikly::util::JSONObject::Parse(params);
         std::string cacheKey = obj->GetString("cacheKey");
         auto module = std::dynamic_pointer_cast<KRMemoryCacheModule>(GetModule(kMemoryCacheModuleName));
+        if (!module) {
+            KR_LOG_ERROR_WITH_TAG("KRCanvasView") << "memory cache module unavailable while drawing image";
+            return;
+        }
         auto pixelmap = module->GetImage(cacheKey);
         if (!pixelmap) {
             return;
@@ -620,11 +624,16 @@ void KRCanvasView::DrawImage(const std::string &params) {
         float dHeight = obj->GetNumber("dHeight", sHeight);
 
         OH_Drawing_PixelMap *drawingPixelMap = OH_Drawing_PixelMapGetFromOhPixelMapNative(pixelmap);
+        if (!drawingPixelMap) {
+            KR_LOG_ERROR_WITH_TAG("KRCanvasView") << "failed to convert validated PixelMap for Canvas drawing";
+            return;
+        }
         OH_Drawing_Rect *srcRect = OH_Drawing_RectCreate(sx, sy, sx + sWidth, sy + sHeight);
         OH_Drawing_Rect *dstRect = OH_Drawing_RectCreate(dx, dy, dx + dWidth, dy + dHeight);
         OH_Drawing_CanvasDrawPixelMapRect(canvas_, drawingPixelMap, srcRect, dstRect, nullptr);
         OH_Drawing_RectDestroy(srcRect);
         OH_Drawing_RectDestroy(dstRect);
+        OH_Drawing_PixelMapDissolve(drawingPixelMap);
     }
 }
 
