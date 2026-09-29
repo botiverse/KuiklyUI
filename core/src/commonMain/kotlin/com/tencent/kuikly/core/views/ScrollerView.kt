@@ -436,6 +436,14 @@ open class ScrollerAttr : ContainerAttr() {
         BOUNCES_ENABLE with bouncesEnable.toInt()
         LIMIT_BOUNCES_ENABLE with limitHeaderBounces.toInt()
     }
+
+    /**
+     * Enables UIKit's interactive keyboard dismissal while this scroller is dragged on iOS.
+     * Other render targets ignore this platform-specific property.
+     */
+    fun keyboardDismissModeInteractiveIOS(enable: Boolean) {
+        KEYBOARD_DISMISS_MODE_INTERACTIVE_IOS with enable.toInt()
+    }
     // 是否显示滚动指示进度条（默认显示）
     fun showScrollerIndicator(value: Boolean) {
         SHOW_SCROLLER_INDICATOR with value.toInt()
@@ -513,6 +521,7 @@ open class ScrollerAttr : ContainerAttr() {
     companion object {
         const val SCROLL_ENABLED = "scrollEnabled"
         const val BOUNCES_ENABLE = "bouncesEnable"
+        const val KEYBOARD_DISMISS_MODE_INTERACTIVE_IOS = "keyboardDismissModeInteractiveIOS"
         const val LIMIT_BOUNCES_ENABLE = "limitHeaderBounces"
         const val SHOW_SCROLLER_INDICATOR = "showScrollerIndicator"
         const val PAGING_ENABLED = "pagingEnabled"
