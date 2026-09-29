@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composition
 import com.tencent.kuikly.compose.ui.InternalComposeUiApi
 import com.tencent.kuikly.compose.ui.graphics.Canvas
+import com.tencent.kuikly.compose.ui.input.key.KeyEvent
 import com.tencent.kuikly.compose.ui.input.pointer.PointerInputEvent
 import com.tencent.kuikly.compose.ui.node.RootNodeOwner
 import com.tencent.kuikly.compose.ui.platform.setContent
@@ -138,6 +139,9 @@ private class KuiklyComposeSceneImpl @InternalComposeUiApi constructor(
     override fun processPointerInputEvent(event: PointerInputEvent) =
         mainOwner.onPointerInput(event)
 
+    override fun processKeyEvent(event: KeyEvent): Boolean =
+        mainOwner.focusOwner.dispatchKeyEvent(event)
+
     override fun measureAndLayout() {
         mainOwner.measureAndLayout()
     }
@@ -152,4 +156,3 @@ private class KuiklyComposeSceneImpl @InternalComposeUiApi constructor(
     private fun onOwnerRemoved(owner: RootNodeOwner) {
     }
 }
-
