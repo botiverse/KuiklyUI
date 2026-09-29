@@ -182,15 +182,11 @@ void KRThread::OnAsync() {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         std::swap(local, m_pending);
     }
-    if (local.empty()) {
-        return;
-    }
-
-    // 抢执行权：阻塞等待。即使此刻有 DirectRunOnCurThread 持锁，
-    // worker 也只是被挂起到对方 unlock，期间不忙等、不浪费 CPU。
-    // worker 线程不会自我重入（task 内嵌套提交同步任务走 m_isExecutingTask 快路径），
-    // 故对 m_taskMutex 阻塞 lock 不会自死锁。
-    {
+    if (!local.empty()) {
+        // 抢执行权：阻塞等待。即使此刻有 DirectRunOnCurThread 持锁，
+        // worker 也只是被挂起到对方 unlock，期间不忙等、不浪费 CPU。
+        // worker 线程不会自我重入（task 内嵌套提交同步任务走 m_isExecutingTask 快路径），
+        // 故对 m_taskMutex 阻塞 lock 不会自死锁。
         std::lock_guard<std::mutex> taskLock(m_taskMutex);
         m_isExecutingTask.store(true);
         while (!local.empty()) {
@@ -207,6 +203,52 @@ void KRThread::OnAsync() {
             }
         }
         m_isExecutingTask.store(false);
+    }
+
+    // Normal work always wins. Re-check the shared queue after the captured
+    // batch completes because producers may have enqueued foreground work
+    // while the worker was executing it. Run at most one idle callback per
+    // loop turn so the next normal enqueue gets an admission point.
+    std::function<void()> idleTask;
+    bool moreIdlePending = false;
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_pending.empty() && !m_idlePending.empty()) {
+            idleTask = std::move(m_idlePending.front());
+            m_idlePending.pop();
+            moreIdlePending = !m_idlePending.empty();
+        }
+    }
+    if (!idleTask) {
+        return;
+    }
+    // libuv coalesces uv_async_send, so idle work queued by several pagers can
+    // share one wake-up. Re-signal while idle work remains so it does not wait
+    // for the next normal task.
+    if (moreIdlePending && !m_stop.load()) {
+        uv_async_send(&m_async);
+    }
+
+    {
+        std::lock_guard<std::mutex> taskLock(m_taskMutex);
+        struct IdleExecutionGuard {
+            std::atomic<bool> &executing;
+            explicit IdleExecutionGuard(std::atomic<bool> &flag) : executing(flag) {
+                executing.store(true);
+                int ret = OH_QoS_SetThreadQoS(QoS_Level::QOS_BACKGROUND);
+                if (ret != 0) {
+                    KR_LOG_ERROR << "KRThread idle OH_QoS_SetThreadQoS(background) failed, err=" << ret;
+                }
+            }
+            ~IdleExecutionGuard() {
+                int ret = OH_QoS_SetThreadQoS(QoS_Level::QOS_USER_INTERACTIVE);
+                if (ret != 0) {
+                    KR_LOG_ERROR << "KRThread idle OH_QoS_SetThreadQoS(restore) failed, err=" << ret;
+                }
+                executing.store(false);
+            }
+        } idleGuard(m_isExecutingTask);
+        idleTask();
     }
 }
 
@@ -313,6 +355,21 @@ void KRThread::DispatchAsync(std::function<void()> task, int delayMilliseconds) 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
         m_pending.push(std::move(task));
+    }
+    uv_async_send(&m_async);
+}
+
+void KRThread::DispatchIdle(std::function<void()> task) {
+    if (!task) {
+        return;
+    }
+    if (!m_loopReady.load()) {
+        KR_LOG_ERROR << "KRThread::DispatchIdle before loop ready, drop task";
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_idlePending.push(std::move(task));
     }
     uv_async_send(&m_async);
 }

@@ -35,6 +35,9 @@ class KRContextScheduler {
      */
     static void ScheduleTask(int delayMs, const KRSchedulerTask &task);
 
+    /** Schedule one bounded task after normal context work drains. */
+    static void ScheduleIdleTask(const KRSchedulerTask &task);
+
     /**
      * Context线程调度任务到主线程执行(注：该方法只能在主线程或Context线程被调用)
      * @param sync 是否同步执行
