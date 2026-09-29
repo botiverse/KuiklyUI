@@ -17,8 +17,13 @@
 #include "libohos_render/utils/KRConvertUtil.h"
 #include "libohos_render/utils/KRViewUtil.h"
 #include "libohos_render/expand/components/input/KRTextAreaView.h"
+#include <algorithm>
+#include <arkui/native_node.h>
+#include <arkui/native_type.h>
 
 constexpr char kLineHeight[] = "lineHeight";
+constexpr char kSlockSystemNewlineAction[] = "slockSystemNewlineAction";
+constexpr int32_t kSystemNewlineMenuItemId = ARKUI_TEXT_MENU_ITEM_ID_APP_RESERVED_BEGIN;
 
 void KRTextAreaView::DidInit() {
     // 调用父类的 DidInit 来设置默认样式（透明背景、无圆角、无padding）
@@ -33,6 +38,14 @@ bool KRTextAreaView::SetProp(const std::string &prop_key, const KRAnyValue &prop
                              const KRRenderCallback event_call_back) {
     if (kuikly::util::isEqual(prop_key, kLineHeight)) {
         kuikly::util::UpdateTextAreaNodeLineHeight(GetNode(), prop_value->toFloat());
+        return true;
+    }
+    if (kuikly::util::isEqual(prop_key, kSlockSystemNewlineAction)) {
+        if (prop_value->toInt() == 1) {
+            SetupSystemNewlineEditMenu();
+        } else {
+            TeardownSystemNewlineEditMenu();
+        }
         return true;
     }
     return KRTextFieldView::SetProp(prop_key, prop_value, event_call_back);
@@ -161,3 +174,107 @@ void KRTextAreaView::UpdateInputNodeContentText(const std::string &text) {
     kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_AREA_TEXT, &item);
 }
 
+void KRTextAreaView::OnDestroy() {
+    TeardownSystemNewlineEditMenu();
+    KRTextFieldView::OnDestroy();
+}
+
+void KRTextAreaView::SetupSystemNewlineEditMenu() {
+    if (system_newline_edit_menu_options_ != nullptr) {
+        return;
+    }
+    auto options = OH_ArkUI_TextEditMenuOptions_Create();
+    if (options == nullptr) {
+        return;
+    }
+    OH_ArkUI_TextEditMenuOptions_RegisterOnCreateMenuCallback(
+        options, this, KRTextAreaView::OnCreateSystemNewlineMenu);
+    OH_ArkUI_TextEditMenuOptions_RegisterOnMenuItemClickCallback(
+        options, this, KRTextAreaView::OnSystemNewlineMenuItemClick);
+    system_newline_edit_menu_options_ = options;
+
+    ArkUI_AttributeItem item = {};
+    item.object = options;
+    kuikly::util::GetNodeApi()->setAttribute(GetNode(), NODE_TEXT_EDIT_MENU_OPTIONS, &item);
+}
+
+void KRTextAreaView::TeardownSystemNewlineEditMenu() {
+    if (system_newline_edit_menu_options_ == nullptr) {
+        return;
+    }
+    kuikly::util::GetNodeApi()->resetAttribute(GetNode(), NODE_TEXT_EDIT_MENU_OPTIONS);
+    OH_ArkUI_TextEditMenuOptions_Dispose(system_newline_edit_menu_options_);
+    system_newline_edit_menu_options_ = nullptr;
+}
+
+void KRTextAreaView::OnCreateSystemNewlineMenu(ArkUI_TextMenuItemArray *items, void *userData) {
+    if (items == nullptr) {
+        return;
+    }
+    auto item = OH_ArkUI_TextMenuItem_Create();
+    if (item == nullptr) {
+        return;
+    }
+    OH_ArkUI_TextMenuItem_SetId(item, kSystemNewlineMenuItemId);
+    OH_ArkUI_TextMenuItem_SetContent(item, "换行");
+
+    int32_t itemCount = 0;
+    if (OH_ArkUI_TextMenuItemArray_GetSize(items, &itemCount) != ARKUI_ERROR_CODE_NO_ERROR) {
+        itemCount = 0;
+    }
+    OH_ArkUI_TextMenuItemArray_Insert(items, item, itemCount);
+    OH_ArkUI_TextMenuItem_Dispose(item);
+}
+
+bool KRTextAreaView::OnSystemNewlineMenuItemClick(const ArkUI_TextMenuItem *item, int32_t start, int32_t end,
+                                                  void *userData) {
+    auto self = static_cast<KRTextAreaView *>(userData);
+    if (self == nullptr || item == nullptr) {
+        return false;
+    }
+    int32_t itemId = 0;
+    if (OH_ArkUI_TextMenuItem_GetId(item, &itemId) != ARKUI_ERROR_CODE_NO_ERROR ||
+        itemId != kSystemNewlineMenuItemId) {
+        return false;
+    }
+    self->InsertNewlineAtSelection(start, end);
+    return true;
+}
+
+void KRTextAreaView::InsertNewlineAtSelection(int32_t start, int32_t end) {
+    std::string text;
+    if (auto content = kuikly::util::GetNodeApi()->getAttribute(GetNode(), NODE_TEXT_AREA_TEXT)) {
+        if (content->string != nullptr) {
+            text = content->string;
+        }
+    }
+
+    int32_t rangeStart = start;
+    int32_t rangeEnd = end;
+    if (rangeStart < 0 || rangeEnd < 0) {
+        auto selection = GetInputNodeTextSelectionRange();
+        rangeStart = static_cast<int32_t>(selection.first);
+        rangeEnd = static_cast<int32_t>(selection.second);
+    }
+
+    int32_t u16Length = GetUTF16Length(text);
+    int32_t u16Start = std::min(rangeStart, rangeEnd);
+    int32_t u16End = std::max(rangeStart, rangeEnd);
+    u16Start = std::max(0, std::min(u16Start, u16Length));
+    u16End = std::max(u16Start, std::min(u16End, u16Length));
+
+    auto u8Start = static_cast<size_t>(GetUTF8ByteCount(text, 0, static_cast<size_t>(u16Start)));
+    auto u8End = u8Start + static_cast<size_t>(
+        GetUTF8ByteCount(text, u8Start, static_cast<size_t>(u16End - u16Start)));
+
+    std::string newText = text;
+    newText.replace(u8Start, u8End - u8Start, "\n");
+    UpdateInputNodeContentText(newText);
+
+    KRMainThread::RunOnMainThreadForNextLoop(
+        [weakSelf = weak_from_this(), caret = static_cast<uint32_t>(u16Start + 1)]() {
+            if (auto strongSelf = std::dynamic_pointer_cast<KRTextAreaView>(weakSelf.lock())) {
+                strongSelf->UpdateInputNodeSelectionStartPosition(caret);
+            }
+        });
+}
