@@ -1,0 +1,176 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:25:36 +0000
+Subject: feat(ios): support interactive keyboard dismissal on scrollers
+
+Add Modifier.keyboardDismissModeInteractiveIOS() (and
+ScrollerAttr.keyboardDismissModeInteractiveIOS) that sets the iOS
+KRScrollView keyboardDismissMode to Interactive, so dragging a list can
+pull the keyboard down. Other platforms ignore the property.
+
+Fork-Patch: ios-scroller-interactive-keyboard-dismiss
+Origin: 5a10be8c
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KeyboardDismissModeInteractiveIOS.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KeyboardDismissModeInteractiveIOS.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..aeb7b66ef7be68c6169dab404bd7445409d22e6a
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KeyboardDismissModeInteractiveIOS.kt
+@@ -0,0 +1,61 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.extension
++
++import com.tencent.kuikly.compose.ui.Modifier
++import com.tencent.kuikly.compose.ui.node.KNode
++import com.tencent.kuikly.compose.ui.node.ModifierNodeElement
++import com.tencent.kuikly.compose.ui.node.requireLayoutNode
++import com.tencent.kuikly.core.views.ScrollerView
++
++/**
++ * Uses UIKit's interactive keyboard dismissal for the first scroller represented by this node.
++ * This is an iOS-only rendering hint; other platforms retain their existing keyboard behavior.
++ */
++fun Modifier.keyboardDismissModeInteractiveIOS(
++    enable: Boolean = true,
++): Modifier = this.then(KeyboardDismissModeInteractiveIOSElement(enable))
++
++private data class KeyboardDismissModeInteractiveIOSElement(
++    val enable: Boolean,
++) : ModifierNodeElement<KeyboardDismissModeInteractiveIOSNode>() {
++    override fun create(): KeyboardDismissModeInteractiveIOSNode =
++        KeyboardDismissModeInteractiveIOSNode(enable)
++
++    override fun update(node: KeyboardDismissModeInteractiveIOSNode) {
++        node.enable = enable
++        node.update()
++    }
++}
++
++private class KeyboardDismissModeInteractiveIOSNode(
++    var enable: Boolean,
++) : Modifier.Node() {
++    override fun onAttach() {
++        super.onAttach()
++        update()
++    }
++
++    fun update() {
++        val layoutNode = requireLayoutNode()
++        val kNode = layoutNode as? KNode<*> ?: return
++        val scrollerView =
++            (kNode.view as? ScrollerView<*, *>)
++                ?: layoutNode.findFirstChildScrollerView()
++                ?: return
++        scrollerView.getViewAttr().keyboardDismissModeInteractiveIOS(enable)
++    }
++}
+diff --git a/core-render-ios/Extension/Components/KRScrollView.m b/core-render-ios/Extension/Components/KRScrollView.m
+index 944bc2ef5f4dcab081ee395bc0af22e9bc3dda91..e1c5059cec305eb9c3ecfb83e8d71233cf3acbbc 100644
+--- a/core-render-ios/Extension/Components/KRScrollView.m
++++ b/core-render-ios/Extension/Components/KRScrollView.m
+@@ -53,6 +53,8 @@ static void KRLogDroppedScrollEventValue(NSString *field,
+ 
+ /** attr is bouncesEnable  */
+ @property (nonatomic, strong) NSNumber *KUIKLY_PROP(bouncesEnable);
++/** attr enables UIScrollViewKeyboardDismissModeInteractive on iOS */
++@property (nonatomic, strong) NSNumber *KUIKLY_PROP(keyboardDismissModeInteractiveIOS);
+ /** attr is pagingEnabled  */
+ @property (nonatomic, strong) NSNumber *KUIKLY_PROP(pagingEnabled);
+ /** attr is isComposePager  */
+@@ -556,6 +558,17 @@ KUIKLY_NESTEDSCROLL_PROTOCOL_PROPERTY_IMP
+     }
+ }
+ 
++- (void)setCss_keyboardDismissModeInteractiveIOS:(NSNumber *)css_keyboardDismissModeInteractiveIOS {
++    if (self.css_keyboardDismissModeInteractiveIOS != css_keyboardDismissModeInteractiveIOS) {
++        _css_keyboardDismissModeInteractiveIOS = css_keyboardDismissModeInteractiveIOS;
++        #if !TARGET_OS_OSX // [macOS]
++        self.keyboardDismissMode = [css_keyboardDismissModeInteractiveIOS boolValue]
++            ? UIScrollViewKeyboardDismissModeInteractive
++            : UIScrollViewKeyboardDismissModeNone;
++        #endif // [macOS]
++    }
++}
++
+ - (void)setCss_pagingEnabled:(NSNumber *)css_pagingEnabled {
+     if (self.css_pagingEnabled != css_pagingEnabled) {
+         _css_pagingEnabled = css_pagingEnabled;
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
+index b1161d0960c4e3211808884264a0d7970a452521..6dc38bc114ea39543922ea7e35121376e565a968 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
+@@ -436,6 +436,14 @@ open class ScrollerAttr : ContainerAttr() {
+         BOUNCES_ENABLE with bouncesEnable.toInt()
+         LIMIT_BOUNCES_ENABLE with limitHeaderBounces.toInt()
+     }
++
++    /**
++     * Enables UIKit's interactive keyboard dismissal while this scroller is dragged on iOS.
++     * Other render targets ignore this platform-specific property.
++     */
++    fun keyboardDismissModeInteractiveIOS(enable: Boolean) {
++        KEYBOARD_DISMISS_MODE_INTERACTIVE_IOS with enable.toInt()
++    }
+     // 是否显示滚动指示进度条（默认显示）
+     fun showScrollerIndicator(value: Boolean) {
+         SHOW_SCROLLER_INDICATOR with value.toInt()
+@@ -513,6 +521,7 @@ open class ScrollerAttr : ContainerAttr() {
+     companion object {
+         const val SCROLL_ENABLED = "scrollEnabled"
+         const val BOUNCES_ENABLE = "bouncesEnable"
++        const val KEYBOARD_DISMISS_MODE_INTERACTIVE_IOS = "keyboardDismissModeInteractiveIOS"
+         const val LIMIT_BOUNCES_ENABLE = "limitHeaderBounces"
+         const val SHOW_SCROLLER_INDICATOR = "showScrollerIndicator"
+         const val PAGING_ENABLED = "pagingEnabled"
+@@ -846,4 +855,4 @@ data class SetContentOffsetAnimation(private val durationMs: Int, val damping: F
+             return SetContentOffsetAnimation(durationMs, damping, velocity);
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/docs/Compose/list-and-scroll.md b/docs/Compose/list-and-scroll.md
+index 651621c7974de9ef59f7c7e12aa21ff047690c4b..938473c5cdfea05203677557985f329511170a60 100644
+--- a/docs/Compose/list-and-scroll.md
++++ b/docs/Compose/list-and-scroll.md
+@@ -39,6 +39,24 @@ fun NoBounceList(data: List<String>) {
+ }
+ ```
+ 
++### iOS 交互式键盘收起：`Modifier.keyboardDismissModeInteractiveIOS`
++
++在 iOS 上将底层 `UIScrollView.keyboardDismissMode` 设为 `interactive`，使用户拖动列表时键盘跟随手势逐步退出。其他平台忽略此渲染提示并保持原有行为。
++
++```kotlin
++LazyColumn(
++    modifier = Modifier
++        .fillMaxSize()
++        .keyboardDismissModeInteractiveIOS(),
++) {
++    items(messages) { message ->
++        Text(message)
++    }
++}
++```
++
++传入 `false` 会把 iOS scroller 恢复为 `UIScrollViewKeyboardDismissModeNone`。
++
+ ### 嵌套滚动策略：`Modifier.nestedScroll`
+ 
+ - 扩展函数：`Modifier.nestedScroll(scrollUp: NestedScrollMode, scrollDown: NestedScrollMode)`  

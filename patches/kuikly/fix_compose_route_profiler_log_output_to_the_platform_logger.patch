@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:08:37 +0000
+Subject: fix(compose): route profiler log output to the platform logger
+
+LogOutputStrategy logged through KLog, which depends on a live Pager and
+could throw when the profiler flushed after the page was gone. Route the
+per-frame and report lines to a small expect/actual platform logger
+(android.util.Log on Android, println on JS and native) instead.
+
+Fork-Patch: compose-profiler-log-output
+Origin: b79a43f2 34efdcbf
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.android.kt b/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.android.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecd1c10defe978379750deb36f46e8c5dac111b0
+--- /dev/null
++++ b/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.android.kt
+@@ -0,0 +1,26 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.profiler.output
++
++import android.util.Log
++
++internal actual fun profilerLogDebug(tag: String, message: String) {
++    Log.d(tag, message)
++}
++
++internal actual fun profilerLogInfo(tag: String, message: String) {
++    Log.i(tag, message)
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/output/LogOutputStrategy.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/output/LogOutputStrategy.kt
+index 356e0090ccd03d36965527d71f553287eeccf14c..882c2d3342a3fb574f2f4313a53e6fb1cf014297 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/output/LogOutputStrategy.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/profiler/output/LogOutputStrategy.kt
+@@ -21,7 +21,6 @@ import com.tencent.kuikly.compose.profiler.RecompositionFrameEndEvent
+ import com.tencent.kuikly.compose.profiler.RecompositionFrameStartEvent
+ import com.tencent.kuikly.compose.profiler.RecompositionOutputStrategy
+ import com.tencent.kuikly.compose.profiler.RecompositionReport
+-import com.tencent.kuikly.core.log.KLog
+ 
+ /**
+  * 日志输出策略。
+@@ -55,12 +54,12 @@ class LogOutputStrategy(
+         for (event in events) {
+             when (event) {
+                 is RecompositionFrameStartEvent -> {
+-                    KLog.d(TAG, "Frame #${event.frameId} START (ts=${event.timestampMs}ms)")
++                    logDebug("Frame #${event.frameId} START (ts=${event.timestampMs}ms)")
+                     indent++
+                 }
+                 is RecompositionFrameEndEvent -> {
+                     indent = (indent - 1).coerceAtLeast(0)
+-                    KLog.d(TAG, "Frame #${event.frameId} END (duration=${event.durationMs}ms, recomposed=${event.recomposedCount})")
++                    logDebug("Frame #${event.frameId} END (duration=${event.durationMs}ms, recomposed=${event.recomposedCount})")
+                 }
+                 is ComposableRecomposedEvent -> {
+                     if (event.composableName == "<anonymous>") continue
+@@ -72,7 +71,7 @@ class LogOutputStrategy(
+                         " triggers=[${event.triggerStates.joinToString(", ")}]"
+                     } else ""
+                     val indent2 = indentStr(indent)
+-                    KLog.d(TAG, "${indent2}RECOMPOSED: ${event.composableName}$locationInfo (${event.durationMs}ms)$scopeInfo$parentInfo$paramInfo$statesInfo")
++                    logDebug("${indent2}RECOMPOSED: ${event.composableName}$locationInfo (${event.durationMs}ms)$scopeInfo$parentInfo$paramInfo$statesInfo")
+                 }
+                 else -> { /* TouchContextEvent / ScrollContextEvent — not logged per-frame */ }
+             }
+@@ -80,20 +79,20 @@ class LogOutputStrategy(
+     }
+ 
+     override fun onReportReady(report: RecompositionReport) {
+-        KLog.i(TAG, "=== Recomposition Report ===")
+-        KLog.i(TAG, "Session: ${report.sessionId}")
+-        KLog.i(TAG, "Duration: ${report.durationMs}ms | Frames: ${report.totalFrames} | Recompositions: ${report.totalRecompositions}")
++        logInfo("=== Recomposition Report ===")
++        logInfo("Session: ${report.sessionId}")
++        logInfo("Duration: ${report.durationMs}ms | Frames: ${report.totalFrames} | Recompositions: ${report.totalRecompositions}")
+ 
+         if (report.hotspots.isNotEmpty()) {
+-            KLog.i(TAG, "--- HOTSPOTS ---")
++            logInfo("--- HOTSPOTS ---")
+             for (hotspot in report.hotspots) {
+                 val loc = if (hotspot.sourceLocation != null) " @${hotspot.sourceLocation}" else ""
+-                KLog.i(TAG, "  ${hotspot.name}$loc: ${hotspot.recompositionCount}x (avg=${formatFloat(hotspot.avgDurationMs)}ms, max=${hotspot.maxDurationMs}ms)")
++                logInfo("  ${hotspot.name}$loc: ${hotspot.recompositionCount}x (avg=${formatFloat(hotspot.avgDurationMs)}ms, max=${hotspot.maxDurationMs}ms)")
+             }
+         }
+ 
+         if (report.composables.isNotEmpty()) {
+-            KLog.i(TAG, "--- Composables ---")
++            logInfo("--- Composables ---")
+             for (stats in report.composables) {
+                 val marker = if (stats.isHotspot) " [HOTSPOT]" else ""
+                 val paramInfo = if (stats.paramChangeFrequency.isNotEmpty()) {
+@@ -110,7 +109,7 @@ class LogOutputStrategy(
+                     " no state change"
+                 }
+                 val loc = if (stats.sourceLocation != null) " @${stats.sourceLocation}" else ""
+-                KLog.i(TAG, "  ${stats.name}$loc: ${stats.recompositionCount}x (avg=${formatFloat(stats.avgDurationMs)}ms)$marker$paramInfo$stateInfo")
++                logInfo("  ${stats.name}$loc: ${stats.recompositionCount}x (avg=${formatFloat(stats.avgDurationMs)}ms)$marker$paramInfo$stateInfo")
+                 // Scope 分布行
+                 if (stats.scopeDistribution.isNotEmpty() || stats.noScopeRecompositions > 0) {
+                     val scopeInfo = if (stats.scopeDistribution.isNotEmpty()) {
+@@ -121,12 +120,20 @@ class LogOutputStrategy(
+                     } else {
+                         "{}"
+                     }
+-                    KLog.i(TAG, "    → scopes: $scopeInfo, no-scope: ${stats.noScopeRecompositions}")
++                    logInfo("    → scopes: $scopeInfo, no-scope: ${stats.noScopeRecompositions}")
+                 }
+             }
+         }
+     }
+ 
++    private fun logDebug(message: String) {
++        profilerLogDebug(TAG, message)
++    }
++
++    private fun logInfo(message: String) {
++        profilerLogInfo(TAG, message)
++    }
++
+     private fun indentStr(level: Int): String = "  ".repeat(level)
+ 
+     private fun buildParamChangeString(event: ComposableRecomposedEvent): String {
+@@ -144,3 +151,7 @@ class LogOutputStrategy(
+         return "$intPart.$fracPart"
+     }
+ }
++
++internal expect fun profilerLogDebug(tag: String, message: String)
++
++internal expect fun profilerLogInfo(tag: String, message: String)
+diff --git a/compose/src/jsMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.js.kt b/compose/src/jsMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.js.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b296889d640c508c06bb276fc6398e7c035d803c
+--- /dev/null
++++ b/compose/src/jsMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.js.kt
+@@ -0,0 +1,24 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.profiler.output
++
++internal actual fun profilerLogDebug(tag: String, message: String) {
++    println("[$tag] $message")
++}
++
++internal actual fun profilerLogInfo(tag: String, message: String) {
++    println("[$tag] $message")
++}
+diff --git a/compose/src/nativeMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.native.kt b/compose/src/nativeMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.native.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b296889d640c508c06bb276fc6398e7c035d803c
+--- /dev/null
++++ b/compose/src/nativeMain/kotlin/com/tencent/kuikly/compose/profiler/output/ProfilerPlatformLog.native.kt
+@@ -0,0 +1,24 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.profiler.output
++
++internal actual fun profilerLogDebug(tag: String, message: String) {
++    println("[$tag] $message")
++}
++
++internal actual fun profilerLogInfo(tag: String, message: String) {
++    println("[$tag] $message")
++}

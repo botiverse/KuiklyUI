@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:15:35 +0000
+Subject: fix(ios): dispatch accessibility focus/announce calls on RichText
+
+KRRichTextView derives from KRLabel, not KRView, so the async
+accessibilityFocus/accessibilityAnnounce view methods that Compose semantics
+send to a text node were silently dropped. Handle both in the RichText
+callback dispatcher the same way KRView does.
+
+Fork-Patch: ios-richtext-accessibility-dispatch
+Origin: a3881bb2
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
+index 59889066ea456136f035bc15876301ee9a24a5aa..73badfe233952b6abeefd11de62d3a1d4946f502 100644
+--- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
++++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
+@@ -25,6 +25,9 @@ NSString *const kGradientInfoKeyCSSGradient = @"cssGradient";
+ NSString *const kGradientInfoKeyFont = @"font";
+ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+ 
++static NSString *const KRRichTextAccessibilityFocusMethod = @"accessibilityFocus";
++static NSString *const KRRichTextAccessibilityAnnounceMethod = @"accessibilityAnnounce";
++
+ @interface KRInlineBoxAttachment : NSTextAttachment <KRTextAttachmentStringProtocol>
+ 
+ @property (nonatomic, copy) NSString *originalText;
+@@ -193,6 +196,16 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+     KUIKLY_SET_CSS_COMMON_PROP;
+ }
+ 
++- (void)hrv_callWithMethod:(NSString *)method
++                    params:(NSString *)params
++                  callback:(KuiklyRenderCallback)callback {
++    if ([method isEqualToString:KRRichTextAccessibilityFocusMethod]) {
++        UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, self);
++    } else if ([method isEqualToString:KRRichTextAccessibilityAnnounceMethod] && params.length > 0) {
++        UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, params);
++    }
++}
++
+ - (void)hrv_prepareForeReuse {
+     KUIKLY_RESET_CSS_COMMON_PROP;
+     self.attributedText = nil;

@@ -1,0 +1,334 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:05:38 +0000
+Subject: feat(compose): add explicit native dispatch capture on Android
+
+Add Modifier.nativeDispatchCapture() and a PointerInputModifierNode
+captureNativeDispatch() hook. When a touch-down hits such a node, the
+Compose root sets the nativeDispatchCapture prop and the Android KRView
+keeps the whole gesture from reaching native child views underneath
+(overlays, barriers). Ordinary pointer modifiers are unaffected.
+
+Fork-Patch: compose-android-native-dispatch-capture
+Origin: 95275204
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/container/SuperTouchManager.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/container/SuperTouchManager.kt
+index 2a6dd1577afb3a38a2eea56913fad7af0d8653a8..49860181d8387ab80c99ea6c966aa2f9410c7217 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/container/SuperTouchManager.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/container/SuperTouchManager.kt
+@@ -69,6 +69,10 @@ class SuperTouchManager {
+                 getView()?.getViewAttr()?.forceUpdate = true
+                 getView()?.getViewAttr()?.consumeTouchDown(true)
+             }
++            if (result.nativeDispatchCaptured) {
++                getView()?.getViewAttr()?.forceUpdate = true
++                getView()?.getViewAttr()?.nativeDispatchCapture(true)
++            }
+         }
+     }
+ 
+@@ -76,6 +80,7 @@ class SuperTouchManager {
+         touchUp(isSync) {
+             touchesDelegate.onTouchesEvent(it.touches, PointerEventType.Release, it.timestamp, it.consumed)
+             TouchActivityTracker.onTouchEnd(container.getPager().pageData, touchActivityOwner)
++            getView()?.getViewAttr()?.nativeDispatchCapture(false)
+             if (container.getViewAttr().getProp(StyleConst.PREVENT_TOUCH) == true) {
+                 container.getViewAttr().preventTouch(false)
+                 if (useSyncMove) {
+@@ -103,6 +108,7 @@ class SuperTouchManager {
+         touchCancel(isSync) {
+             touchesDelegate.onTouchesEvent(it.touches, PointerEventType.Release, it.timestamp, true)
+             TouchActivityTracker.onTouchEnd(container.getPager().pageData, touchActivityOwner)
++            getView()?.getViewAttr()?.nativeDispatchCapture(false)
+             if (container.getViewAttr().getProp(StyleConst.PREVENT_TOUCH) == true) {
+                 container.getViewAttr().preventTouch(false)
+                 if (useSyncMove) {
+@@ -195,4 +201,4 @@ class SuperTouchManager {
+         }
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt
+index 837da25455197d3fea75e1824688fcbe05dbc414..dc52fbeaab6127544c6537e2c46f3a4af8a75345 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/HitPathTracker.kt
+@@ -99,7 +99,7 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
+     fun dispatchChanges(
+         internalPointerEvent: InternalPointerEvent,
+         isInBounds: Boolean = true
+-    ): Boolean {
++    ): HitPathDispatchResult {
+         val changed = root.buildCache(
+             internalPointerEvent.changes,
+             rootCoordinates,
+@@ -108,8 +108,9 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
+         )
+         if (!changed) {
+             root.cleanUpHover()
+-            return false
++            return HitPathDispatchResult(dispatched = false, nativeDispatchCaptured = false)
+         }
++        val nativeDispatchCaptured = root.capturesNativeDispatch()
+         var dispatchHit = root.dispatchMainEventPass(
+             internalPointerEvent.changes,
+             rootCoordinates,
+@@ -118,7 +119,10 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
+         )
+         dispatchHit = root.dispatchFinalEventPass(internalPointerEvent) || dispatchHit
+ 
+-        return dispatchHit
++        return HitPathDispatchResult(
++            dispatched = dispatchHit,
++            nativeDispatchCaptured = nativeDispatchCaptured
++        )
+     }
+ 
+     /**
+@@ -143,6 +147,11 @@ internal class HitPathTracker(private val rootCoordinates: LayoutCoordinates) {
+     }
+ }
+ 
++internal data class HitPathDispatchResult(
++    val dispatched: Boolean,
++    val nativeDispatchCaptured: Boolean
++)
++
+ /**
+  * Represents a parent node in the [HitPathTracker]'s tree.  This primarily exists because the tree
+  * necessarily has a root that is very similar to all other nodes, except that it does not track any
+@@ -217,6 +226,9 @@ internal open class NodeParent {
+         return dispatched
+     }
+ 
++    open fun capturesNativeDispatch(): Boolean =
++        children.any { it.capturesNativeDispatch() }
++
+     /**
+      * Dispatches the cancel event to all child [Node]s.
+      */
+@@ -361,6 +373,17 @@ internal class Node(val modifierNode: Modifier.Node) : NodeParent() {
+         return result
+     }
+ 
++    override fun capturesNativeDispatch(): Boolean {
++        if (relevantChanges.isEmpty() || !modifierNode.isAttached) {
++            return super.capturesNativeDispatch()
++        }
++        var captures = false
++        modifierNode.dispatchForKind(Nodes.PointerInput) {
++            captures = captures || it.captureNativeDispatch()
++        }
++        return captures || super.capturesNativeDispatch()
++    }
++
+     /**
+      * Calculates cached properties that will be stored in this [Node] for the duration of both
+      * [dispatchMainEventPass] and [dispatchFinalEventPass]. This allows us to avoid repeated
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchCapture.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchCapture.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb2edfe44c186175ef4885d2867afb7891903bc7
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/NativeDispatchCapture.kt
+@@ -0,0 +1,51 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 THL A29 Limited, a Tencent company. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.input.pointer
++
++import com.tencent.kuikly.compose.ui.Modifier
++import com.tencent.kuikly.compose.ui.node.ModifierNodeElement
++import com.tencent.kuikly.compose.ui.node.PointerInputModifierNode
++import com.tencent.kuikly.compose.ui.unit.IntSize
++
++/**
++ * Marks this pointer region as an explicit native-dispatch capture boundary.
++ *
++ * Use this only for overlay/barrier surfaces that must prevent Android native
++ * child views underneath the Compose root from receiving the same MotionEvent.
++ */
++fun Modifier.nativeDispatchCapture(): Modifier = this.then(NativeDispatchCaptureElement)
++
++private object NativeDispatchCaptureElement : ModifierNodeElement<NativeDispatchCaptureNode>() {
++    override fun create(): NativeDispatchCaptureNode = NativeDispatchCaptureNode()
++
++    override fun update(node: NativeDispatchCaptureNode) = Unit
++
++    override fun hashCode(): Int = NativeDispatchCaptureElement::class.hashCode()
++
++    override fun equals(other: Any?): Boolean = other === this
++}
++
++private class NativeDispatchCaptureNode : Modifier.Node(), PointerInputModifierNode {
++    override fun captureNativeDispatch(): Boolean = true
++
++    override fun onPointerEvent(
++        pointerEvent: PointerEvent,
++        pass: PointerEventPass,
++        bounds: IntSize
++    ) = Unit
++
++    override fun onCancelPointerInput() = Unit
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/PointerInputEventProcessor.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/PointerInputEventProcessor.kt
+index abbf3bea730cad2c4753cffd29ef204c09034b95..54911ad4ffa0be3ad560f03ee98ce8f0136b0406 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/PointerInputEventProcessor.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/input/pointer/PointerInputEventProcessor.kt
+@@ -133,7 +133,7 @@ internal class PointerInputEventProcessor(val root: LayoutNode) {
+             }
+ 
+             // Dispatch to PointerInputFilters
+-            val dispatchedToSomething =
++            val dispatchResult =
+                 hitPathTracker.dispatchChanges(internalPointerEvent, isInBounds)
+ 
+             val anyMovementConsumed = if (internalPointerEvent.suppressMovementConsumption) {
+@@ -149,11 +149,13 @@ internal class PointerInputEventProcessor(val root: LayoutNode) {
+                 }
+                 result
+             }
+-            val processResult = ProcessResult(dispatchedToSomething,
+-                anyMovementConsumed
++            val processResult = ProcessResult(
++                dispatchedToAPointerInputModifier = dispatchResult.dispatched,
++                anyMovementConsumed = anyMovementConsumed,
++                nativeDispatchCaptured = dispatchResult.nativeDispatchCaptured
+             )
+ 
+-            if (pointerEvent.eventType == PointerEventType.Press && !dispatchedToSomething) {
++            if (pointerEvent.eventType == PointerEventType.Press && !dispatchResult.dispatched) {
+                 pointerInputChangeEventProducer.clear()
+             }
+ 
+@@ -273,6 +275,9 @@ value class ProcessResult(private val value: Int) {
+ 
+     val anyMovementConsumed
+         get() = (value and (1 shl 1)) != 0
++
++    val nativeDispatchCaptured
++        get() = (value and (1 shl 2)) != 0
+ }
+ 
+ /**
+@@ -284,9 +289,11 @@ value class ProcessResult(private val value: Int) {
+  */
+ internal fun ProcessResult(
+     dispatchedToAPointerInputModifier: Boolean,
+-    anyMovementConsumed: Boolean
++    anyMovementConsumed: Boolean,
++    nativeDispatchCaptured: Boolean = false
+ ): ProcessResult {
+     val val1 = if (dispatchedToAPointerInputModifier) 1 else 0
+     val val2 = if (anyMovementConsumed) (1 shl 1) else 0
+-    return ProcessResult(val1 or val2)
++    val val3 = if (nativeDispatchCaptured) (1 shl 2) else 0
++    return ProcessResult(val1 or val2 or val3)
+ }
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt
+index 62bed738371de8daa51c33f3d58c0846ed6a1516..8641a2f106aae82ed054bd1a7b20f9a338650e6f 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/PointerInputModifierNode.kt
+@@ -83,6 +83,16 @@ interface PointerInputModifierNode : DelegatableNode {
+      */
+     fun sharePointerInputWithSiblings(): Boolean = false
+ 
++    /**
++     * Return true when this node intentionally wants the host render root to
++     * capture native child dispatch for the current touch gesture.
++     *
++     * This is narrower than "a pointer input node was hit": ordinary click,
++     * scroll, and text-input modifiers must keep returning false so platform
++     * native children still receive their expected MotionEvents.
++     */
++    fun captureNativeDispatch(): Boolean = false
++
+     /**
+      * Invoked when the density (pixels per inch for the screen) changes. This can impact the
+      * location of pointer input events (x and y) and can affect things like touch slop detection.
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRView.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRView.kt
+index ce1dd81e34475489cbbfdbf590f70c47133eff52..d84e92726214ef71c8d35aff491844d09628a763 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRView.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRView.kt
+@@ -103,6 +103,8 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
+ 
+     private var superTouch: Boolean = false
+     private var superTouchCanceled: Boolean = false
++    private var nativeDispatchCaptureRequested: Boolean = false
++    private var nativeDispatchCapturedGesture: Boolean = false
+ 
+     private fun syncComposeRootTag() {
+         krRootView()?.setTag(COMPOSE_ROOT_TAG_ID, superTouch)
+@@ -119,6 +121,10 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
+                 syncComposeRootTag()
+                 true
+             }
++            NATIVE_DISPATCH_CAPTURE -> {
++                nativeDispatchCaptureRequested = propValue as Boolean
++                true
++            }
+             EVENT_TOUCH_DOWN -> {
+                 touchDownCallback = propValue as KuiklyRenderCallback
+                 true
+@@ -260,6 +266,16 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
+ 
+         // 以下是SuperTouch模式，意味着该View对应Compose的根节点，用于分发Touch事件给Compose
+         tryFireTouchEvent(event)
++        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
++            nativeDispatchCapturedGesture = nativeDispatchCaptureRequested
++            nativeDispatchCaptureRequested = false
++        }
++        if (nativeDispatchCapturedGesture) {
++            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
++                nativeDispatchCapturedGesture = false
++            }
++            return true
++        }
+         var handle = super.dispatchTouchEvent(event)
+         if (handle) {
+             // 子节点已经接接收了，后面的MOVE UP事件都能收到，不用兜底
+@@ -524,6 +540,7 @@ open class KRView(context: Context) : FrameLayout(context), IKuiklyRenderViewExp
+ 
+         private const val EVENT_ACTION = "action"
+         private const val SUPER_TOUCH = "superTouch"
++        private const val NATIVE_DISPATCH_CAPTURE = "nativeDispatchCapture"
+         private const val EVENT_TOUCH_DOWN = "touchDown"
+         private const val EVENT_TOUCH_MOVE = "touchMove"
+         private const val EVENT_TOUCH_UP = "touchUp"
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/Attr.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/Attr.kt
+index 30cb4cd631b3c53a325b9d4484fcdf89085fbead..0ea2ebd0207e1d59d1c96c2aab229e61a95720fb 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/Attr.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/base/Attr.kt
+@@ -676,6 +676,10 @@ open class Attr : Props(), IStyleAttr, ILayoutAttr {
+         StyleConst.CONSUME_DOWN with enable
+     }
+ 
++    fun nativeDispatchCapture(enable: Boolean) {
++        StyleConst.NATIVE_DISPATCH_CAPTURE with enable
++    }
++
+     fun superTouch(enable: Boolean) {
+         StyleConst.SUPER_TOUCH with enable
+     }
+@@ -716,6 +720,7 @@ open class Attr : Props(), IStyleAttr, ILayoutAttr {
+         const val DEBUG_NAME = "debugName"
+         const val PREVENT_TOUCH = "preventTouch"
+         const val CONSUME_DOWN = "consumeDown"
++        const val NATIVE_DISPATCH_CAPTURE = "nativeDispatchCapture"
+         const val SUPER_TOUCH = "superTouch"
+         
+         // glass effect

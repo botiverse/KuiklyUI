@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:10:15 +0000
+Subject: fix(a11y): map hidden role on OHOS and iOS
+
+The hidden role only hid subtrees on Android. OHOS now maps "hidden" to
+ARKUI_ACCESSIBILITY_MODE_DISABLED_FOR_DESCENDANTS and iOS sets
+accessibilityElementsHidden (and keeps the view out even when clickable).
+Since upstream #1626, OHOS maps "none" to MODE_DISABLED, so Compose nodes
+with no role and no text now send an empty role on OHOS, which resets them
+to the renderer default instead of disabling them. Explicit NONE is unchanged.
+
+Fork-Patch: a11y-hidden-role-ohos-ios
+Origin: none (new for staging4, follows 191d1b93)
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt
+index ed095d1f41a5ad70d2d7f767f781ebcc86f387f9..f9569b6eab116af087adff790faabe969ff47e11 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/KuiklySemantisHandler.kt
+@@ -25,6 +25,7 @@ import com.tencent.kuikly.compose.ui.semantics.SemanticsOwner
+ import com.tencent.kuikly.compose.ui.semantics.SemanticsProperties
+ import com.tencent.kuikly.compose.ui.semantics.getAllSemanticsNodes
+ import com.tencent.kuikly.compose.ui.semantics.getOrNull
++import com.tencent.kuikly.core.base.Attr
+ import com.tencent.kuikly.core.base.attr.AccessibilityRole
+ 
+ /**
+@@ -35,7 +36,14 @@ import com.tencent.kuikly.core.base.attr.AccessibilityRole
+  * 2. 感知 stateDescription 的新增、变化和消失，并提供回调接口供业务自定义处理。
+  * 3. 内部维护节点 stateDescription 和原生语义状态，支持节点卸载与主动清理，防止内存泄漏。
+  */
+-class KuiklySemantisHandler {
++class KuiklySemantisHandler(
++    /**
++     * When true, a node that resolves to [AccessibilityRole.NONE] (no role and no text) gets the
++     * renderer's default role instead of an explicit "none". OHOS maps "none" to
++     * ARKUI_ACCESSIBILITY_MODE_DISABLED, which must not be applied to every role-less layout node.
++     */
++    private val rolelessNodesUseRendererDefault: () -> Boolean = { false }
++) {
+ 
+     private val lastStateDescriptionMap = mutableMapOf<Int, String?>()
+     private val nativeSemanticsNodes = NativeSemanticsNodeRegistry<KNode<*>>()
+@@ -63,7 +71,8 @@ class KuiklySemantisHandler {
+                 currentNativeNodes[nodeId] = this
+                 val accessibility = buildAccessibilityText(node.config)
+                 view.getViewAttr().accessibility(accessibility)
+-                view.getViewAttr().accessibilityRole(
++                applyNativeAccessibilityRole(
++                    this,
+                     resolveNativeAccessibilityRole(isInvisibleToUser, accessibility.isNotEmpty(), role)
+                 )
+                 view.getViewAttr().accessibilityInfo(isClickable, isLongClickable)
+@@ -191,9 +200,16 @@ class KuiklySemantisHandler {
+     private fun clearNativeSemantics(node: KNode<*>) {
+         node.view.getViewAttr().apply {
+             accessibility("")
+-            accessibilityRole(AccessibilityRole.NONE)
+             accessibilityInfo(false, false)
+         }
++        applyNativeAccessibilityRole(node, AccessibilityRole.NONE)
++    }
++
++    private fun applyNativeAccessibilityRole(node: KNode<*>, role: AccessibilityRole) {
++        node.view.getViewAttr().setProp(
++            Attr.StyleConst.ACCESSIBILITY_ROLE,
++            nativeAccessibilityRoleValue(role, rolelessNodesUseRendererDefault())
++        )
+     }
+ 
+     private fun hideNativeSemantics(node: KNode<*>) {
+@@ -225,6 +241,19 @@ internal fun resolveNativeAccessibilityRole(
+     else -> AccessibilityRole.TEXT
+ }
+ 
++/**
++ * Wire value for the native accessibilityRole prop. An empty value is not a known role on any
++ * renderer, so it resets the node to the renderer default (OHOS: role/mode/group reset).
++ */
++internal fun nativeAccessibilityRoleValue(
++    role: AccessibilityRole,
++    rolelessNodesUseRendererDefault: Boolean
++): String = if (role == AccessibilityRole.NONE && rolelessNodesUseRendererDefault) {
++    ""
++} else {
++    role.roleName
++}
++
+ internal class NativeSemanticsNodeRegistry<T : Any> {
+     private val nodes = mutableMapOf<Int, T>()
+ 
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/RootNodeOwner.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/RootNodeOwner.kt
+index dd3c44d17b1fd166932a4405769e610c307e4219..f9d9abe1c675acef0ea54f471d087870dc5f22b3 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/RootNodeOwner.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/RootNodeOwner.kt
+@@ -121,7 +121,9 @@ internal class RootNodeOwner(
+ //        }
+     val owner: Owner = OwnerImpl(layoutDirection, coroutineContext, rootKView, density)
+     val semanticsOwner = SemanticsOwner(owner.root)
+-    private val semanticsKuiklyHandler = KuiklySemantisHandler()
++    private val semanticsKuiklyHandler = KuiklySemantisHandler(
++        rolelessNodesUseRendererDefault = { rootKView.getPager().pageData.isOhOs }
++    )
+ 
+     val isSemanticsRunnnng: Boolean
+         get() = rootKView.getPager().isAccessibilityRunning() ||
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt
+index 0d66b5cd272e819317a5e6ae6afe0e3c26419274..f0e82d57f0ea4f724b9a46982955e2f38a77f566 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/extension/NativeSemanticsNodeRegistryTest.kt
+@@ -56,6 +56,14 @@ class NativeSemanticsNodeRegistryTest {
+         )
+     }
+ 
++    @Test
++    fun rolelessNodeUsesRendererDefaultWhenRequested() {
++        assertEquals("", nativeAccessibilityRoleValue(AccessibilityRole.NONE, rolelessNodesUseRendererDefault = true))
++        assertEquals("none", nativeAccessibilityRoleValue(AccessibilityRole.NONE, rolelessNodesUseRendererDefault = false))
++        assertEquals("hidden", nativeAccessibilityRoleValue(AccessibilityRole.HIDDEN, rolelessNodesUseRendererDefault = true))
++        assertEquals("button", nativeAccessibilityRoleValue(AccessibilityRole.BUTTON, rolelessNodesUseRendererDefault = true))
++    }
++
+     @Test
+     fun visibleButtonKeepsItsNativeRole() {
+         assertEquals(
+diff --git a/core-render-ios/Extension/Category/UIView+CSS.m b/core-render-ios/Extension/Category/UIView+CSS.m
+index 816916aa60b21556b948c12e0a8c5bedfbdb5325..0fe44d3c1be5ad52f3dc4e655b5e23c3d725c9d9 100644
+--- a/core-render-ios/Extension/Category/UIView+CSS.m
++++ b/core-render-ios/Extension/Category/UIView+CSS.m
+@@ -28,6 +28,11 @@
+ /// Default iOS keyboard animation curve value from UIKeyboardAnimationCurveUserInfoKey
+ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
+ 
++/// accessibilityRole "hidden" removes the view and its whole subtree from the accessibility tree.
++static BOOL KRIsHiddenAccessibilityRole(id role) {
++    return [role isKindOfClass:[NSString class]] && [(NSString *)role isEqualToString:@"hidden"];
++}
++
+ @interface CSSBorder : NSObject
+ 
+ @property (nonatomic, assign) KRBorderStyle borderStyle;
+@@ -478,6 +483,9 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
+         if (self.css_debugName.length > 0 && self.subviews.count > 0) {
+             self.isAccessibilityElement = NO;
+         }
++        if (KRIsHiddenAccessibilityRole(self.css_accessibilityRole)) {
++            self.isAccessibilityElement = NO;
++        }
+     }
+ }
+ 
+@@ -494,6 +502,13 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
+         if (self.css_debugName.length > 0 && self.subviews.count > 0) {
+             self.isAccessibilityElement = NO;
+         }
++        BOOL hidden = KRIsHiddenAccessibilityRole(css_accessibilityRole);
++        if (hidden) {
++            self.isAccessibilityElement = NO;
++        }
++#if !TARGET_OS_OSX
++        self.accessibilityElementsHidden = hidden;
++#endif
+     }
+ }
+ 
+@@ -1275,7 +1290,10 @@ static const NSInteger KRDefaultKeyboardAnimationCurve = 7;
+                 }
+ 
+                 // 如果有点击功能，确保组件是可访问的
+-                if (isClickable || isLongClickable) {
++                if (KRIsHiddenAccessibilityRole(self.css_accessibilityRole)) {
++                    // A hidden subtree must stay out of the accessibility tree even if clickable.
++                    self.isAccessibilityElement = NO;
++                } else if (isClickable || isLongClickable) {
+                     self.accessibilityTraits = traits;
+                     if (![self kr_isAccessibilityContainer]) {
+                         self.isAccessibilityElement = YES;
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp
+index bcc64889fe7c69414f803af21e01325af7b26cfb..68b46ac0bd3899ec2413a1f3290c974d8f209325 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp
+@@ -523,6 +523,16 @@ void UpdateNodeAccessibilityRole(ArkUI_NodeHandle node, const std::string &roleS
+         nodeAPI->resetAttribute(node, NODE_ACCESSIBILITY_GROUP);
+         return;
+     }
++    // HIDDEN: remove this node and its whole subtree from the accessibility tree, matching Android
++    // IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS and iOS accessibilityElementsHidden.
++    if (roleStr == "hidden") {
++        ArkUI_NumberValue val[] = {{.i32 = ARKUI_ACCESSIBILITY_MODE_DISABLED_FOR_DESCENDANTS}};
++        ArkUI_AttributeItem item = {val, 1};
++        nodeAPI->setAttribute(node, NODE_ACCESSIBILITY_MODE, &item);
++        nodeAPI->resetAttribute(node, NODE_ACCESSIBILITY_ROLE);
++        nodeAPI->resetAttribute(node, NODE_ACCESSIBILITY_GROUP);
++        return;
++    }
+     // 常规角色映射：NODE_ACCESSIBILITY_ROLE 的 value 类型是 ArkUI_NodeType。
+     // SEARCH → TEXT_INPUT 是降级映射（ArkUI_NodeType 无 SEARCH 值），与 Android EditText 语义对齐。
+     uint32_t nodeType = 0;
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h
+index c8b70af42e36041b267b0bd51056624b8b499965..aac1ce58f46efbbc5a4c0e87e99fd562dd6750f2 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h
+@@ -146,6 +146,8 @@ void UpdateNodeAccessibility(ArkUI_NodeHandle node, const std::string &accessibi
+  *   checkbox → NODE_ACCESSIBILITY_ROLE = ARKUI_NODE_CHECKBOX
+  *   search   → NODE_ACCESSIBILITY_ROLE = ARKUI_NODE_TEXT_INPUT（降级，与 Android EditText 语义对齐）
+  *   none     → NODE_ACCESSIBILITY_MODE = ARKUI_ACCESSIBILITY_MODE_DISABLED（不设 role，改设 mode）
++ *   hidden   → NODE_ACCESSIBILITY_MODE = ARKUI_ACCESSIBILITY_MODE_DISABLED_FOR_DESCENDANTS
++ *              (hides the node and its whole subtree; no role is set)
+  *
+  * 注意：ArkUI_NodeType 枚举无 SEARCH/NONE 值，故 search 降级到 TEXT_INPUT，none 走 mode 通道。
+  * 对 ArkTS 侧创建的 node 调用 setAttribute 会返回 106103（ARKUI_ERROR_CODE_ARKTS_NODE_NOT_SUPPORTED），

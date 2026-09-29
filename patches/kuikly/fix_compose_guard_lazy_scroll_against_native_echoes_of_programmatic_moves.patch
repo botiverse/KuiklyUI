@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:16:18 +0000
+Subject: fix(compose): guard lazy scroll against native echoes of programmatic
+ moves
+
+The ignoreScrollOffset guard in SubcomposeLayout's scroll handler stayed
+armed until an exact match arrived and swallowed every event meanwhile.
+Make it one-shot and classify each native scroll callback: an exact echo
+is consumed, an off-target echo (native clamped or split the move) only
+updates composeOffset, and anything else is dispatched as a user scroll.
+
+Fork-Patch: compose-scroll-echo-guards
+Origin: 996a20fd, 2527b9ec
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+index 6d8c4d63f7b5283f6cc9a3ea538a21b145933fc4..8e4a2150ca5e093e184d07b23318e7a7be832f45 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+@@ -75,6 +75,55 @@ class KuiklyScrollInfo {
+      */
+     var ignoreScrollOffset: IntOffset? = null
+ 
++    internal fun consumeIgnoredScrollOffset(
++        offsetX: Float,
++        offsetY: Float,
++        epsilon: Double,
++    ): Boolean {
++        val ignoredOffset = ignoreScrollOffset ?: return false
++        val matched = kotlin.math.abs(ignoredOffset.x - offsetX) <= epsilon &&
++            kotlin.math.abs(ignoredOffset.y - offsetY) <= epsilon
++        ignoreScrollOffset = null
++        return matched
++    }
++
++    /**
++     * Disposition of a native scroll callback relative to a pending programmatic
++     * offset move ([ignoreScrollOffset]).
++     *
++     * A programmatic move ([applyOffsetDelta]) can land somewhere other than its
++     * recorded target: the native scroller clamps against its own (asynchronously
++     * updated) content size, or splits one move into several callbacks. Such an
++     * off-target callback is still an echo of our own move — never user input.
++     * Interpreting it as a user scroll dispatches a large phantom delta into
++     * compose; on a bottom-anchored list whose content size is still estimated
++     * this feeds the expand/align retry loop and serially composes every row up
++     * to the list start, blocking the Kotlin thread for seconds (task #318).
++     */
++    internal enum class NativeScrollEventDisposition {
++        /** Exact echo of the programmatic move: drop the event entirely. */
++        Consume,
++        /** Off-target echo of the programmatic move: adopt the reported offset
++         *  into bookkeeping, but never dispatch a compose scroll. */
++        SyncOnly,
++        /** Genuine scroll: dispatch to compose. */
++        Dispatch
++    }
++
++    internal fun resolveNativeScrollEvent(
++        offsetX: Float,
++        offsetY: Float,
++        epsilon: Double,
++    ): NativeScrollEventDisposition {
++        val hadPendingProgrammaticMove = ignoreScrollOffset != null
++        val matched = consumeIgnoredScrollOffset(offsetX, offsetY, epsilon)
++        return when {
++            matched -> NativeScrollEventDisposition.Consume
++            hadPendingProgrammaticMove && !isDragging -> NativeScrollEventDisposition.SyncOnly
++            else -> NativeScrollEventDisposition.Dispatch
++        }
++    }
++
+     /**
+      * Scroll view instance
+      */
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+index 677fa78108860b2dcf238738409a85a9147b0098..0b445581c6d9fa8f9e0f0185520f13bdc5fd8f45 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+@@ -346,20 +346,29 @@ fun SubcomposeLayout(
+                     return@scroll
+                 }
+ 
+-                val prevOffset = kuiklyInfo.contentOffset
+                 kuiklyInfo.contentOffset = offset
+                 (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
+                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
+ 
+-                if (kuiklyInfo.ignoreScrollOffset != null) {
+-                    val ignoreOffset = kuiklyInfo.ignoreScrollOffset!!
+-                    val epsilon = 0.5 * kuiklyInfo.getDensity()  // 使用 0.5dp 作为误差值
+-                    val matched = abs(ignoreOffset.x.minus(scaleParams.offsetX)) <= epsilon
+-                        && abs(ignoreOffset.y.minus(scaleParams.offsetY)) <= epsilon
+-                    if (matched) {
+-                        kuiklyInfo.ignoreScrollOffset = null
++                when (
++                    kuiklyInfo.resolveNativeScrollEvent(
++                        offsetX = scaleParams.offsetX,
++                        offsetY = scaleParams.offsetY,
++                        epsilon = 0.5 * kuiklyInfo.getDensity(),
++                    )
++                ) {
++                    KuiklyScrollInfo.NativeScrollEventDisposition.Consume -> return@scroll
++                    KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly -> {
++                        // Off-target echo of our own programmatic move (native
++                        // clamped or split it). Adopt the reported offset so
++                        // future deltas use the true base, but do not dispatch
++                        // a compose scroll: offsetDirty stays set, so a later
++                        // alignment pass converges once the render-side content
++                        // size has caught up (task #318 joint first-open stall).
++                        kuiklyInfo.composeOffset = offset.toFloat()
++                        return@scroll
+                     }
+-                    return@scroll
++                    KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch -> Unit
+                 }
+ 
+                 // 忽略较小的滑动
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ef7fc1e6bc68cc642ebb5864393d5cff92a445c
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
+@@ -0,0 +1,121 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.gestures
++
++import com.tencent.kuikly.compose.ui.unit.IntOffset
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertNull
++import kotlin.test.assertTrue
++
++class KuiklyScrollInfoTest {
++    @Test
++    fun mismatchedProgrammaticCallbackClearsGuardAndProceeds() {
++        val info = KuiklyScrollInfo().apply {
++            ignoreScrollOffset = IntOffset(x = 0, y = 120)
++        }
++
++        assertFalse(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 118f, epsilon = 0.5))
++        assertNull(info.ignoreScrollOffset)
++        assertFalse(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 220f, epsilon = 0.5))
++    }
++
++    @Test
++    fun matchingProgrammaticCallbackClearsGuardAndIsSkipped() {
++        val info = KuiklyScrollInfo().apply {
++            ignoreScrollOffset = IntOffset(x = 0, y = 120)
++        }
++
++        assertTrue(info.consumeIgnoredScrollOffset(offsetX = 0f, offsetY = 120f, epsilon = 0.5))
++        assertNull(info.ignoreScrollOffset)
++    }
++
++    // task #318: an off-target echo of a programmatic move (native clamped or
++    // split it) must never be dispatched to compose as a phantom user scroll —
++    // that phantom walked a bottom-anchored 50-row list to the top, serially
++    // composing every row and stalling the Kotlin thread for seconds.
++    @Test
++    fun exactProgrammaticEchoIsConsumed() {
++        val info = KuiklyScrollInfo().apply {
++            ignoreScrollOffset = IntOffset(x = 0, y = 120)
++        }
++
++        assertEquals(
++            KuiklyScrollInfo.NativeScrollEventDisposition.Consume,
++            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 120f, epsilon = 0.5)
++        )
++        assertNull(info.ignoreScrollOffset)
++    }
++
++    @Test
++    fun offTargetProgrammaticEchoSyncsWithoutDispatch() {
++        val info = KuiklyScrollInfo().apply {
++            ignoreScrollOffset = IntOffset(x = 0, y = 4200)
++            isDragging = false
++        }
++
++        // Native clamped the applied 4200 down to 118: still our own move's
++        // echo, so bookkeeping may sync but compose must not scroll.
++        assertEquals(
++            KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly,
++            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
++        )
++        assertNull(info.ignoreScrollOffset)
++    }
++
++    @Test
++    fun offTargetEchoWhileUserDragsStillDispatches() {
++        val info = KuiklyScrollInfo().apply {
++            ignoreScrollOffset = IntOffset(x = 0, y = 4200)
++            isDragging = true
++        }
++
++        // A finger on the screen owns the viewport: never swallow real input.
++        assertEquals(
++            KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch,
++            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
++        )
++    }
++
++    @Test
++    fun eventWithoutPendingProgrammaticMoveDispatches() {
++        val info = KuiklyScrollInfo().apply { isDragging = false }
++
++        assertEquals(
++            KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch,
++            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
++        )
++    }
++
++    @Test
++    fun programmaticEchoGuardIsSingleShot() {
++        val info = KuiklyScrollInfo().apply {
++            ignoreScrollOffset = IntOffset(x = 0, y = 4200)
++            isDragging = false
++        }
++
++        assertEquals(
++            KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly,
++            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 118f, epsilon = 0.5)
++        )
++        // The follow-up event has no pending move recorded: genuine scroll.
++        assertEquals(
++            KuiklyScrollInfo.NativeScrollEventDisposition.Dispatch,
++            info.resolveNativeScrollEvent(offsetX = 0f, offsetY = 130f, epsilon = 0.5)
++        )
++    }
++}

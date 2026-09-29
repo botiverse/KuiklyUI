@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:02:35 +0000
+Subject: build: add test-only dependencies for fork unit tests
+
+Adds kotlinx-coroutines-test and robolectric to compose tests, junit,
+robolectric and org.json to core-render-android JVM tests, and a nodejs
+jsTest target for core-render-web/base. Test scope only; published POMs
+are unchanged.
+
+Fork-Patch: 0001-build-test-deps
+Origin: 0e101b7a cff8112c 0989f41e 1888e637 08553ec9
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/build.2.1.21.gradle.kts b/compose/build.2.1.21.gradle.kts
+index b5cc21e1c4f55ca86f3b7aafe8917c0551f01f5d..43c42dbd66af54ec597f0ac6dfdceb60c1363981 100644
+--- a/compose/build.2.1.21.gradle.kts
++++ b/compose/build.2.1.21.gradle.kts
+@@ -81,6 +81,7 @@ kotlin {
+ 
+         commonTest.dependencies {
+             implementation(kotlin("test"))
++            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+         }
+ 
+         val runtimeLegacyTest by creating {
+@@ -88,6 +89,9 @@ kotlin {
+         }
+         val androidUnitTest by getting {
+             dependsOn(runtimeLegacyTest)
++            dependencies {
++                implementation("org.robolectric:robolectric:4.12.2")
++            }
+         }
+ 
+         // Normal 2.1.21 artifacts stay on Compose runtime 1.7.3 and disable prefetch.
+diff --git a/core-render-android/build.2.1.21.gradle.kts b/core-render-android/build.2.1.21.gradle.kts
+index 8d30f60c3e678a3e51c48e50301fc149b9f1edf0..d4fae16da5e39db31abe9be17960e868791fa139 100644
+--- a/core-render-android/build.2.1.21.gradle.kts
++++ b/core-render-android/build.2.1.21.gradle.kts
+@@ -79,4 +79,8 @@ dependencies {
+     compileOnly(project(":core"))
+     implementation("androidx.appcompat:appcompat:1.2.0")
+     implementation("androidx.dynamicanimation:dynamicanimation:1.0.0")
+-}
+\ No newline at end of file
++    testImplementation("junit:junit:4.13.2")
++    testImplementation("org.robolectric:robolectric:4.12.2")
++    // Real org.json for JVM unit tests (the android.jar stubs throw "not mocked").
++    testImplementation("org.json:json:20231013")
++}
+diff --git a/core-render-web/base/build.gradle.kts b/core-render-web/base/build.gradle.kts
+index d9b9509664c344ce3f2d75f7ebf0b0abf04af9bf..ef6c807e8e2f541ca6b5d7c4eb0c6b0a03d0e554 100644
+--- a/core-render-web/base/build.gradle.kts
++++ b/core-render-web/base/build.gradle.kts
+@@ -48,6 +48,8 @@ kotlin {
+                 output?.library = null // Don't export global objects, only export necessary entry functions
+             }
+         }
++        // Keep pure renderer contract tests independent of a locally installed browser.
++        nodejs()
+         // Output executable JS rather than library
+         binaries.executable()
+         // Generate type definitions
+@@ -61,5 +63,10 @@ kotlin {
+                 implementation(kotlin("stdlib-js"))
+             }
+         }
++        val jsTest by getting {
++            dependencies {
++                implementation(kotlin("test"))
++            }
++        }
+     }
+ }

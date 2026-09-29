@@ -1,0 +1,1880 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:24:13 +0000
+Subject: fix(compose): arbitrate native text focus through a generation
+ reducer
+
+Native focus/blur callbacks and Compose FocusOwner could fight (focus
+self-loops, stale blur clearing a newer editor, retained editors keeping
+first responder). KuiklySoftwareKeyboardController now drives an
+InputFocusTargetReducer: every native focus/blur command carries a request
+id (generation), native focus is only an intent until FocusOwner commits
+it, pending focus can be cancelled, detached editors are blurred, retained
+focus converges and the keyboard is reshown for an already focused editor.
+iOS/Android/OHOS renderers echo focusRequestId, support cancelPendingFocus
+and report whether the native focus request was accepted. iOS programmatic
+autofocus on textInputState is routed as a focusIntentOnly event instead of
+becomeFirstResponder. Native callbacks are bound with updatedNodeEvent so a
+retained/prewarmed node never keeps a stale enabled/readOnly policy.
+Replaces upstream #1593's `if (!hasFocus)` guard; its empty set(hasFocus)
+is kept.
+
+Fork-Patch: input-native-focus-arbitration
+Origin: 37cf7093, 8b546ce2, 462f411f, 79d5a050, bcacb669 (fork focusIntentOnly follow-ups), 824a0fd2 (CoreTextField part)
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt
+index ec741e21bbe1a80b4e91134064cb3be3d1483a9d..640d6b9951da281ed1825636c8b34b0767a4b9db 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/CoreTextField.kt
+@@ -18,6 +18,7 @@ package com.tencent.kuikly.compose.foundation.text
+ 
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.ComposeNode
++import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.currentComposer
+ import androidx.compose.runtime.currentCompositeKeyHash
+ import androidx.compose.runtime.getValue
+@@ -27,6 +28,7 @@ import androidx.compose.runtime.setValue
+ import com.tencent.kuikly.compose.KuiklyApplier
+ import com.tencent.kuikly.compose.extension.SetEventElement
+ import com.tencent.kuikly.compose.extension.SetPropElement
++import com.tencent.kuikly.compose.extension.updatedNodeEvent
+ import com.tencent.kuikly.compose.foundation.interaction.Interaction
+ import com.tencent.kuikly.compose.foundation.interaction.MutableInteractionSource
+ import com.tencent.kuikly.compose.foundation.layout.Box
+@@ -53,6 +55,8 @@ import com.tencent.kuikly.compose.ui.platform.LocalDensity
+ import com.tencent.kuikly.compose.ui.platform.LocalFocusManager
+ import com.tencent.kuikly.compose.ui.platform.LocalLayoutDirection
+ import com.tencent.kuikly.compose.ui.platform.LocalSoftwareKeyboardController
++import com.tencent.kuikly.compose.ui.platform.InputFocusTargetReducer
++import com.tencent.kuikly.compose.ui.platform.KuiklySoftwareKeyboardController
+ import com.tencent.kuikly.compose.ui.platform.SoftwareKeyboardController
+ import com.tencent.kuikly.compose.ui.text.AnnotatedString
+ import com.tencent.kuikly.compose.ui.text.MultiParagraph
+@@ -74,6 +78,7 @@ import com.tencent.kuikly.compose.ui.unit.dp
+ import com.tencent.kuikly.compose.ui.unit.isSpecified
+ import com.tencent.kuikly.compose.ui.util.fastRoundToInt
+ import com.tencent.kuikly.core.views.AutoHeightTextAreaView
++import com.tencent.kuikly.core.views.InputEventHandlerFn
+ import com.tencent.kuikly.core.views.LengthLimitType
+ import com.tencent.kuikly.compose.foundation.text.selection.LocalTextSelectionColors
+ import com.tencent.kuikly.core.views.TextAreaAttr
+@@ -230,7 +235,13 @@ internal fun CoreTextField(
+         singleLineNew = keyboardOptions?.keyboardType == KeyboardType.Password
+     }
+ 
+-    val autoHeightTextAreaView by remember { mutableStateOf(AutoHeightTextAreaView(singleLineNew)) }
++    val autoHeightTextAreaView = remember(singleLineNew) { AutoHeightTextAreaView(singleLineNew) }
++    val kuiklyKeyboardController = keyboardController as? KuiklySoftwareKeyboardController
++    DisposableEffect(autoHeightTextAreaView, kuiklyKeyboardController) {
++        onDispose {
++            kuiklyKeyboardController?.unregisterInput(autoHeightTextAreaView)
++        }
++    }
+ 
+     var lineHeight by remember { mutableStateOf(0f) }
+     var oldSize by remember { mutableStateOf(IntSize.Zero) }
+@@ -342,6 +353,11 @@ internal fun CoreTextField(
+ 
+     val focusRequester = remember { FocusRequester() }
+     var hasFocus by remember { mutableStateOf(false) }
++    val state = remember(keyboardController) {
++        LegacyTextFieldState(
++            keyboardController = keyboardController
++        )
++    }
+     // Focus
+     val focusModifier = Modifier.textFieldFocusModifier(
+         enabled = enabled,
+@@ -352,6 +368,7 @@ internal fun CoreTextField(
+             return@textFieldFocusModifier
+         }
+         hasFocus = it.isFocused
++        state.hasFocus = it.isFocused
+ 
+         if (it.isFocused && enabled && !readOnly) {
+             requireOwner().softwareKeyboardController.startInput(autoHeightTextAreaView)
+@@ -360,20 +377,6 @@ internal fun CoreTextField(
+         }
+     }
+ 
+-    val state = remember(keyboardController) {
+-        LegacyTextFieldState(
+-//            TextDelegate(
+-//                text = visualText,
+-//                style = textStyle,
+-//                softWrap = softWrap,
+-//                density = density,
+-//                fontFamilyResolver = fontFamilyResolver
+-//            ),
+-//            recomposeScope = scope,
+-            keyboardController = keyboardController
+-        )
+-    }
+-
+     fun dispatchLimitChange(length: Int?, forceNotify: Boolean = false) {
+         val safeLength = length ?: return
+         if (safeLength == -1) return
+@@ -425,6 +428,55 @@ internal fun CoreTextField(
+     val (propsAndEvents, others) = remember(modifier) { modifier.splitByPropOrEvent() }
+     val combinedModifier = others.then(focusModifier)
+ 
++    // ComposeNode.factory retains these native callbacks for the node lifetime. The stable wrapper
++    // prevents a prewarmed disabled/read-only composition from becoming the callback's permanent
++    // policy after the same node is activated, and also refreshes the reverse transition.
++    val inputFocusEvent: InputEventHandlerFn = updatedNodeEvent { params ->
++        if (params.focusIntentOnly) {
++            if (enabled && !readOnly) {
++                val intentDecision =
++                    kuiklyKeyboardController?.onNativeFocusIntent(autoHeightTextAreaView)
++                if (
++                    intentDecision == InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus ||
++                    intentDecision == null
++                ) {
++                    focusRequester.focusIfAttached()
++                }
++            }
++        } else {
++            val nativeFocusDecision = kuiklyKeyboardController?.onNativeFocus(
++                autoHeightTextAreaView,
++                params.focusRequestId,
++            )
++            if (!enabled || readOnly) {
++                kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
++            } else {
++                when (nativeFocusDecision) {
++                    InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
++                    null -> {
++                        // Native focus is only an intent. Keep the native editor as first responder
++                        // only after FocusOwner commits the request.
++                        if (!focusRequester.focusIfAttached()) {
++                            kuiklyKeyboardController?.rejectNativeFocus(autoHeightTextAreaView)
++                        }
++                    }
++                    InputFocusTargetReducer.NativeFocusDecision.Confirmed,
++                    InputFocusTargetReducer.NativeFocusDecision.IgnoreStale -> Unit
++                }
++            }
++        }
++    }
++    val inputBlurEvent: InputEventHandlerFn = updatedNodeEvent { params ->
++        if (
++            kuiklyKeyboardController?.onNativeBlur(
++                autoHeightTextAreaView,
++                params.focusRequestId,
++            ) == InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear
++        ) {
++            focusManager.clearFocus()
++        }
++    }
++
+     Box(modifier = pointerModifier.then(combinedModifier), propagateMinConstraints = true) {
+         decorationBox {
+             ComposeNode<ComposeUiNode, KuiklyApplier>(
+@@ -433,13 +485,8 @@ internal fun CoreTextField(
+                     KNode(textView) {
+                         getViewAttr().autofocus(false)
+                         getViewAttr().enablePinyinCallback(true)
+-                        getViewEvent().inputFocus {
+-                            // 仅在 Compose 侧当前未聚焦时才回请焦点，
+-                            // 避免"原生获焦 → 回请 Compose 聚焦 → 再触发原生 focus"的自激循环
+-                            if (!hasFocus) {
+-                                focusRequester.requestFocus()
+-                            }
+-                        }
++                        getViewEvent().inputFocus(inputFocusEvent)
++                        getViewEvent().inputBlur(inputBlurEvent)
+ 
+                     }
+                 },
+@@ -647,6 +694,10 @@ internal fun CoreTextField(
+         }
+     }
+ }
++
++internal fun FocusRequester.focusIfAttached(): Boolean =
++    hasAttachedNodes() && focus()
++
+ /**
+  * 将 Modifier 拆分为两部分：SetPropElement/SetEventElement 和其他 Element
+  * 使用 foldOut 从内到外遍历，保持原始顺序
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/platform/InputFocusTargetReducer.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/platform/InputFocusTargetReducer.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..86a8a2a1463fd493fe704a9f95319c5a4cae8b9e
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/platform/InputFocusTargetReducer.kt
+@@ -0,0 +1,271 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.platform
++
++/**
++ * Reduces logical Compose focus into one desired native editor target.
++ *
++ * Focus is state, not an ordered stream of start/stop commands. In particular, a late stop for
++ * editor A must not erase a newer start for editor B. Native focus events are observations; events
++ * without a request id are treated as user focus intents that still need Compose FocusOwner
++ * approval.
++ */
++internal class InputFocusTargetReducer<T : Any> {
++    internal sealed interface Command<T> {
++        val view: T
++        val generation: Long
++
++        data class Focus<T>(
++            override val view: T,
++            override val generation: Long,
++        ) : Command<T>
++
++        data class Blur<T>(
++            override val view: T,
++            override val generation: Long,
++        ) : Command<T>
++
++        data class CancelPendingFocus<T>(
++            override val view: T,
++            override val generation: Long,
++        ) : Command<T>
++    }
++
++    internal enum class NativeFocusDecision {
++        Confirmed,
++        RequestComposeFocus,
++        IgnoreStale,
++    }
++
++    internal enum class NativeBlurDecision {
++        Confirmed,
++        RequestComposeClear,
++    }
++
++    internal var desiredView: T? = null
++        private set
++    internal var observedView: T? = null
++        private set
++    internal var generation: Long = 0L
++        private set
++
++    private var pendingFocusView: T? = null
++    private var pendingFocusGeneration: Long? = null
++    private var completionAuthorityView: T? = null
++    private var completionAuthorityGeneration: Long? = null
++    private var focusAttemptCount = 0
++    private var pendingBlurView: T? = null
++
++    internal fun start(view: T): List<Command<T>> {
++        if (desiredView === view) return emptyList()
++        generation += 1
++        desiredView = view
++        focusAttemptCount = 0
++        val commands = cancelSupersededPendingFocus(view)
++        revokeCompletionAuthority()
++        return commands
++    }
++
++    internal fun stop(view: T): List<Command<T>> {
++        if (desiredView !== view) return emptyList()
++        generation += 1
++        desiredView = null
++        focusAttemptCount = 0
++        val commands = cancelSupersededPendingFocus(null)
++        revokeCompletionAuthority()
++        return commands
++    }
++
++    internal fun reconcile(reassertCurrentFocus: Boolean = false): Command<T>? {
++        val target = desiredView
++        if (target == null) {
++            val active = observedView ?: return null
++            if (pendingBlurView === active) return null
++            onBlurRequested(active)
++            pendingBlurView = active
++            return Command.Blur(active, generation)
++        }
++        if (observedView === target) {
++            return if (reassertCurrentFocus) {
++                // Focus is already owned by this editor, but the platform keyboard may have been
++                // dismissed independently (for example Android Back hides IME without clearing
++                // EditText focus). Reissuing the generation-scoped native focus command lets the
++                // renderer show the keyboard without changing logical focus ownership.
++                completionAuthorityView = target
++                completionAuthorityGeneration = generation
++                Command.Focus(target, generation)
++            } else {
++                null
++            }
++        }
++        if (pendingFocusView === target && pendingFocusGeneration == generation) return null
++        if (focusAttemptCount >= MaxFocusAttemptsPerGeneration) return null
++        pendingFocusView = target
++        pendingFocusGeneration = generation
++        completionAuthorityView = target
++        completionAuthorityGeneration = generation
++        focusAttemptCount += 1
++        pendingBlurView = null
++        return Command.Focus(target, generation)
++    }
++
++    internal fun onNativeFocus(view: T, requestId: Long?): NativeFocusDecision {
++        if (requestId != null) {
++            // A request id identifies the logical focus generation, not one transport attempt.
++            // The pending slot may already have been consumed by an earlier user/native focus
++            // observation for this same target, or released by a retry timeout, before the
++            // programmatic completion crosses the bridge. Completion authority therefore lives
++            // independently from the retry slot, but is revoked by blur intent so a late callback
++            // cannot revive an editor after the keyboard or user dismissed it.
++            val matchesCurrentGeneration =
++                requestId == generation &&
++                    desiredView === view &&
++                    completionAuthorityView === view &&
++                    completionAuthorityGeneration == requestId
++            if (!matchesCurrentGeneration) {
++                return NativeFocusDecision.IgnoreStale
++            }
++            observedView = view
++            pendingBlurView = null
++            pendingFocusView = null
++            pendingFocusGeneration = null
++            focusAttemptCount = 0
++            return NativeFocusDecision.Confirmed
++        }
++
++        // A native focus event without a request id came from a platform/user focus action. It is
++        // an intent, not authority: Compose FocusOwner still has to accept it.
++        observedView = view
++        pendingBlurView = null
++        if (desiredView === view) {
++            pendingFocusView = null
++            pendingFocusGeneration = null
++            focusAttemptCount = 0
++            return NativeFocusDecision.Confirmed
++        }
++        return NativeFocusDecision.RequestComposeFocus
++    }
++
++    /**
++     * Handles a native request to acquire Compose focus before native focus has landed.
++     *
++     * Unlike [onNativeFocus], this must not update [observedView]. Compose FocusOwner approval
++     * calls start(), then reconcile() emits the generation-scoped native focus command. Only the
++     * later native focus callback may confirm observed state.
++     */
++    internal fun onNativeFocusIntent(view: T): NativeFocusDecision =
++        if (desiredView === view) {
++            NativeFocusDecision.Confirmed
++        } else {
++            NativeFocusDecision.RequestComposeFocus
++        }
++
++    internal fun onNativeBlur(view: T, requestId: Long?): NativeBlurDecision {
++        val shouldClearComposeFocus = requestId == null && desiredView === view
++        if (observedView === view) observedView = null
++        if (pendingBlurView === view) pendingBlurView = null
++        onBlurRequested(view)
++        return if (shouldClearComposeFocus) {
++            NativeBlurDecision.RequestComposeClear
++        } else {
++            NativeBlurDecision.Confirmed
++        }
++    }
++
++    internal fun unregister(view: T): List<Command<T>> {
++        val commands = mutableListOf<Command<T>>()
++        if (desiredView === view) {
++            generation += 1
++            desiredView = null
++            focusAttemptCount = 0
++        }
++        if (pendingFocusView === view) {
++            commands += Command.CancelPendingFocus(view, generation)
++            pendingFocusView = null
++            pendingFocusGeneration = null
++        }
++        revokeCompletionAuthority(view)
++        if (observedView === view) {
++            // Disposal removes the common callback surface immediately, but the native editor can
++            // still be first responder until it is explicitly blurred. Clear the observation only
++            // after emitting that terminal command so a detached/recreated field cannot leave the
++            // software keyboard visible without a logical focus owner.
++            commands += Command.Blur(view, generation)
++            observedView = null
++        }
++        if (pendingBlurView === view) pendingBlurView = null
++        return commands
++    }
++
++    internal fun rejectNativeFocus(view: T) {
++        onBlurRequested(view)
++        if (observedView === view) observedView = null
++    }
++
++    /**
++     * Revokes permission for an in-flight native completion before an explicit blur is sent.
++     *
++     * Blur can preserve [desiredView] (for example, SoftwareKeyboardController.hide()), so the
++     * logical generation alone cannot distinguish an obsolete completion from one that is still
++     * allowed to establish native focus. A later [reconcile] call may emit a fresh Focus command
++     * in the same generation, which reopens authority for hide -> show recovery.
++     */
++    internal fun onBlurRequested(view: T) {
++        revokeCompletionAuthority(view)
++        if (pendingFocusView === view) {
++            pendingFocusView = null
++            pendingFocusGeneration = null
++        }
++        if (desiredView === view) focusAttemptCount = 0
++    }
++
++    /**
++     * Releases a programmatic focus request that produced no native completion callback.
++     *
++     * Native renderers can reject a request because their node/window is not ready. The bridge
++     * command itself has no completion callback, so use a bounded generation-scoped timeout to
++     * retry without turning a permanently unavailable editor into an unbounded focus storm.
++     */
++    internal fun onFocusRequestTimeout(view: T, requestGeneration: Long): Boolean {
++        val matchesPendingRequest =
++            pendingFocusView === view && pendingFocusGeneration == requestGeneration
++        if (!matchesPendingRequest) return false
++        pendingFocusView = null
++        pendingFocusGeneration = null
++        return desiredView === view &&
++            observedView !== view &&
++            generation == requestGeneration &&
++            focusAttemptCount < MaxFocusAttemptsPerGeneration
++    }
++
++    private fun cancelSupersededPendingFocus(nextView: T?): List<Command<T>> {
++        val pending = pendingFocusView ?: return emptyList()
++        if (pending === nextView) return emptyList()
++        pendingFocusView = null
++        pendingFocusGeneration = null
++        return listOf(Command.CancelPendingFocus(pending, generation))
++    }
++
++    private fun revokeCompletionAuthority(view: T? = null) {
++        if (view != null && completionAuthorityView !== view) return
++        completionAuthorityView = null
++        completionAuthorityGeneration = null
++    }
++
++    private companion object {
++        const val MaxFocusAttemptsPerGeneration = 3
++    }
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/platform/SoftwareKeyboardController.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/platform/SoftwareKeyboardController.kt
+index 463f1e4954217d9b80ae7cae10c14ff34f86547a..5f6dddbd2a493d452a4b531aad7d2e732613b3fa 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/platform/SoftwareKeyboardController.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/platform/SoftwareKeyboardController.kt
+@@ -64,60 +64,129 @@ interface SoftwareKeyboardController {
+ }
+ 
+ internal class KuiklySoftwareKeyboardController : SoftwareKeyboardController {
+-    private enum class PendingAction {
+-        NONE, START_INPUT, STOP_INPUT, SHOW_KEYBOARD, HIDE_KEYBOARD
+-    }
+-    private var activeView: AutoHeightTextAreaView? = null
+-    private var pendingView: AutoHeightTextAreaView? = null
+-    private var pendingAction = PendingAction.NONE
+-    private var scheduleInputCommand = false
++    private val focusReducer = InputFocusTargetReducer<AutoHeightTextAreaView>()
++    private var reconcileScheduled = false
++    private var keyboardHidden = false
++    private var keyboardShowRequested = false
+ 
+     override fun show() {
+-        activeView?.also { sendInputCommand(it, PendingAction.SHOW_KEYBOARD) }
++        keyboardHidden = false
++        keyboardShowRequested = true
++        scheduleReconcile(focusReducer.desiredView ?: focusReducer.observedView)
+     }
+ 
+     override fun hide() {
+-        activeView?.also { sendInputCommand(it, PendingAction.HIDE_KEYBOARD) }
++        keyboardHidden = true
++        keyboardShowRequested = false
++        val target = focusReducer.desiredView ?: focusReducer.observedView
++        target?.let(focusReducer::onBlurRequested)
++        scheduleReconcile(target)
+     }
+ 
+     internal fun startInput(view: AutoHeightTextAreaView) {
+-        sendInputCommand(view, PendingAction.START_INPUT)
++        keyboardHidden = false
++        execute(focusReducer.start(view))
++        scheduleReconcile(view)
+     }
+ 
+     internal fun stopInput(view: AutoHeightTextAreaView) {
+-        sendInputCommand(view, PendingAction.STOP_INPUT)
++        execute(focusReducer.stop(view))
++        scheduleReconcile(view)
++    }
++
++    internal fun onNativeFocus(
++        view: AutoHeightTextAreaView,
++        requestId: Long?,
++    ): InputFocusTargetReducer.NativeFocusDecision {
++        val decision = focusReducer.onNativeFocus(view, requestId)
++        if (decision == InputFocusTargetReducer.NativeFocusDecision.IgnoreStale) {
++            // The callback proves that native focus actually landed, even though the request no
++            // longer belongs to the current generation. Do not publish the detached/old editor as
++            // observed state; explicitly reject it so native first-responder state cannot survive
++            // after common ownership moved on.
++            rejectNativeFocus(view)
++        }
++        return decision
++    }
++
++    internal fun onNativeFocusIntent(
++        view: AutoHeightTextAreaView,
++    ): InputFocusTargetReducer.NativeFocusDecision =
++        focusReducer.onNativeFocusIntent(view)
++
++    internal fun onNativeBlur(
++        view: AutoHeightTextAreaView,
++        requestId: Long?,
++    ): InputFocusTargetReducer.NativeBlurDecision {
++        val decision = focusReducer.onNativeBlur(view, requestId)
++        scheduleReconcile(view)
++        return decision
++    }
++
++    internal fun rejectNativeFocus(view: AutoHeightTextAreaView) {
++        focusReducer.rejectNativeFocus(view)
++        view.blur(focusReducer.generation)
+     }
+ 
+-    private fun sendInputCommand(view: AutoHeightTextAreaView, action: PendingAction) {
+-        if (!scheduleInputCommand) {
+-            scheduleInputCommand = true
+-            setTimeout(view.pagerId) {
+-                scheduleInputCommand = false
+-                when (pendingAction) {
+-                    PendingAction.START_INPUT -> {
+-                        pendingView?.focus()
+-                        activeView = pendingView
+-                    }
+-                    PendingAction.STOP_INPUT -> {
+-                        if (activeView == pendingView) {
+-                            activeView?.blur()
+-                            activeView = null
+-                        }
+-                    }
+-                    PendingAction.SHOW_KEYBOARD -> {
+-                        activeView?.focus()
+-                    }
+-                    PendingAction.HIDE_KEYBOARD -> {
+-                        activeView?.blur()
+-                    }
+-                    else -> {}
++    internal fun unregisterInput(view: AutoHeightTextAreaView) {
++        execute(focusReducer.unregister(view))
++    }
++
++    private fun scheduleReconcile(anchor: AutoHeightTextAreaView?) {
++        val pagerId = anchor?.pagerId ?: return
++        if (reconcileScheduled) return
++        reconcileScheduled = true
++        setTimeout(pagerId) {
++            reconcileScheduled = false
++            val reassertCurrentFocus = keyboardShowRequested
++            keyboardShowRequested = false
++            if (!keyboardHidden || focusReducer.desiredView == null) {
++                execute(
++                    focusReducer.reconcile(
++                        reassertCurrentFocus =
++                            reassertCurrentFocus && focusReducer.desiredView != null,
++                    ),
++                )
++            }
++            if (keyboardHidden) {
++                focusReducer.observedView?.let { observedView ->
++                    focusReducer.onBlurRequested(observedView)
++                    observedView.blur(focusReducer.generation)
+                 }
+-                pendingAction = PendingAction.NONE
+-                pendingView = null
+             }
+         }
+-        pendingView = view
+-        pendingAction = action
+     }
+ 
++    private fun execute(commands: List<InputFocusTargetReducer.Command<AutoHeightTextAreaView>>) {
++        commands.forEach(::execute)
++    }
++
++    private fun execute(command: InputFocusTargetReducer.Command<AutoHeightTextAreaView>?) {
++        when (command) {
++            is InputFocusTargetReducer.Command.Focus ->
++                executeFocus(command)
++            is InputFocusTargetReducer.Command.Blur -> {
++                focusReducer.onBlurRequested(command.view)
++                command.view.blur(command.generation)
++            }
++            is InputFocusTargetReducer.Command.CancelPendingFocus ->
++                command.view.cancelPendingFocus(command.generation)
++            null -> Unit
++        }
++    }
++
++    private fun executeFocus(
++        command: InputFocusTargetReducer.Command.Focus<AutoHeightTextAreaView>,
++    ) {
++        command.view.focus(command.generation)
++        setTimeout(command.view.pagerId, FocusCompletionTimeoutMs) {
++            if (focusReducer.onFocusRequestTimeout(command.view, command.generation)) {
++                scheduleReconcile(command.view)
++            }
++        }
++    }
++
++    private companion object {
++        const val FocusCompletionTimeoutMs = 120
++    }
+ }
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/FocusRequesterLifecycleTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/FocusRequesterLifecycleTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..a984ec576a77d3556ab3abfbfe902226e6918dd6
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/FocusRequesterLifecycleTest.kt
+@@ -0,0 +1,12 @@
++package com.tencent.kuikly.compose.foundation.text
++
++import com.tencent.kuikly.compose.ui.focus.FocusRequester
++import kotlin.test.Test
++import kotlin.test.assertFalse
++
++class FocusRequesterLifecycleTest {
++    @Test
++    fun detachedRequesterSilentlyRejectsLateNativeFocusIntent() {
++        assertFalse(FocusRequester().focusIfAttached())
++    }
++}
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/platform/InputFocusTargetReducerTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/platform/InputFocusTargetReducerTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..12f1994ea73c7c3af7fa9acd43e701bed9b24e4d
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/platform/InputFocusTargetReducerTest.kt
+@@ -0,0 +1,444 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.platform
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertIs
++import kotlin.test.assertNull
++import kotlin.test.assertSame
++import kotlin.test.assertTrue
++
++class InputFocusTargetReducerTest {
++    private class View(val name: String)
++
++    @Test
++    fun lateStopForOldViewDoesNotEraseNewDesiredView() {
++        val reducer = InputFocusTargetReducer<View>()
++        val first = View("first")
++        val second = View("second")
++
++        reducer.start(first)
++        val firstFocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(first, firstFocus.generation)
++
++        reducer.start(second)
++        reducer.stop(first)
++
++        assertSame(second, reducer.desiredView)
++        val secondFocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        assertSame(second, secondFocus.view)
++    }
++
++    @Test
++    fun bothFocusTransferCallbackOrdersConvergeOnSecondView() {
++        val first = View("first")
++        val second = View("second")
++
++        val stopThenStart = InputFocusTargetReducer<View>()
++        stopThenStart.start(first)
++        stopThenStart.onNativeFocus(
++            first,
++            assertIs<InputFocusTargetReducer.Command.Focus<View>>(stopThenStart.reconcile()).generation,
++        )
++        stopThenStart.stop(first)
++        stopThenStart.start(second)
++
++        val startThenStop = InputFocusTargetReducer<View>()
++        startThenStop.start(first)
++        startThenStop.onNativeFocus(
++            first,
++            assertIs<InputFocusTargetReducer.Command.Focus<View>>(startThenStop.reconcile()).generation,
++        )
++        startThenStop.start(second)
++        startThenStop.stop(first)
++
++        assertSame(second, stopThenStart.desiredView)
++        assertSame(second, startThenStop.desiredView)
++        assertSame(
++            second,
++            assertIs<InputFocusTargetReducer.Command.Focus<View>>(stopThenStart.reconcile()).view,
++        )
++        assertSame(
++            second,
++            assertIs<InputFocusTargetReducer.Command.Focus<View>>(startThenStop.reconcile()).view,
++        )
++    }
++
++    @Test
++    fun staleProgrammaticFocusIsRejectedAndCurrentTargetIsReconciled() {
++        val reducer = InputFocusTargetReducer<View>()
++        val first = View("first")
++        val second = View("second")
++
++        reducer.start(first)
++        val firstRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        val cancelCommands = reducer.start(second)
++
++        assertTrue(cancelCommands.any { it is InputFocusTargetReducer.Command.CancelPendingFocus })
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
++            reducer.onNativeFocus(first, firstRequest.generation),
++        )
++        val currentRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        assertSame(second, currentRequest.view)
++        assertEquals(reducer.generation, currentRequest.generation)
++    }
++
++    @Test
++    fun nativeFocusFailureCanRetrySameDesiredViewAfterLifecycleRecovers() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("not-ready-then-ready")
++
++        reducer.start(view)
++        val failedRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++
++        assertTrue(reducer.onFocusRequestTimeout(view, failedRequest.generation))
++        val retry = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        assertSame(view, retry.view)
++        assertEquals(failedRequest.generation, retry.generation)
++
++        reducer.onNativeFocus(view, retry.generation)
++        assertSame(view, reducer.observedView)
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun currentGenerationCompletionSurvivesEarlierUserFocusConfirmation() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("native-tap-then-programmatic-confirmation")
++
++        reducer.start(view)
++        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++
++        // A native tap can report focus without a request id after Compose has already issued its
++        // generation-scoped focus command. This confirms the same desired target and consumes the
++        // pending slot, but the later programmatic completion is still current authority.
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
++            reducer.onNativeFocus(view, requestId = null),
++        )
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
++            reducer.onNativeFocus(view, request.generation),
++        )
++        assertSame(view, reducer.observedView)
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun lateCurrentGenerationCompletionSurvivesRetryTimeout() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("late-current-completion")
++
++        reducer.start(view)
++        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        assertTrue(reducer.onFocusRequestTimeout(view, request.generation))
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
++            reducer.onNativeFocus(view, request.generation),
++        )
++        assertSame(view, reducer.observedView)
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun currentGenerationCompletionCannotReviveAfterProgrammaticBlur() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("programmatically-blurred")
++
++        reducer.start(view)
++        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onBlurRequested(view)
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
++            reducer.onNativeFocus(view, request.generation),
++        )
++        assertNull(reducer.observedView)
++    }
++
++    @Test
++    fun currentGenerationCompletionCannotReviveAfterUserBlurIntent() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("user-blurred")
++
++        reducer.start(view)
++        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(view, requestId = null)
++        assertEquals(
++            InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear,
++            reducer.onNativeBlur(view, requestId = null),
++        )
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
++            reducer.onNativeFocus(view, request.generation),
++        )
++        assertNull(reducer.observedView)
++    }
++
++    @Test
++    fun nativeFocusFailureRetryIsBoundedWithinOneGeneration() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("permanently-unavailable")
++
++        reducer.start(view)
++        repeat(2) {
++            val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++            assertTrue(reducer.onFocusRequestTimeout(view, request.generation))
++        }
++        val lastRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        assertEquals(false, reducer.onFocusRequestTimeout(view, lastRequest.generation))
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun nativeUserFocusRequiresComposeApproval() {
++        val reducer = InputFocusTargetReducer<View>()
++        val first = View("first")
++        val second = View("second")
++
++        reducer.start(first)
++        val firstRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(first, firstRequest.generation)
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
++            reducer.onNativeFocus(second, requestId = null),
++        )
++        assertSame(first, reducer.desiredView)
++        assertSame(second, reducer.observedView)
++
++        reducer.start(second)
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun programmaticFocusIntentWaitsForGenerationFocusBeforeBecomingObserved() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("autofocus-intent")
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
++            reducer.onNativeFocusIntent(view),
++        )
++        assertNull(reducer.observedView)
++        assertNull(reducer.desiredView)
++
++        reducer.start(view)
++        val focus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        assertSame(view, focus.view)
++        assertNull(reducer.observedView)
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
++            reducer.onNativeFocus(view, focus.generation),
++        )
++        assertSame(view, reducer.observedView)
++    }
++
++    @Test
++    fun rejectedNativeUserFocusDoesNotBecomeObservedAuthority() {
++        val reducer = InputFocusTargetReducer<View>()
++        val approved = View("approved")
++        val rejected = View("rejected")
++
++        reducer.start(approved)
++        val approvedRequest =
++            assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(approved, approvedRequest.generation)
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
++            reducer.onNativeFocus(rejected, requestId = null),
++        )
++        reducer.rejectNativeFocus(rejected)
++
++        assertNull(reducer.observedView)
++        assertSame(approved, reducer.desiredView)
++        assertSame(
++            approved,
++            assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile()).view,
++        )
++    }
++
++    @Test
++    fun nativeUserBlurOnlyClearsComposeWhenItStillOwnsDesiredFocus() {
++        val reducer = InputFocusTargetReducer<View>()
++        val first = View("first")
++        val second = View("second")
++
++        reducer.start(first)
++        val firstRequest = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(first, firstRequest.generation)
++
++        assertEquals(
++            InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear,
++            reducer.onNativeBlur(first, requestId = null),
++        )
++
++        reducer.start(second)
++        assertEquals(
++            InputFocusTargetReducer.NativeBlurDecision.Confirmed,
++            reducer.onNativeBlur(first, requestId = null),
++        )
++    }
++
++    @Test
++    fun unregisterBlursDetachedObservedViewAndClearsFocusState() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("detached")
++
++        reducer.start(view)
++        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(view, request.generation)
++
++        val commands = reducer.unregister(view)
++
++        val blur = assertIs<InputFocusTargetReducer.Command.Blur<View>>(commands.single())
++        assertSame(view, blur.view)
++        assertEquals(reducer.generation, blur.generation)
++        assertNull(reducer.desiredView)
++        assertNull(reducer.observedView)
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun lateProgrammaticFocusAfterUnregisterCannotReviveDetachedView() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("detached-while-focus-queued")
++
++        reducer.start(view)
++        val request = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        val commands = reducer.unregister(view)
++
++        assertIs<InputFocusTargetReducer.Command.CancelPendingFocus<View>>(commands.single())
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
++            reducer.onNativeFocus(view, request.generation),
++        )
++        assertNull(reducer.desiredView)
++        assertNull(reducer.observedView)
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun unregisterCancelsFocusQueuedForDetachedView() {
++        val reducer = InputFocusTargetReducer<View>()
++        val detached = View("detached")
++
++        reducer.start(detached)
++        reducer.reconcile()
++        val commands = reducer.unregister(detached)
++
++        assertTrue(commands.single() is InputFocusTargetReducer.Command.CancelPendingFocus)
++        assertNull(reducer.desiredView)
++        assertNull(reducer.observedView)
++        assertNull(reducer.reconcile())
++    }
++
++    @Test
++    fun hideShowStyleBlurKeepsDesiredTargetForRefocus() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("editor")
++
++        reducer.start(view)
++        val focus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(view, focus.generation)
++        reducer.onNativeBlur(view, requestId = reducer.generation)
++
++        assertSame(view, reducer.desiredView)
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.IgnoreStale,
++            reducer.onNativeFocus(view, focus.generation),
++        )
++        assertNull(reducer.observedView)
++
++        val refocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        assertSame(view, refocus.view)
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
++            reducer.onNativeFocus(view, refocus.generation),
++        )
++        assertSame(view, reducer.observedView)
++    }
++
++    @Test
++    fun softwareKeyboardShowReassertsConfirmedFocusWithoutChangingGeneration() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("focused-editor-with-hidden-keyboard")
++
++        reducer.start(view)
++        val initialFocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(view, initialFocus.generation)
++
++        assertNull(reducer.reconcile())
++        val keyboardShow =
++            assertIs<InputFocusTargetReducer.Command.Focus<View>>(
++                reducer.reconcile(reassertCurrentFocus = true),
++            )
++        assertSame(view, keyboardShow.view)
++        assertEquals(initialFocus.generation, keyboardShow.generation)
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.Confirmed,
++            reducer.onNativeFocus(view, keyboardShow.generation),
++        )
++        assertSame(view, reducer.desiredView)
++        assertSame(view, reducer.observedView)
++    }
++
++    @Test
++    fun softwareKeyboardShowCannotReviveObservedViewWithoutDesiredOwner() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("stale-native-editor")
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
++            reducer.onNativeFocus(view, requestId = null),
++        )
++
++        val blur =
++            assertIs<InputFocusTargetReducer.Command.Blur<View>>(
++                reducer.reconcile(reassertCurrentFocus = true),
++            )
++        assertSame(view, blur.view)
++        assertNull(reducer.desiredView)
++    }
++
++    @Test
++    fun blurWithoutProgrammaticCallbackStillLetsLaterUserBlurClearCompose() {
++        val reducer = InputFocusTargetReducer<View>()
++        val view = View("editor")
++
++        reducer.start(view)
++        val firstFocus = assertIs<InputFocusTargetReducer.Command.Focus<View>>(reducer.reconcile())
++        reducer.onNativeFocus(view, firstFocus.generation)
++        reducer.stop(view)
++        assertIs<InputFocusTargetReducer.Command.Blur<View>>(reducer.reconcile())
++
++        assertEquals(
++            InputFocusTargetReducer.NativeFocusDecision.RequestComposeFocus,
++            reducer.onNativeFocus(view, requestId = null),
++        )
++        reducer.start(view)
++        assertEquals(
++            InputFocusTargetReducer.NativeBlurDecision.RequestComposeClear,
++            reducer.onNativeBlur(view, requestId = null),
++        )
++    }
++}
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRTextFieldView.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRTextFieldView.kt
+index 0d7c1f525378cc6197a40f5f2f43b5c4c05d9a7e..ebc18b2566a7a0f0caaec492510234d6698aceba 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRTextFieldView.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/KRTextFieldView.kt
+@@ -146,6 +146,8 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+      * 如果这两者没处于 focus 时，收到显示键盘的请求, lazy 住，等两者都 focus 时，才显示键盘
+      */
+     private var pendingFocus = false
++    private var pendingFocusRequestId: Long? = null
++    private var pendingBlurRequestId: Long? = null
+ 
+     private var currentKeyboardHeight = 0
+     private var lengthLimitType: Int = -1
+@@ -271,8 +273,9 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+     override fun call(method: String, params: String?, callback: KuiklyRenderCallback?): Any? {
+         return when (method) {
+             METHOD_SET_TEXT -> setInputText(params)
+-            METHOD_FOCUS -> setFocus()
+-            METHOD_BLUR -> setBlur()
++            METHOD_FOCUS -> setFocus(params)
++            METHOD_BLUR -> setBlur(params)
++            METHOD_CANCEL_PENDING_FOCUS -> cancelPendingFocus()
+             METHOD_GET_CURSOR_INDEX -> getCursorIndex(callback)
+             METHOD_SET_CURSOR_INDEX -> setCursorIndex(params)
+             METHOD_SET_TEXT_INPUT_STATE -> setTextInputState(params)
+@@ -653,10 +656,22 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+         return true
+     }
+ 
+-    private fun setFocus() {
++    private fun setFocus(params: String? = null) {
++        pendingFocusRequestId = params?.toLongOrNull()
++        pendingBlurRequestId = null
+         isFocusable = true
+         isFocusableInTouchMode = true
+-        requestFocus()
++        if (hasFocus()) {
++            pendingFocusRequestId = null
++            showKeyboard()
++            return
++        }
++        if (!requestFocus()) {
++            // A failed/no-op command must not label a later real user callback as programmatic.
++            pendingFocusRequestId = null
++            pendingFocus = false
++            return
++        }
+         post {
+             if (hasWindowFocus() && hasFocus()) {
+                 showKeyboard()
+@@ -687,14 +702,30 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+         imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+     }
+ 
+-    private fun setBlur() {
++    private fun setBlur(params: String? = null) {
++        pendingBlurRequestId = params?.toLongOrNull()
++        pendingFocusRequestId = null
++        pendingFocus = false
++        if (!hasFocus()) {
++            pendingBlurRequestId = null
++        }
+         clearFocus()
++        if (hasFocus()) {
++            pendingBlurRequestId = null
++        }
+         post {
+-            val imm = context.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager
+-            imm.hideSoftInputFromWindow(windowToken, 0)
++            if (rootView.findFocus() == null) {
++                val imm = context.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager
++                imm.hideSoftInputFromWindow(windowToken, 0)
++            }
+         }
+     }
+ 
++    private fun cancelPendingFocus() {
++        pendingFocusRequestId = null
++        pendingFocus = false
++    }
++
+     private fun getCursorIndex(callback: KuiklyRenderCallback?) {
+         callback?.invoke(mapOf(
+             "cursorIndex" to cursorIndex
+@@ -832,9 +863,14 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+ 
+         setOnFocusChangeListener { _, focus ->
+             if (focus) {
+-                inputFocusCallback?.invoke(createCallbackParamMap())
++                pendingBlurRequestId = null
++                inputFocusCallback?.invoke(createFocusCallbackParamMap(pendingFocusRequestId))
++                pendingFocusRequestId = null
+             } else {
+-                inputBlurCallback?.invoke(createCallbackParamMap())
++                pendingFocusRequestId = null
++                pendingFocus = false
++                inputBlurCallback?.invoke(createFocusCallbackParamMap(pendingBlurRequestId))
++                pendingBlurRequestId = null
+             }
+         }
+         return true
+@@ -889,16 +925,15 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+         } else {
+             null
+         }
+-        return if (length == null) {
+-            mapOf(
+-                KEY_TEXT to rawText.toString()
+-            )
+-        } else {
+-            mapOf(
+-                KEY_TEXT to rawText.toString(),
+-                KEY_LENGTH to length!!
+-            )
+-        }
++        val result = mutableMapOf<String, Any>(KEY_TEXT to rawText.toString())
++        length?.let { result[KEY_LENGTH] = it }
++        return result
++    }
++
++    private fun createFocusCallbackParamMap(requestId: Long?): Map<String, Any> {
++        val result = createCallbackParamMap().toMutableMap()
++        requestId?.let { result[KEY_FOCUS_REQUEST_ID] = it }
++        return result
+     }
+ 
+     private fun createTextInputStateParamMap(): Map<String, Any> {
+@@ -1125,6 +1160,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+         private const val METHOD_SET_TEXT = "setText"
+         private const val METHOD_FOCUS = "focus"
+         private const val METHOD_BLUR = "blur"
++        private const val METHOD_CANCEL_PENDING_FOCUS = "cancelPendingFocus"
+         private const val METHOD_GET_CURSOR_INDEX = "getCursorIndex"
+         private const val METHOD_SET_CURSOR_INDEX = "setCursorIndex"
+         private const val METHOD_SET_TEXT_INPUT_STATE = "setTextInputState"
+@@ -1140,6 +1176,7 @@ open class KRTextFieldView(context: Context, private val softInputMode: Int?) :
+         private const val KEY_SELECTION_START = "selectionStart"
+         private const val KEY_SELECTION_END = "selectionEnd"
+         private const val KEY_COMPOSITION_START = "compositionStart"
++        private const val KEY_FOCUS_REQUEST_ID = "focusRequestId"
+         private const val KEY_COMPOSITION_END = "compositionEnd"
+         private const val KEY_LENGTH = "length"
+         private const val NO_COMPOSITION = -1
+diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
+index f6abdd644c5ab72c79970bd8083198d9676bfa60..b8f73d7d61256a5a078cd4c597965ee0bed78c28 100644
+--- a/core-render-ios/Extension/Components/KRTextAreaView.m
++++ b/core-render-ios/Extension/Components/KRTextAreaView.m
+@@ -115,6 +115,9 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ @implementation KRTextAreaView {
+     NSString *_text;
+     BOOL _didAddKeyboardNotification;
++    NSNumber *_pendingFocusRequestId;
++    NSNumber *_pendingBlurRequestId;
++    NSUInteger _focusRequestEpoch;
+     NSMutableDictionary *_props;
+     BOOL _ignoreTextDidChanged;
+     /** 显式设置的光标颜色 */
+@@ -402,13 +405,40 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ #pragma mark - css method
+ 
+ - (void)css_focus:(NSDictionary *)args  {
++    NSString *rawRequestId = args[KRC_PARAM_KEY];
++    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
++    NSUInteger requestEpoch = ++_focusRequestEpoch;
++    _pendingFocusRequestId = requestId;
++    _pendingBlurRequestId = nil;
+     dispatch_async(dispatch_get_main_queue(), ^{
+-        [self becomeFirstResponder];
++        // Keep cancellation independent from the optional request id so legacy focus(nil) can be
++        // invalidated before this main-queue block runs.
++        if (requestEpoch != self->_focusRequestEpoch) {
++            return;
++        }
++        if (self.isFirstResponder) {
++            self->_pendingFocusRequestId = nil;
++            return;
++        }
++        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
++            self->_pendingFocusRequestId = nil;
++        }
+     });
+ }
+ 
+ - (void)css_blur:(NSDictionary *)args  {
+-    [self resignFirstResponder];
++    ++_focusRequestEpoch;
++    NSString *rawRequestId = args[KRC_PARAM_KEY];
++    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
++    _pendingFocusRequestId = nil;
++    if (!self.isFirstResponder || ![self resignFirstResponder]) {
++        _pendingBlurRequestId = nil;
++    }
++}
++
++- (void)css_cancelPendingFocus:(NSDictionary *)args {
++    ++_focusRequestEpoch;
++    _pendingFocusRequestId = nil;
+ }
+ 
+ - (void)css_getCursorIndex:(NSDictionary *)args {
+@@ -463,9 +493,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+     NSInteger selectionStart = MAX(0, MIN(requestedSelectionStart, (NSInteger)rawText.length));
+     NSInteger selectionEnd = MAX(0, MIN(requestedSelectionEnd, (NSInteger)rawText.length));
+ 
+-    if (![self isFirstResponder] && rawText.length > 0 && [self.css_autoFocusOnTextInputState boolValue]) {
+-        [self becomeFirstResponder];
+-    }
++    BOOL shouldRequestComposeFocus =
++        ![self isFirstResponder] && rawText.length > 0 && [self.css_autoFocusOnTextInputState boolValue];
+     _ignoreTextDidChanged = YES;
+     // Emoji 表情输入时文字候选区闪烁
+     // 关键：程序化改文本/设选区期间，临时摘掉 inputDelegate。否则 UITextView 会在 textStorage 变更、selectedTextRange 赋值时，
+@@ -515,6 +544,21 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+     if (self.css_textInputStateChange) {
+         self.css_textInputStateChange([self p_currentTextInputStatePayload]);
+     }
++    if (shouldRequestComposeFocus && self.css_inputFocus) {
++        dispatch_async(dispatch_get_main_queue(), ^{
++            if (self.isFirstResponder || ![self.css_autoFocusOnTextInputState boolValue] || !self.css_inputFocus) {
++                return;
++            }
++            // Programmatic auto-focus is an intent, not native authority. Route
++            // it through the same request-id/generation arbiter as a user focus
++            // event so Compose FocusOwner can accept or reject it before the
++            // editor becomes first responder.
++            self.css_inputFocus(@{
++                @"text" : [self p_outputText] ?: @"",
++                @"focusIntentOnly" : @YES
++            });
++        });
++    }
+ }
+ 
+ - (void)css_getTextInputState:(NSDictionary *)args {
+@@ -1013,16 +1057,28 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ }
+ 
+ - (void)textViewDidBeginEditing:(UITextView *)textView { // 获焦
++    _pendingBlurRequestId = nil;
+     if (self.css_inputFocus) {
+-        self.css_inputFocus(@{@"text": textView.text.copy ?: @""});
++        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
++        if (_pendingFocusRequestId) {
++            payload[@"focusRequestId"] = _pendingFocusRequestId;
++        }
++        self.css_inputFocus(payload);
+     }
++    _pendingFocusRequestId = nil;
+ }
+ 
+ 
+ - (void)textViewDidEndEditing:(UITextView *)textView{ // 失焦
++    _pendingFocusRequestId = nil;
+     if (self.css_inputBlur) {
+-        self.css_inputBlur(@{@"text": textView.text.copy ?: @""});
++        NSMutableDictionary *payload = [@{@"text": textView.text.copy ?: @""} mutableCopy];
++        if (_pendingBlurRequestId) {
++            payload[@"focusRequestId"] = _pendingBlurRequestId;
++        }
++        self.css_inputBlur(payload);
+     }
++    _pendingBlurRequestId = nil;
+ }
+ 
+ #pragma mark - notication
+diff --git a/core-render-ios/Extension/Components/KRTextFieldView.m b/core-render-ios/Extension/Components/KRTextFieldView.m
+index f38870680bcc0f0142c2937cdfbe3f5bfc48c5db..8f70c8af8192f38518f427e7f86702eff5179659 100644
+--- a/core-render-ios/Extension/Components/KRTextFieldView.m
++++ b/core-render-ios/Extension/Components/KRTextFieldView.m
+@@ -96,6 +96,9 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+     BOOL _setNeedUpdatePlaceholder;
+     /** maxTextLength backing store */
+     NSNumber *_css_maxTextLength;
++    NSNumber *_pendingFocusRequestId;
++    NSNumber *_pendingBlurRequestId;
++    NSUInteger _focusRequestEpoch;
+     /** suppress native selection callback during programmatic selection updates */
+     BOOL _ignoreSelectionChange;
+     /** suppress intermediate textInputStateChange during programmatic state sync */
+@@ -296,13 +299,41 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+ #pragma mark - css method
+ 
+ - (void)css_focus:(NSDictionary *)args  {
++    NSString *rawRequestId = args[KRC_PARAM_KEY];
++    NSNumber *requestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
++    NSUInteger requestEpoch = ++_focusRequestEpoch;
++    _pendingFocusRequestId = requestId;
++    _pendingBlurRequestId = nil;
+     dispatch_async(dispatch_get_main_queue(), ^{
+-        [self becomeFirstResponder];
++        // The epoch is the cancellation token. A nullable request id cannot serve this purpose:
++        // legacy focus(nil) followed by blur/cancel would otherwise compare nil == nil and revive
++        // a stale first responder on the next main-queue drain.
++        if (requestEpoch != self->_focusRequestEpoch) {
++            return;
++        }
++        if (self.isFirstResponder) {
++            self->_pendingFocusRequestId = nil;
++            return;
++        }
++        if (![self becomeFirstResponder] && requestEpoch == self->_focusRequestEpoch) {
++            self->_pendingFocusRequestId = nil;
++        }
+     });
+ }
+ 
+ - (void)css_blur:(NSDictionary *)args  {
+-    [self resignFirstResponder];
++    ++_focusRequestEpoch;
++    NSString *rawRequestId = args[KRC_PARAM_KEY];
++    _pendingBlurRequestId = rawRequestId.length > 0 ? @([rawRequestId longLongValue]) : nil;
++    _pendingFocusRequestId = nil;
++    if (!self.isFirstResponder || ![self resignFirstResponder]) {
++        _pendingBlurRequestId = nil;
++    }
++}
++
++- (void)css_cancelPendingFocus:(NSDictionary *)args {
++    ++_focusRequestEpoch;
++    _pendingFocusRequestId = nil;
+ }
+ 
+ - (void)css_setText:(NSDictionary *)args {
+@@ -489,15 +520,27 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+ 
+ 
+ - (void)textFieldDidBeginEditing:(UITextField *)textField {  // 聚焦
++    _pendingBlurRequestId = nil;
+     if (self.css_inputFocus) {
+-        self.css_inputFocus(@{@"text": textField.text.copy ?: @""});
++        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
++        if (_pendingFocusRequestId) {
++            payload[@"focusRequestId"] = _pendingFocusRequestId;
++        }
++        self.css_inputFocus(payload);
+     }
++    _pendingFocusRequestId = nil;
+ }
+ 
+ - (void)textFieldDidEndEditing:(UITextField *)textField {  // 失焦
++    _pendingFocusRequestId = nil;
+     if (self.css_inputBlur) {
+-        self.css_inputBlur(@{@"text": textField.text.copy ?: @""});
++        NSMutableDictionary *payload = [@{@"text": textField.text.copy ?: @""} mutableCopy];
++        if (_pendingBlurRequestId) {
++            payload[@"focusRequestId"] = _pendingBlurRequestId;
++        }
++        self.css_inputBlur(payload);
+     }
++    _pendingBlurRequestId = nil;
+ }
+ 
+ - (void)textFieldDidChangeSelection:(UITextField *)textField {
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorCommon.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorCommon.h
+index 87331ce438ee9281d26b7d2a9fbd3a3cb9fb9dd9..eab5f5f8cb3a064c24356f092c50a4469032d38e 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorCommon.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorCommon.h
+@@ -282,6 +282,7 @@ static constexpr const char *kTextInputState = "textInputState";
+ 
+ static constexpr const char kMethodFocus[] = "focus";
+ static constexpr const char kMethodBlur[] = "blur";
++static constexpr const char kMethodCancelPendingFocus[] = "cancelPendingFocus";
+ static constexpr const char kMethodSetText[] = "setText";
+ static constexpr const char kMethodGetCursorIndex[] = "getCursorIndex";
+ static constexpr const char kMethodSetCursorIndex[] = "setCursorIndex";
+@@ -346,6 +347,8 @@ struct KRTextEditorState {
+     // 抑制 textDidChange / textInputStateChange / selectionChange 三个回调，
+     // 避免业务层 set->callback->set 形成回环。
+     bool is_setting_text_input_state_ = false;
++    int64_t pending_focus_request_id_ = 0;
++    int64_t pending_blur_request_id_ = 0;
+ 
+     KRRenderCallback text_did_change_callback_;
+     KRRenderCallback input_focus_callback_;
+@@ -772,10 +775,11 @@ inline void UpdateSingleLine(ArkUI_NodeHandle node, bool single_line) {
+ }
+ 
+ // Focus / Blur：使用通用 NODE_FOCUS_STATUS。
+-inline void UpdateFocusStatus(ArkUI_NodeHandle node, bool focus) {
++inline bool UpdateFocusStatus(ArkUI_NodeHandle node, bool focus) {
+     ArkUI_NumberValue value = {.i32 = focus ? 1 : 0};
+     ArkUI_AttributeItem item = {&value, 1};
+-    kuikly::util::GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item);
++    return kuikly::util::GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item) ==
++           ARKUI_ERROR_CODE_NO_ERROR;
+ }
+ 
+ // focusable
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.cpp
+index da15eaed2dc92aee02aabe1ab2bfc182866b3058..02bd6f322a2cb212826d68d57bce7a46d24c3751 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.cpp
+@@ -421,9 +421,11 @@ void KRTextEditorFieldView::CallMethod(const std::string &method, const KRAnyVal
+ #else
+     using namespace kuikly::text_editor;
+     if (kuikly::util::isEqual(method, kMethodFocus)) {
+-        Focus();
++        Focus(params ? params->toLong() : 0);
+     } else if (kuikly::util::isEqual(method, kMethodBlur)) {
+-        Blur();
++        Blur(params ? params->toLong() : 0);
++    } else if (kuikly::util::isEqual(method, kMethodCancelPendingFocus)) {
++        state_.pending_focus_request_id_ = 0;
+     } else if (kuikly::util::isEqual(method, kMethodSetText)) {
+         SetContentText(params->toString());
+     } else if (kuikly::util::isEqual(method, kMethodGetCursorIndex)) {
+@@ -503,19 +505,31 @@ void KRTextEditorFieldView::SetSelectionStartPosition(uint32_t index) {
+ #endif
+ }
+ 
+-void KRTextEditorFieldView::Focus() {
++void KRTextEditorFieldView::Focus(int64_t request_id) {
+ #if KUIKLY_TEXT_EDITOR_AVAILABLE
+-    kuikly::text_editor::UpdateFocusStatus(GetNode(), true);
++    state_.pending_focus_request_id_ = request_id;
++    state_.pending_blur_request_id_ = 0;
++    if (!kuikly::text_editor::UpdateFocusStatus(GetNode(), true)) {
++        state_.pending_focus_request_id_ = 0;
++    }
+ #endif
+ }
+ 
+-void KRTextEditorFieldView::Blur() {
++void KRTextEditorFieldView::Blur(int64_t request_id) {
+ #if KUIKLY_TEXT_EDITOR_AVAILABLE
++    state_.pending_blur_request_id_ = request_id;
++    state_.pending_focus_request_id_ = 0;
+     // 优先走 controller 的 StopEditing（更精准收键盘），再 fallback 到 FocusStatus
+-    if (state_.controller_) {
+-        OH_ArkUI_TextEditorStyledStringController_StopEditing(state_.controller_);
+-    } else {
+-        kuikly::text_editor::UpdateFocusStatus(GetNode(), false);
++    bool requested = false;
++    if (state_.controller_ && OH_ArkUI_TextEditorStyledStringController_StopEditing) {
++        requested = OH_ArkUI_TextEditorStyledStringController_StopEditing(state_.controller_) ==
++                    ARKUI_ERROR_CODE_NO_ERROR;
++    }
++    if (!requested) {
++        requested = kuikly::text_editor::UpdateFocusStatus(GetNode(), false);
++    }
++    if (!requested) {
++        state_.pending_blur_request_id_ = 0;
+     }
+ #endif
+ }
+@@ -609,21 +623,31 @@ void KRTextEditorFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
+ 
+ void KRTextEditorFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
+     (void)event;
++    state_.pending_blur_request_id_ = 0;
+     if (state_.input_focus_callback_) {
+         KRRenderValueMap map;
+         // 上抛 raw 而非 flat（与 textDidChange 一致），避免业务拿到带占位空格的字符串。
+         map["text"] = NewKRRenderValue(state_.cached_text_);
++        if (state_.pending_focus_request_id_ > 0) {
++            map["focusRequestId"] = NewKRRenderValue(state_.pending_focus_request_id_);
++        }
+         state_.input_focus_callback_(NewKRRenderValue(map));
+     }
++    state_.pending_focus_request_id_ = 0;
+ }
+ 
+ void KRTextEditorFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
+     (void)event;
++    state_.pending_focus_request_id_ = 0;
+     if (state_.input_blur_callback_) {
+         KRRenderValueMap map;
+         map["text"] = NewKRRenderValue(state_.cached_text_);
++        if (state_.pending_blur_request_id_ > 0) {
++            map["focusRequestId"] = NewKRRenderValue(state_.pending_blur_request_id_);
++        }
+         state_.input_blur_callback_(NewKRRenderValue(map));
+     }
++    state_.pending_blur_request_id_ = 0;
+ }
+ 
+ void KRTextEditorFieldView::OnInputReturn(ArkUI_NodeEvent *event) {
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.h
+index 972d02bacd6355a0b77fe4e13863f71bcb3a054f..04a04252f93c6e2967de8743eb4461eb090a86ee 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextEditorFieldView.h
+@@ -75,8 +75,8 @@ class KRTextEditorFieldView : public IKRRenderViewExport {
+     void SetSelectionStartPosition(uint32_t index);
+ 
+     // Focus/Blur
+-    void Focus();
+-    void Blur();
++    void Focus(int64_t request_id = 0);
++    void Blur(int64_t request_id = 0);
+     void GetCursorIndex(const KRRenderCallback &callback);
+     void SetCursorIndex(uint32_t index);
+ 
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.cpp
+index 29fa751ff90c24f2cbbe380b1d42a652353e70b6..d908f4a57b17ffe83fb3ff10e5abfa75767a8323 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.cpp
+@@ -51,6 +51,7 @@ constexpr char kPropTextInputState[] = "textInputState"; // 受控组件模式
+ 
+ constexpr char kMethodFocus[] = "focus";
+ constexpr char kMethodBlur[] = "blur";
++constexpr char kMethodCancelPendingFocus[] = "cancelPendingFocus";
+ constexpr char kMethodSetText[] = "setText";
+ constexpr char kMethodGetCursorIndex[] = "getCursorIndex";
+ constexpr char kMethodSetCursorIndex[] = "setCursorIndex";
+@@ -140,8 +141,8 @@ ArkUI_EnterKeyType KRTextFieldView::GetInputNodeEnterKeyType(){
+ void KRTextFieldView::UpdateInputNodeMaxLength(int maxLength){
+     kuikly::util::UpdateInputNodeMaxLength(GetNode(), maxLength);  // 直接限制
+ }
+-void KRTextFieldView::UpdateInputNodeFocusStatus(int status){
+-    kuikly::util::UpdateInputNodeFocusStatus(GetNode(), status);
++bool KRTextFieldView::UpdateInputNodeFocusStatus(int status){
++    return kuikly::util::UpdateInputNodeFocusStatus(GetNode(), status);
+ }
+ uint32_t KRTextFieldView::GetInputNodeSelectionStartPosition(){
+     return kuikly::util::GetInputNodeSelectionStartPosition(GetNode());
+@@ -358,9 +359,11 @@ void KRTextFieldView::OnEvent(ArkUI_NodeEvent *event, const ArkUI_NodeEventType
+ void KRTextFieldView::CallMethod(const std::string &method, const KRAnyValue &params,
+                                  const KRRenderCallback &callback) {
+     if (kuikly::util::isEqual(method, kMethodFocus)) {  // 获焦
+-        Focus();
++        Focus(params ? params->toLong() : 0);
+     } else if (kuikly::util::isEqual(method, kMethodBlur)) {  // 失焦
+-        Blur();
++        Blur(params ? params->toLong() : 0);
++    } else if (kuikly::util::isEqual(method, kMethodCancelPendingFocus)) {
++        pending_focus_request_id_ = 0;
+     } else if (kuikly::util::isEqual(method, kMethodSetText)) {  // 主动设置文本
+         SetContentText(params->toString());
+     } else if (kuikly::util::isEqual(method, kMethodGetCursorIndex)) {  // 获取光标位置
+@@ -379,15 +382,23 @@ void KRTextFieldView::CallMethod(const std::string &method, const KRAnyValue &pa
+ /**
+  * 输入框获焦（弹起键盘）
+  */
+-void KRTextFieldView::Focus() {
+-    UpdateInputNodeFocusStatus(1);
++void KRTextFieldView::Focus(int64_t request_id) {
++    pending_focus_request_id_ = request_id;
++    pending_blur_request_id_ = 0;
++    if (!UpdateInputNodeFocusStatus(1)) {
++        pending_focus_request_id_ = 0;
++    }
+ }
+ 
+ /**
+  * 输入框失焦（收起键盘）
+  */
+-void KRTextFieldView::Blur() {
+-    UpdateInputNodeFocusStatus(0);
++void KRTextFieldView::Blur(int64_t request_id) {
++    pending_blur_request_id_ = request_id;
++    pending_focus_request_id_ = 0;
++    if (!UpdateInputNodeFocusStatus(0)) {
++        pending_blur_request_id_ = 0;
++    }
+ }
+ 
+ /**
+@@ -612,21 +623,31 @@ void KRTextFieldView::OnTextDidChanged(ArkUI_NodeEvent *event) {
+  * 获焦回调
+  */
+ void KRTextFieldView::OnInputFocus(ArkUI_NodeEvent *event) {
++    pending_blur_request_id_ = 0;
+     if (input_focus_callback_) {
+         KRRenderValueMap map;
+         map["text"] = NewKRRenderValue(GetContentText());
++        if (pending_focus_request_id_ > 0) {
++            map["focusRequestId"] = NewKRRenderValue(pending_focus_request_id_);
++        }
+         input_focus_callback_(NewKRRenderValue(map));
+     }
++    pending_focus_request_id_ = 0;
+ }
+ /**
+  * 失焦回调
+  */
+ void KRTextFieldView::OnInputBlur(ArkUI_NodeEvent *event) {
++    pending_focus_request_id_ = 0;
+     if (input_blur_callback_) {
+         KRRenderValueMap map;
+         map["text"] = NewKRRenderValue(GetContentText());
++        if (pending_blur_request_id_ > 0) {
++            map["focusRequestId"] = NewKRRenderValue(pending_blur_request_id_);
++        }
+         input_blur_callback_(NewKRRenderValue(map));
+     }
++    pending_blur_request_id_ = 0;
+ }
+ /**
+  * 按下完成键回调
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h
+index 41529351369a06e81cbac30b6f6e6d10d1fe1000..f7fda18dff055103719fb8e044ff52f2b54b6458 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/input/KRTextFieldView.h
+@@ -86,7 +86,7 @@ class KRTextFieldView : public IKRRenderViewExport {
+      */
+     virtual ArkUI_EnterKeyType GetInputNodeEnterKeyType();
+     virtual void UpdateInputNodeMaxLength(int maxLength);
+-    virtual void UpdateInputNodeFocusStatus(int status);
++    virtual bool UpdateInputNodeFocusStatus(int status);
+     virtual uint32_t GetInputNodeSelectionStartPosition();
+     virtual void UpdateInputNodeSelectionStartPosition(uint32_t index);
+     /**
+@@ -122,16 +122,18 @@ class KRTextFieldView : public IKRRenderViewExport {
+     KRRenderCallback selection_change_callback_;          // 选区变化callback（与 Android KRTextFieldView.selectionChangeCallback 对齐）
+     bool auto_hide_KeyBoard_on_ImeAction_ = false;        // 在触发各种IME 按钮时是否回收键盘，默认是不回收
+     bool is_setting_text_input_state_ = false;            // 通过 setTextInputState 主动写入期间，抑制 textInputStateChange 回流防止业务死循环
++    int64_t pending_focus_request_id_ = 0;
++    int64_t pending_blur_request_id_ = 0;
+ 
+     /**
+      * 输入框获焦（弹起键盘）
+      */
+-    void Focus();
++    void Focus(int64_t request_id = 0);
+ 
+     /**
+      * 输入框失焦（收起键盘）
+      */
+-    void Blur();
++    void Blur(int64_t request_id = 0);
+ 
+     /**
+      * 获取光标位置
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp
+index 68b46ac0bd3899ec2413a1f3290c974d8f209325..7f1630fd2af7bfc2992fcd680e5798eafd499a26 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.cpp
+@@ -1326,10 +1326,10 @@ void SetArkUIPadding(ArkUI_NodeHandle handle, float start, float top, float end,
+     GetNodeApi()->setAttribute(handle, NODE_PADDING, &item);
+ }
+ 
+-void UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status) {
++bool UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status) {
+     ArkUI_NumberValue value[] = {{.i32 = status}};
+     ArkUI_AttributeItem item = {value, sizeof(value) / sizeof(ArkUI_NumberValue)};
+-    GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item);
++    return GetNodeApi()->setAttribute(node, NODE_FOCUS_STATUS, &item) == ARKUI_ERROR_CODE_NO_ERROR;
+ }
+ 
+ void UpdateInputNodeFocusable(ArkUI_NodeHandle node, int32_t enable) {
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h
+index aac1ce58f46efbbc5a4c0e87e99fd562dd6750f2..d606cbb15475faeb5b22adc7283572f30727c47e 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRViewUtil.h
+@@ -269,7 +269,7 @@ void SetArkUIMargin(ArkUI_NodeHandle handle, float start, float top, float end,
+ 
+ void SetArkUIPadding(ArkUI_NodeHandle handle, float start, float top, float end, float bottom);
+ 
+-void UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status);
++bool UpdateInputNodeFocusStatus(ArkUI_NodeHandle node, int32_t status);
+ 
+ void UpdateInputNodeFocusable(ArkUI_NodeHandle node, int32_t enable);
+ 
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/AutoHeightTextAreaView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/AutoHeightTextAreaView.kt
+index 632483f059f0dfccdc7364cd01c9d409f3395a83..9a2bf6aa832ea4a6bf1df7a76415db32bfb68f8c 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/AutoHeightTextAreaView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/AutoHeightTextAreaView.kt
+@@ -92,15 +92,21 @@ class AutoHeightTextAreaView(val singleLine: Boolean = false) :
+         return true
+     }
+ 
+-    fun focus() {
++    fun focus(requestId: Long? = null) {
+         performTaskWhenRenderViewDidLoad {
+-            renderView?.callMethod("focus", "")
++            renderView?.callMethod("focus", requestId?.toString().orEmpty())
+         }
+     }
+ 
+-    fun blur() {
++    fun blur(requestId: Long? = null) {
+         performTaskWhenRenderViewDidLoad {
+-            renderView?.callMethod("blur", "")
++            renderView?.callMethod("blur", requestId?.toString().orEmpty())
++        }
++    }
++
++    fun cancelPendingFocus(requestId: Long) {
++        performTaskWhenRenderViewDidLoad {
++            renderView?.callMethod("cancelPendingFocus", requestId.toString())
+         }
+     }
+ 
+@@ -244,4 +250,4 @@ class AutoHeightTextAreaView(val singleLine: Boolean = false) :
+         remeasureText(text)
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt
+index 088de9a04dd0a10d8881d8c3968a538bc9f189d0..a182cdb382d260812d366f0ff6524e38b9d069c0 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/InputView.kt
+@@ -394,7 +394,9 @@ class InputAttr : Attr() {
+ data class InputParams(
+     val text: String,
+     val imeAction: String? = null,
+-    val length: Int? = null
++    val length: Int? = null,
++    val focusRequestId: Long? = null,
++    val focusIntentOnly: Boolean = false,
+ )
+ 
+ data class KeyboardParams(
+@@ -457,7 +459,14 @@ class InputEvent : Event() {
+         register(INPUT_FOCUS){
+             it as JSONObject
+             val text = it.optString("text")
+-            handler(InputParams(text))
++            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
++            handler(
++                InputParams(
++                    text = text,
++                    focusRequestId = focusRequestId,
++                    focusIntentOnly = it.optBoolean("focusIntentOnly"),
++                ),
++            )
+         }
+     }
+ 
+@@ -469,7 +478,8 @@ class InputEvent : Event() {
+         register(INPUT_BLUR){
+             it as JSONObject
+             val text = it.optString("text")
+-            handler(InputParams(text))
++            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
++            handler(InputParams(text, focusRequestId = focusRequestId))
+         }
+     }
+ 
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
+index 123735b48ab08532e972732379c3182b7d6e0f53..f1195407d1da29143954440dc58193d3d47a703b 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
+@@ -722,7 +722,14 @@ open class TextAreaEvent : Event() {
+         this.register(INPUT_FOCUS){
+             it as JSONObject
+             val text = it.optString("text")
+-            handler(InputParams(text))
++            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
++            handler(
++                InputParams(
++                    text = text,
++                    focusRequestId = focusRequestId,
++                    focusIntentOnly = it.optBoolean("focusIntentOnly"),
++                ),
++            )
+         }
+     }
+     /**
+@@ -733,7 +740,8 @@ open class TextAreaEvent : Event() {
+         this.register(INPUT_BLUR){
+             it as JSONObject
+             val text = it.optString("text")
+-            handler(InputParams(text))
++            val focusRequestId = it.optLong("focusRequestId").takeIf { id -> id > 0L }
++            handler(InputParams(text, focusRequestId = focusRequestId))
+         }
+     }
+ 

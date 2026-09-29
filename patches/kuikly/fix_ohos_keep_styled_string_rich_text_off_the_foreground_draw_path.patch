@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:13:06 +0000
+Subject: fix(ohos): keep styled-string rich text off the foreground draw path
+
+When a RichText node renders through the ArkUI StyledString (V2) path, the
+view still stayed registered for ON_FOREGROUND_DRAW and painted the same
+text a second time. Track the active mode, unregister the custom draw event
+while the StyledString is attached, and clear the StyledString attribute
+when falling back to the typography (V1) path.
+
+Fork-Patch: ohos-richtext-styledstring-no-foreground-draw
+Origin: 652ba003
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
+index cd2f1519f063d24c7c688c851a897bb2892a1781..bfa37b5ee8e92193b4c218fbd537a1668c91f4fd 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
+@@ -113,7 +113,9 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
+     // shadow->StyledStringEnabled()（含 image span 时返 false），本处只读一个结果。
+     bool use_styled_string = textShadow && textShadow->StyledStringEnabled();
+     bool has_image_span = textShadow && textShadow->HasImageSpans();
++    use_styled_string_ = use_styled_string;
+     if(use_styled_string){
++        KREventDispatchCenter::GetInstance().UnregisterCustomEvent(shared_from_this());
+         ArkUI_AttributeItem item;
+         if(std::shared_ptr<KRParagraph> paragraph = std::dynamic_pointer_cast<KRRichTextShadow>(shadow)->GetParagraph()){
+             item.object = paragraph->GetStyledString();
+@@ -127,6 +129,8 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
+             paragraph_ = paragraph;
+         }
+     }else {
++        kuikly::util::GetNodeApi()->resetAttribute(GetNode(), NODE_TEXT_CONTENT_WITH_STYLED_STRING);
++        paragraph_ = nullptr;
+         KREventDispatchCenter::GetInstance().RegisterCustomEvent(shared_from_this(), ARKUI_NODE_CUSTOM_EVENT_ON_FOREGROUND_DRAW);
+         kuikly::util::GetNodeApi()->markDirty(GetNode(), NODE_NEED_RENDER);
+     }
+@@ -149,6 +153,9 @@ void KRRichTextView::SetShadow(const std::shared_ptr<IKRRenderShadowExport> &sha
+ 
+ void KRRichTextView::DidMoveToParentView() {
+     IKRRenderViewExport::DidMoveToParentView();
++    if (use_styled_string_) {
++        return;
++    }
+     auto self = shared_from_this();
+     KREventDispatchCenter::GetInstance().RegisterCustomEvent(self, ARKUI_NODE_CUSTOM_EVENT_ON_FOREGROUND_DRAW);
+ }
+@@ -158,10 +165,14 @@ void KRRichTextView::DidRemoveFromParentView() {
+     IKRRenderViewExport::DidRemoveFromParentView();
+     shadow_ = nullptr;
+     paragraph_ = nullptr;
++    use_styled_string_ = false;
+     last_draw_frame_width_ = -1.0;
+ }
+ 
+ void KRRichTextView::OnForegroundDraw(ArkUI_NodeCustomEvent *event) {
++    if (use_styled_string_) {
++        return;
++    }
+     if (shadow_ == nullptr || GetFrame().width == 0) {
+         KR_LOG_ERROR << "OnForegroundDraw, shadow or frame not ready, shadow:" << shadow_.get()
+                      << ", frame width:" << GetFrame().width;
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h
+index 2f9d770bd46ee00a523b22a8f6cbd887c13e6eca..9836f0b74908ab3bc49ab69043be372be3ef4d62 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.h
+@@ -169,6 +169,7 @@ class KRRichTextView : public IKRRenderViewExport {
+  private:
+     std::shared_ptr<KRParagraph> paragraph_;
+     std::shared_ptr<IKRRenderShadowExport> shadow_;
++    bool use_styled_string_ = false;
+     float last_draw_frame_width_ = -1.0;
+     float line_break_margin_ = 0;
+     KRParagraphSelectionInfo selection_rects_;

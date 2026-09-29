@@ -1,0 +1,222 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:23:13 +0000
+Subject: fix(compose): propagate TextStyle.fontFamily to native text inputs
+
+Compose TextField text styles dropped fontFamily. Map GenericFontFamily /
+FontListFontFamily onto a new TextAreaAttr.fontFamily prop, and on iOS
+apply it in KRTextFieldView/KRTextAreaView through a shared p_updateFont
+that also passes the root view contextParam so dynamically loaded custom
+fonts resolve (KRConvertUtil UIFont: fontFamily + contextParam).
+
+Fork-Patch: input-font-family
+Origin: 9110e97f, 539736ba
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicTextField.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicTextField.kt
+index e4c7b09f8b187545c43efccd2a1fad438a5ce54a..a69860d01be207f31e4b54bad2fcf14bb7fdf31b 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicTextField.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicTextField.kt
+@@ -36,6 +36,9 @@ import com.tencent.kuikly.compose.ui.graphics.Color
+ import com.tencent.kuikly.compose.ui.graphics.SolidColor
+ import com.tencent.kuikly.compose.ui.text.TextLayoutResult
+ import com.tencent.kuikly.compose.ui.text.TextStyle
++import com.tencent.kuikly.compose.ui.text.font.FontFamily
++import com.tencent.kuikly.compose.ui.text.font.FontListFontFamily
++import com.tencent.kuikly.compose.ui.text.font.GenericFontFamily
+ import com.tencent.kuikly.compose.ui.text.input.ImeAction
+ import com.tencent.kuikly.compose.ui.text.input.KeyboardType
+ import com.tencent.kuikly.compose.ui.text.input.TextFieldValue
+@@ -43,6 +46,7 @@ import com.tencent.kuikly.compose.ui.text.input.VisualTransformation
+ import com.tencent.kuikly.compose.ui.text.style.TextAlign
+ import com.tencent.kuikly.compose.ui.unit.Density
+ import com.tencent.kuikly.compose.ui.unit.isSpecified
++import com.tencent.kuikly.compose.resources.toKuiklyFontFamily
+ import com.tencent.kuikly.core.views.TextAreaAttr
+ 
+ internal fun TextAreaAttr.setTextStyle(style: TextStyle, density: Density) {
+@@ -75,12 +79,21 @@ internal fun TextAreaAttr.setTextStyle(style: TextStyle, density: Density) {
+             fontWeightNormal()
+         }
+     }
++    applyFontFamily(style.fontFamily)
+ 
+     if (style.lineHeight.isSpecified) {
+         lineHeight(this.scaleToDensity(density, style.lineHeight.value))
+     }
+ }
+ 
++private fun TextAreaAttr.applyFontFamily(family: FontFamily?) {
++    when (family) {
++        is GenericFontFamily -> fontFamily(family.name)
++        is FontListFontFamily -> fontFamily(family.fonts.toKuiklyFontFamily())
++        else -> fontFamily("")
++    }
++}
++
+ @Composable
+ fun BasicTextField(
+     state: TextFieldState,
+diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
+index 3b424a30f5880f7b06d0108cd9799367b44fcc38..f6abdd644c5ab72c79970bd8083198d9676bfa60 100644
+--- a/core-render-ios/Extension/Components/KRTextAreaView.m
++++ b/core-render-ios/Extension/Components/KRTextAreaView.m
+@@ -24,6 +24,8 @@
+ // 字典key常量
+ NSString *const KRFontSizeKey = @"fontSize";
+ NSString *const KRFontWeightKey = @"fontWeight";
++NSString *const KRFontFamilyKey = @"fontFamily";
++NSString *const KRFontContextParamKey = @"contextParam";
+ static const NSInteger KRTextAreaViewKeyEventTypeDown = 2;
+ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ 
+@@ -41,6 +43,8 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ @property (nonatomic, strong)  NSNumber *KUIKLY_PROP(fontSize);
+ /** attr is fontWeight */
+ @property (nonatomic, strong)  NSString *KUIKLY_PROP(fontWeight);
++/** attr is fontFamily */
++@property (nonatomic, strong)  NSString *KUIKLY_PROP(fontFamily);
+ #if TARGET_OS_OSX
+ /** clipPath for macOS - 使用 KUIKLY_PROP 命名规范，仅在 macOS 声明避免覆盖 iOS 上 UIView+CSS category */
+ @property (nonatomic, copy) NSString *KUIKLY_PROP(clipPath);
+@@ -104,6 +108,7 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ - (BOOL)p_shouldForwardHardwareTabKey;
+ - (void)p_forwardHardwareTabKeyWithShiftPressed:(BOOL)shiftPressed;
+ #endif
++- (void)p_updateFont;
+ 
+ @end
+ 
+@@ -334,14 +339,17 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ 
+ - (void)setCss_fontSize:(NSNumber *)css_fontSize {
+     _css_fontSize = css_fontSize;
+-    self.font = [KRConvertUtil UIFont:@{KRFontSizeKey: css_fontSize ?: @(16),
+-                                        KRFontWeightKey: _css_fontWeight ?: @"400"}];
+-    [self setNeedsLayout];
++    [self p_updateFont];
+ }
+ 
+ - (void)setCss_fontWeight:(NSString *)css_fontWeight {
+     _css_fontWeight = css_fontWeight;
+-    [self setCss_fontSize:_css_fontSize];
++    [self p_updateFont];
++}
++
++- (void)setCss_fontFamily:(NSString *)css_fontFamily {
++    _css_fontFamily = css_fontFamily;
++    [self p_updateFont];
+ }
+ 
+ - (void)setCss_placeholder:(NSString *)css_placeholder {
+@@ -1070,6 +1078,21 @@ static const NSInteger KRTextAreaViewKeyCodeTab = 9;
+ 
+ #pragma mark - private
+ 
++- (void)p_updateFont {
++    NSMutableDictionary *fontStyle = [@{
++        KRFontSizeKey: _css_fontSize ?: @(16),
++        KRFontWeightKey: _css_fontWeight ?: @"400"
++    } mutableCopy];
++    if (_css_fontFamily.length > 0) {
++        fontStyle[KRFontFamilyKey] = _css_fontFamily;
++    }
++    if (self.hr_rootView.contextParam) {
++        fontStyle[KRFontContextParamKey] = self.hr_rootView.contextParam;
++    }
++    self.font = [KRConvertUtil UIFont:fontStyle];
++    [self setNeedsLayout];
++}
++
+ /// iOS 17+ 使用公开属性 insertionPointColor 独立设置光标颜色，避免与 tintColor（选中高亮色）冲突
+ #if !TARGET_OS_OSX
+ - (void)p_applyNativeCursorColorIfNeeded {
+diff --git a/core-render-ios/Extension/Components/KRTextFieldView.m b/core-render-ios/Extension/Components/KRTextFieldView.m
+index da6c4497c3847a4e356e4f55fcb9c300a3dcc66e..f38870680bcc0f0142c2937cdfbe3f5bfc48c5db 100644
+--- a/core-render-ios/Extension/Components/KRTextFieldView.m
++++ b/core-render-ios/Extension/Components/KRTextFieldView.m
+@@ -21,6 +21,8 @@
+ // 字典key常量
+ NSString *const KRVFontSizeKey = @"fontSize";
+ NSString *const KRVFontWeightKey = @"fontWeight";
++NSString *const KRVFontFamilyKey = @"fontFamily";
++NSString *const KRVFontContextParamKey = @"contextParam";
+ 
+ /*
+  * @brief 暴露给Kotlin侧调用的多行输入框组件
+@@ -34,6 +36,8 @@ NSString *const KRVFontWeightKey = @"fontWeight";
+ @property (nonatomic, strong)  NSNumber *KUIKLY_PROP(fontSize);
+ /** attr is fontWeight */
+ @property (nonatomic, strong)  NSString *KUIKLY_PROP(fontWeight);
++/** attr is fontFamily */
++@property (nonatomic, strong)  NSString *KUIKLY_PROP(fontFamily);
+ /** attr is placeholder */
+ @property (nonatomic, strong)  NSString *KUIKLY_PROP(placeholder);
+ /** attr is textAign */
+@@ -79,6 +83,7 @@ NSString *const KRVFontWeightKey = @"fontWeight";
+ 
+ - (BOOL)p_containsShortcodeToken:(NSString *)rawText;
+ - (BOOL)p_shouldRejectProgrammaticShortcodeInput:(NSString *)rawText;
++- (void)p_updateFont;
+ 
+ @end
+ 
+@@ -227,13 +232,17 @@ NSString *const KRVFontWeightKey = @"fontWeight";
+ 
+ - (void)setCss_fontSize:(NSNumber *)css_fontSize {
+     _css_fontSize = css_fontSize;
+-    self.font = [KRConvertUtil UIFont:@{KRVFontSizeKey: css_fontSize ?: @(16),
+-                                        KRVFontWeightKey: _css_fontWeight ?: @"400"}];
++    [self p_updateFont];
+ }
+ 
+ - (void)setCss_fontWeight:(NSString *)css_fontWeight {
+     _css_fontWeight = css_fontWeight;
+-    [self setCss_fontSize:_css_fontSize];
++    [self p_updateFont];
++}
++
++- (void)setCss_fontFamily:(NSString *)css_fontFamily {
++    _css_fontFamily = css_fontFamily;
++    [self p_updateFont];
+ }
+ 
+ - (void)setCss_placeholder:(NSString *)css_placeholder {
+@@ -573,6 +582,20 @@ NSString *const KRVFontWeightKey = @"fontWeight";
+ 
+ #pragma mark - private
+ 
++- (void)p_updateFont {
++    NSMutableDictionary *fontStyle = [@{
++        KRVFontSizeKey: _css_fontSize ?: @(16),
++        KRVFontWeightKey: _css_fontWeight ?: @"400"
++    } mutableCopy];
++    if (_css_fontFamily.length > 0) {
++        fontStyle[KRVFontFamilyKey] = _css_fontFamily;
++    }
++    if (self.hr_rootView.contextParam) {
++        fontStyle[KRVFontContextParamKey] = self.hr_rootView.contextParam;
++    }
++    self.font = [KRConvertUtil UIFont:fontStyle];
++}
++
+ - (void)p_addKeyboardNotificationIfNeed {
+     if (_didAddKeyboardNotification) {
+         return ;
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
+index 4be5de3cdec17586534c7259b68efa01d6127a98..123735b48ab08532e972732379c3182b7d6e0f53 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextAreaView.kt
+@@ -352,6 +352,11 @@ open class TextAreaAttr : Attr() {
+         return this
+     }
+ 
++    fun fontFamily(fontFamily: String): TextAreaAttr {
++        TextConst.FONT_FAMILY with fontFamily
++        return this
++    }
++
+     fun textAlignCenter(): TextAreaAttr {
+         TextConst.TEXT_ALIGN with "center"
+         return this

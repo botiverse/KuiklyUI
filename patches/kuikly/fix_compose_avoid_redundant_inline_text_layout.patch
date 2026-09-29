@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:04:00 +0000
+Subject: fix(compose): avoid redundant inline text layout
+
+Only take the inline-content layout path when the annotated string really
+contains inline content, and give MultiParagraph value equality so an
+unchanged placeholder rect list no longer writes state and re-triggers
+layout on every onTextLayout callback.
+
+Fork-Patch: compose-avoid-redundant-inline-text-layout
+Origin: a50018cd
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicText.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicText.kt
+index 6bcf421ad09eea60c439f95f0026bf2dc3ab1958..f870f50a30984f79824c185de769ea1983147875 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicText.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/BasicText.kt
+@@ -194,7 +194,7 @@ private fun _BasicText(
+     color: ColorProducer? = null
+ ) {
+     val inText = annoText ?: AnnotatedString(text ?: "")
+-    val hasInlineContent = inlineContent.isNotEmpty()
++    val hasInlineContent = inlineContent.isNotEmpty() && inText.hasInlineContent()
+ 
+     if (hasInlineContent) {
+         LayoutWithLinksAndInlineContent(
+@@ -257,8 +257,10 @@ private fun LayoutWithLinksAndInlineContent(
+                 softWrap = softWrap,
+                 maxLines = maxLines,
+                 onTextLayout = { result ->
+-                    // 获取 placeholder 的位置信息
+-                    measuredPlaceholderPositions.value = result.placeholderRects
++                    val placeholderRects = result.placeholderRects
++                    if (measuredPlaceholderPositions.value != placeholderRects) {
++                        measuredPlaceholderPositions.value = placeholderRects
++                    }
+                     onTextLayout?.invoke(result)
+                 },
+                 inlineContent = inlineContent,
+@@ -406,4 +408,4 @@ val LocalTextStyle get() = com.tencent.kuikly.compose.material3.LocalTextStyle
+ )
+ @Composable
+ fun ProvideTextStyle(value: TextStyle, content: @Composable () -> Unit) =
+-    com.tencent.kuikly.compose.material3.ProvideTextStyle(value, content)
+\ No newline at end of file
++    com.tencent.kuikly.compose.material3.ProvideTextStyle(value, content)
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/MultiParagraph.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/MultiParagraph.kt
+index ae7e53d811d01df8f5291e71bf275e52843ef2d4..cf4d3110ce5673c306b5ced2eb09d65da5fef668 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/MultiParagraph.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/MultiParagraph.kt
+@@ -35,5 +35,19 @@ class MultiParagraph(
+     val lineCount: Int = 0,
+     val placeholderRects: List<Rect?>
+ ) {
++    override fun equals(other: Any?): Boolean {
++        if (this === other) return true
++        if (other !is MultiParagraph) return false
+ 
++        if (lineCount != other.lineCount) return false
++        if (placeholderRects != other.placeholderRects) return false
++
++        return true
++    }
++
++    override fun hashCode(): Int {
++        var result = lineCount
++        result = 31 * result + placeholderRects.hashCode()
++        return result
++    }
+ }

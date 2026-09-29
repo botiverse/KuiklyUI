@@ -1,0 +1,960 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:07:44 +0000
+Subject: feat(compose): add preemptible context idle lane
+ (withKuiklyIdleContext)
+
+Adds withKuiklyIdleContext(pagerId) for speculative work that must yield to
+normal context work. Common admission logic runs one idle callback at a time
+after the pager's normal work drains and re-admits when new work arrives.
+Android and OHOS back it with native idle admission at background priority.
+iOS is a stub for now: idle admissions are posted as normal tasks on the
+#1566 dedicated context thread (same API, not preemptible natively).
+
+Fork-Patch: compose-context-idle-lane
+Origin: a80c06de
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.android.kt b/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.android.kt
+index 10d6004006ba1e734ffa3d59508d87c243b2969f..b3b6db56019dec09271d79cc7bb4ae121104cd59 100644
+--- a/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.android.kt
++++ b/compose/src/androidMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.android.kt
+@@ -30,7 +30,13 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
+     }
+ }
+ 
++internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
++    KuiklyRenderCoreContextScheduler.scheduleIdleTask {
++        KuiklyContextScheduler.runIdleTask(pagerId)
++    }
++}
++
+ internal actual inline fun platformNotifyKuiklyException(t: Throwable) {
+     // todo support notify exception
+     BridgeManager.callExceptionMethod(t.stackTraceToString())
+-}
+\ No newline at end of file
++}
+diff --git a/compose/src/appleMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ios.kt b/compose/src/appleMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ios.kt
+index fa701f7c6608a44a894c0ed7ecaa1ec479412f01..fc3472021b5b42823472a41f9886a49e82d71cc3 100644
+--- a/compose/src/appleMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ios.kt
++++ b/compose/src/appleMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ios.kt
+@@ -38,6 +38,20 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
+     })
+ }
+ 
++/**
++ * iOS stub for the idle lane. The #1566 context thread has no native idle
++ * admission yet, so an idle admission is posted as a normal context task on
++ * the dedicated thread. The common admission logic in [KuiklyContextScheduler]
++ * still runs idle callbacks one at a time, only after the pager's normal
++ * Kotlin work has drained; it is just not preempted by native-side work.
++ */
++internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
++    com_tencent_kuikly_ScheduleContextTask(pagerId, staticCFunction { pagerIdBytes: CPointer<ByteVar>? ->
++        val idStr = pagerIdBytes?.toKString() ?: return@staticCFunction
++        KuiklyContextScheduler.runIdleTask(idStr)
++    })
++}
++
+ internal actual inline fun platformNotifyKuiklyException(t: Throwable) {
+     BridgeManager.callExceptionMethod(t.stackTraceToString())
+-}
+\ No newline at end of file
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/KuiklyIdleContext.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/KuiklyIdleContext.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..12b4b30dac513535c538cd66d7bd8ade2cbc29bb
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/KuiklyIdleContext.kt
+@@ -0,0 +1,25 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ */
++package com.tencent.kuikly.compose.coroutines
++
++import com.tencent.kuikly.compose.coroutines.internal.IdleComposeDispatcher
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.withContext
++
++/**
++ * Runs speculative work on the Kuikly context idle lane for [pagerId].
++ *
++ * Every continuation of [block] is admitted only after normal context work has
++ * drained. New normal work invalidates a pending admission and runs first.
++ * Callers must keep each non-suspending section bounded: a callback that has
++ * already started cannot be preempted in the middle of arbitrary user code.
++ */
++suspend fun <T> withKuiklyIdleContext(
++    pagerId: String,
++    block: suspend CoroutineScope.() -> T
++): T = withContext(IdleComposeDispatcher(pagerId), block)
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/IdleComposeDispatcher.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/IdleComposeDispatcher.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..6286dc11ef1de76759f37516fe8b692f316c270c
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/IdleComposeDispatcher.kt
+@@ -0,0 +1,37 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ */
++package com.tencent.kuikly.compose.coroutines.internal
++
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.CoroutineDispatcher
++import kotlinx.coroutines.Runnable
++import kotlinx.coroutines.cancel
++import kotlin.coroutines.CoroutineContext
++
++internal class IdleComposeDispatcher(
++    private val pagerId: String
++) : CoroutineDispatcher() {
++
++    override fun isDispatchNeeded(context: CoroutineContext): Boolean = true
++
++    override fun dispatch(context: CoroutineContext, block: Runnable) {
++        KuiklyContextScheduler.runOnKuiklyThreadIdle(pagerId) { cancel ->
++            if (cancel) {
++                context.cancel(CancellationException("The idle task was rejected, Pager($pagerId) is closed."))
++                return@runOnKuiklyThreadIdle
++            }
++            block.run()
++        }
++    }
++
++    override fun toString(): String = "IdleComposeDispatcher($pagerId)"
++
++    override fun equals(other: Any?): Boolean = other is IdleComposeDispatcher && pagerId == other.pagerId
++
++    override fun hashCode(): Int = pagerId.hashCode()
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.kt
+index 2f57a44094117e0c9cb649fa4d4f74196287cbe6..df9f5025c5ffb467be00ec642fe445a7f7679b23 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.kt
+@@ -22,6 +22,11 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
+ 
+     private val taskMap = mutableMapOf<String, MutableList<(Boolean) -> Unit>>()
+     private val scheduleMap = mutableMapOf<String, Boolean>()
++    private val idleTaskMap = mutableMapOf<String, MutableList<(Boolean) -> Unit>>()
++    private val idleScheduleMap = mutableMapOf<String, Boolean>()
++    private val normalGenerationMap = mutableMapOf<String, Long>()
++    private val idleScheduleGenerationMap = mutableMapOf<String, Long>()
++    private var executingIdlePagerId: String? = null
+ 
+     init {
+         platformInitScheduler()
+@@ -40,10 +45,15 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
+      * @param block 任务
+      */
+     fun runOnKuiklyThread(pagerId: String, block: (cancel: Boolean) -> Unit) {
++        if (executingIdlePagerId == pagerId && platformIsOnKuiklyThread(pagerId)) {
++            runOnKuiklyThreadIdle(pagerId, block)
++            return
++        }
+         var needSchedule = false
+         synchronized(this) {
+             val taskList = taskMap[pagerId] ?: mutableListOf<(Boolean) -> Unit>().also { taskMap[pagerId] = it }
+             taskList.add(block)
++            normalGenerationMap[pagerId] = (normalGenerationMap[pagerId] ?: 0L) + 1L
+             if (scheduleMap[pagerId] != true) {
+                 scheduleMap[pagerId] = true
+                 needSchedule = true
+@@ -54,6 +64,23 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
+         }
+     }
+ 
++    /**
++     * Enqueues speculative work on the Kuikly context idle lane.
++     *
++     * Idle work runs one callback at a time only after normal context work has
++     * drained. Normal work queued before the callback executes invalidates the
++     * idle admission and moves the callback behind the new foreground work.
++     * Work scheduled recursively from an idle callback inherits the idle lane.
++     */
++    fun runOnKuiklyThreadIdle(pagerId: String, block: (cancel: Boolean) -> Unit) {
++        synchronized(this) {
++            val taskList = idleTaskMap[pagerId]
++                ?: mutableListOf<(Boolean) -> Unit>().also { idleTaskMap[pagerId] = it }
++            taskList.add(block)
++        }
++        scheduleIdleIfNeeded(pagerId)
++    }
++
+     /**
+      * 执行任务，非线程安全
+      * @param pagerId 页面ID
+@@ -76,6 +103,77 @@ internal object KuiklyContextScheduler : SynchronizedObject() {
+                 platformNotifyKuiklyException(t)
+             }
+         }
++        scheduleIdleIfNeeded(pagerId)
++    }
++
++    /** Executes at most one idle callback. Called by the platform idle lane. */
++    internal fun runIdleTask(pagerId: String) {
++        val cancel = !BridgeManager.containNativeBridge(pagerId)
++        var task: ((Boolean) -> Unit)? = null
++        var shouldReschedule = false
++        synchronized(this) {
++            val scheduledGeneration = idleScheduleGenerationMap.remove(pagerId)
++            idleScheduleMap[pagerId] = false
++            val currentGeneration = normalGenerationMap[pagerId] ?: 0L
++            val hasNormalWork = scheduleMap[pagerId] == true || taskMap[pagerId].isNullOrEmpty().not()
++            val idleTasks = idleTaskMap[pagerId]
++            when (
++                kuiklyIdleAdmissionDecision(
++                    hasIdleWork = idleTasks.isNullOrEmpty().not(),
++                    hasNormalWork = hasNormalWork,
++                    scheduledGeneration = scheduledGeneration,
++                    currentGeneration = currentGeneration
++                )
++            ) {
++                KuiklyIdleAdmissionDecision.Run -> {
++                    val admittedTasks = idleTasks ?: return@synchronized
++                    task = admittedTasks.removeAt(0)
++                    if (admittedTasks.isEmpty()) {
++                        idleTaskMap.remove(pagerId)
++                    }
++                }
++                KuiklyIdleAdmissionDecision.Reschedule -> shouldReschedule = true
++                KuiklyIdleAdmissionDecision.WaitForNormalDrain,
++                KuiklyIdleAdmissionDecision.None -> Unit
++            }
++        }
++        if (shouldReschedule) {
++            scheduleIdleIfNeeded(pagerId)
++            return
++        }
++        val idleTask = task ?: return
++        BridgeManager.currentPageId = pagerId
++        executingIdlePagerId = pagerId
++        try {
++            idleTask(cancel)
++        } catch (t: Throwable) {
++            platformNotifyKuiklyException(t)
++        } finally {
++            executingIdlePagerId = null
++        }
++        scheduleIdleIfNeeded(pagerId)
++    }
++
++    private fun scheduleIdleIfNeeded(pagerId: String) {
++        var needSchedule = false
++        synchronized(this) {
++            val hasIdleWork = idleTaskMap[pagerId].isNullOrEmpty().not()
++            val hasNormalWork = scheduleMap[pagerId] == true || taskMap[pagerId].isNullOrEmpty().not()
++            if (
++                shouldScheduleKuiklyIdle(
++                    hasIdleWork = hasIdleWork,
++                    hasNormalWork = hasNormalWork,
++                    alreadyScheduled = idleScheduleMap[pagerId] == true
++                )
++            ) {
++                idleScheduleMap[pagerId] = true
++                idleScheduleGenerationMap[pagerId] = normalGenerationMap[pagerId] ?: 0L
++                needSchedule = true
++            }
++        }
++        if (needSchedule) {
++            platformScheduleIdleOnKuiklyThread(pagerId)
++        }
+     }
+ 
+ }
+@@ -86,4 +184,6 @@ internal expect inline fun platformIsOnKuiklyThread(pagerId: String): Boolean
+ 
+ internal expect inline fun platformScheduleOnKuiklyThread(pagerId: String)
+ 
++internal expect inline fun platformScheduleIdleOnKuiklyThread(pagerId: String)
++
+ internal expect inline fun platformNotifyKuiklyException(t: Throwable)
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyIdleAdmission.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyIdleAdmission.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e7d0e7f499c321015299b96a3e24bb2b8ae6f9f
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyIdleAdmission.kt
+@@ -0,0 +1,34 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ */
++package com.tencent.kuikly.compose.coroutines.internal
++
++internal enum class KuiklyIdleAdmissionDecision {
++    Run,
++    Reschedule,
++    WaitForNormalDrain,
++    None
++}
++
++internal fun kuiklyIdleAdmissionDecision(
++    hasIdleWork: Boolean,
++    hasNormalWork: Boolean,
++    scheduledGeneration: Long?,
++    currentGeneration: Long
++): KuiklyIdleAdmissionDecision =
++    when {
++        !hasIdleWork -> KuiklyIdleAdmissionDecision.None
++        hasNormalWork -> KuiklyIdleAdmissionDecision.WaitForNormalDrain
++        scheduledGeneration != currentGeneration -> KuiklyIdleAdmissionDecision.Reschedule
++        else -> KuiklyIdleAdmissionDecision.Run
++    }
++
++internal fun shouldScheduleKuiklyIdle(
++    hasIdleWork: Boolean,
++    hasNormalWork: Boolean,
++    alreadyScheduled: Boolean
++): Boolean = hasIdleWork && !hasNormalWork && !alreadyScheduled
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyIdleAdmissionTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyIdleAdmissionTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9211ae5cdfdfeb11f73e60bf8abea16681893d6
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyIdleAdmissionTest.kt
+@@ -0,0 +1,58 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ */
++package com.tencent.kuikly.compose.coroutines.internal
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class KuiklyIdleAdmissionTest {
++
++    @Test
++    fun normalWorkAlwaysWinsOverIdleAdmission() {
++        assertEquals(
++            KuiklyIdleAdmissionDecision.WaitForNormalDrain,
++            kuiklyIdleAdmissionDecision(
++                hasIdleWork = true,
++                hasNormalWork = true,
++                scheduledGeneration = 4,
++                currentGeneration = 4
++            )
++        )
++    }
++
++    @Test
++    fun newNormalGenerationReschedulesStaleIdleMarker() {
++        assertEquals(
++            KuiklyIdleAdmissionDecision.Reschedule,
++            kuiklyIdleAdmissionDecision(
++                hasIdleWork = true,
++                hasNormalWork = false,
++                scheduledGeneration = 4,
++                currentGeneration = 5
++            )
++        )
++    }
++
++    @Test
++    fun stableDrainedGenerationRunsOneIdleCallback() {
++        assertEquals(
++            KuiklyIdleAdmissionDecision.Run,
++            kuiklyIdleAdmissionDecision(
++                hasIdleWork = true,
++                hasNormalWork = false,
++                scheduledGeneration = 5,
++                currentGeneration = 5
++            )
++        )
++        assertTrue(shouldScheduleKuiklyIdle(true, false, false))
++        assertFalse(shouldScheduleKuiklyIdle(true, true, false))
++        assertFalse(shouldScheduleKuiklyIdle(true, false, true))
++    }
++}
+diff --git a/compose/src/jsMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.js.kt b/compose/src/jsMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.js.kt
+index 4fa7071d6306eb390a6b0638749fc08d02a04153..76d971191f8f607112de9880b306042844f5918b 100644
+--- a/compose/src/jsMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.js.kt
++++ b/compose/src/jsMain/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.js.kt
+@@ -62,6 +62,12 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
+     }
+ }
+ 
++internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
++    setTimeout(pagerId, 0) {
++        KuiklyContextScheduler.runIdleTask(pagerId)
++    }
++}
++
+ internal actual inline fun platformNotifyKuiklyException(t: Throwable) {
+     BridgeManager.callExceptionMethod(t.stackTraceToString())
+-}
+\ No newline at end of file
++}
+diff --git a/compose/src/ohosArm64Main/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ohosArm64.kt b/compose/src/ohosArm64Main/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ohosArm64.kt
+index 3ca1f671b3eeed06197203224447e05d6ac2a270..b0c1976cc0c2433ae8e2f0a9a1d7ab5e3d06f147 100644
+--- a/compose/src/ohosArm64Main/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ohosArm64.kt
++++ b/compose/src/ohosArm64Main/kotlin/com/tencent/kuikly/compose/coroutines/internal/KuiklyContextScheduler.ohosArm64.kt
+@@ -21,6 +21,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
+ import kotlinx.cinterop.staticCFunction
+ import kotlinx.cinterop.toKString
+ import ohos.com_tencent_kuikly_IsCurrentOnContextThread
++import ohos.com_tencent_kuikly_ScheduleContextIdleTask
+ import ohos.com_tencent_kuikly_ScheduleContextTask
+ 
+ internal actual fun platformInitScheduler() {
+@@ -38,6 +39,14 @@ internal actual inline fun platformScheduleOnKuiklyThread(pagerId: String) {
+     })
+ }
+ 
++@OptIn(ExperimentalForeignApi::class)
++internal actual inline fun platformScheduleIdleOnKuiklyThread(pagerId: String) {
++    com_tencent_kuikly_ScheduleContextIdleTask(pagerId, staticCFunction { pagerIdBytes: CPointer<ByteVar>? ->
++        val idStr = pagerIdBytes?.toKString() ?: return@staticCFunction
++        KuiklyContextScheduler.runIdleTask(idStr)
++    })
++}
++
+ internal actual inline fun platformNotifyKuiklyException(t: Throwable) {
+     ExceptionTracker.notifyKuiklyException(t)
+-}
+\ No newline at end of file
++}
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt
+index eae4d6aada01490b9a3a778fb8852e97abbffe7d..792ceb1cde7e5be6be3009531e6157bd97cc84e8 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt
+@@ -19,6 +19,7 @@ import android.os.ConditionVariable
+ import android.os.Handler
+ import android.os.HandlerThread
+ import android.os.Looper
++import android.os.MessageQueue
+ import android.os.Process
+ import com.tencent.kuikly.core.nvi.NativeBridge
+ import com.tencent.kuikly.core.render.android.adapter.KuiklyRenderAdapterManager
+@@ -38,11 +39,54 @@ object KuiklyRenderCoreContextScheduler : IKuiklyRenderCoreScheduler {
+             KRHandlerThread(THREAD_NAME, Process.THREAD_PRIORITY_FOREGROUND, stackSize).apply { start() }.looper
+         })
+     }
++    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
+ 
+     override fun scheduleTask(delayMs: Long, task: Runnable) {
+         handler.postDelayed(task, delayMs)
+     }
+ 
++    /**
++     * Runs one bounded task after this context looper has drained normal work.
++     *
++     * The callback temporarily uses background thread priority so speculative
++     * work yields CPU to interactive threads. A task already executing is not
++     * forcibly interrupted; callers must keep each callback bounded.
++     */
++    fun scheduleIdleTask(task: Runnable) {
++        scheduleAfterContextIdle {
++            mainHandler.post {
++                Looper.myQueue().addIdleHandler(
++                    MessageQueue.IdleHandler {
++                        // Foreground context work may have arrived while the
++                        // main queue was draining. Re-admit on context idle.
++                        scheduleAfterContextIdle {
++                            val threadId = Process.myTid()
++                            val previousPriority = Process.getThreadPriority(threadId)
++                            try {
++                                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
++                                task.run()
++                            } finally {
++                                Process.setThreadPriority(previousPriority)
++                            }
++                        }
++                        false
++                    }
++                )
++            }
++        }
++    }
++
++    private fun scheduleAfterContextIdle(task: Runnable) {
++        handler.post {
++            Looper.myQueue().addIdleHandler(
++                MessageQueue.IdleHandler {
++                    task.run()
++                    false
++                }
++            )
++        }
++    }
++
+     override fun destroy() {
+     }
+ 
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp b/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp
+index 22b99037c6a6beba5bb54cfcd2aadb4ba502a4c6..551251889183ab957020b01337f5e1800363931c 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/core/KRRenderCore.cpp
+@@ -51,6 +51,11 @@ void com_tencent_kuikly_ScheduleContextTask(const char *pagerId, void (*onSchedu
+         0, [instanceId = std::string(pagerId), onSchedule]() { onSchedule(instanceId.c_str()); });
+ }
+ 
++void com_tencent_kuikly_ScheduleContextIdleTask(const char *pagerId, void (*onSchedule)(const char *pagerId)) {
++    KRContextScheduler::ScheduleIdleTask(
++        [instanceId = std::string(pagerId), onSchedule]() { onSchedule(instanceId.c_str()); });
++}
++
+ bool com_tencent_kuikly_IsCurrentOnContextThread(const char *pagerId) {
+     return KRContextScheduler::IsCurrentOnContextThread();
+ }
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.cpp b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.cpp
+index f3af91f4fcb07e848cf3cfed87169d920ef6077d..c12cb5dd892f6b1ee26af4d826b77823503f0919 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.cpp
+@@ -32,12 +32,19 @@ struct PendingTask {
+     int delayMs;
+ };
+ 
++struct IdleTaskContext {
++    std::function<void()> func;
++    uint64_t admittedGeneration;
++    uint8_t quietTurns;
++};
++
+ // 主线程 uv_loop（来自 ArkTS 主线程的 napi_env）。
+ // 该 loop 的生命周期由 ArkTS 运行时管理，KRMainThread 仅持有指针、不创建也不销毁。
+ uv_loop_t *g_main_loop = nullptr;
+ // 主线程线程 ID（即 Export 被调用所在的线程）。
+ std::thread::id g_main_thread_id;
+ std::atomic<bool> g_initialized{false};
++std::atomic<uint64_t> g_main_normal_generation{0};
+ 
+ // 跨线程把任务投递到主线程的 async 句柄，必须在主线程（loop 线程）上 init。
+ uv_async_t g_main_async{};
+@@ -100,6 +107,101 @@ void StartTimerOnMainThread(std::function<void()> task, int delayMs) {
+     }
+ }
+ 
++void StartIdleOnMainThread(
++    std::function<void()> task,
++    uint64_t admittedGeneration,
++    uint8_t quietTurns = 0
++) {
++    auto *check = new uv_check_t();
++    auto *holder = new IdleTaskContext{std::move(task), admittedGeneration, quietTurns};
++    check->data = holder;
++    int ret = uv_check_init(g_main_loop, check);
++    if (ret != 0) {
++        KR_LOG_ERROR << "KRMainThread::StartIdleOnMainThread uv_check_init failed, ret=" << ret
++                     << "; fallback to immediate callback.";
++        if (holder->func) {
++            holder->func();
++        }
++        delete holder;
++        delete check;
++        return;
++    }
++    ret = uv_check_start(check, [](uv_check_t *handle) {
++        auto *ctx = static_cast<IdleTaskContext *>(handle->data);
++        uv_check_stop(handle);
++        bool hasPendingNormalTask = false;
++        {
++            std::lock_guard<std::mutex> lock(g_queue_mutex);
++            hasPendingNormalTask = !g_pending_queue.empty();
++        }
++        if (ctx != nullptr) {
++            const bool generationChanged =
++                g_main_normal_generation.load(std::memory_order_acquire) !=
++                ctx->admittedGeneration;
++            // uv_idle_t is not an idle signal: libuv invokes it on every loop
++            // iteration and it forces a zero poll timeout. A check handle runs
++            // after poll/pending callbacks without changing the poll timeout;
++            // uv_backend_timeout == 0 means the loop has immediate work for its
++            // next turn, including ArkTS handles registered on this same loop.
++            const bool loopMayWait = uv_backend_timeout(g_main_loop) != 0;
++            if (hasPendingNormalTask || generationChanged || !loopMayWait || ctx->quietTurns < 1) {
++                const uint8_t nextQuietTurns =
++                    (!hasPendingNormalTask && !generationChanged && loopMayWait)
++                        ? static_cast<uint8_t>(ctx->quietTurns + 1)
++                        : 0;
++                StartIdleOnMainThread(
++                    std::move(ctx->func),
++                    g_main_normal_generation.load(std::memory_order_acquire),
++                    nextQuietTurns
++                );
++                ctx->func = nullptr;
++            } else if (ctx->func) {
++                ctx->func();
++            }
++        }
++        uv_close(reinterpret_cast<uv_handle_t *>(handle), [](uv_handle_t *h) {
++            auto *checkHandle = reinterpret_cast<uv_check_t *>(h);
++            delete static_cast<IdleTaskContext *>(checkHandle->data);
++            delete checkHandle;
++        });
++    });
++    if (ret != 0) {
++        KR_LOG_ERROR << "KRMainThread::StartIdleOnMainThread uv_check_start failed, ret=" << ret
++                     << "; fallback to immediate callback.";
++        if (holder->func) {
++            holder->func();
++        }
++        uv_close(reinterpret_cast<uv_handle_t *>(check), [](uv_handle_t *h) {
++            auto *checkHandle = reinterpret_cast<uv_check_t *>(h);
++            delete static_cast<IdleTaskContext *>(checkHandle->data);
++            delete checkHandle;
++        });
++        return;
++    }
++    if (quietTurns > 0) {
++        // A check handle runs only after poll returns. When the loop is truly
++        // idle its backend timeout is infinite, so the second stability turn
++        // needs one bounded control-plane wake or it could starve forever.
++        // This async callback carries no app task and does not advance the
++        // foreground generation; it only makes the already-installed check
++        // observable on the next loop turn.
++        ret = uv_async_send(&g_main_async);
++        if (ret != 0) {
++            KR_LOG_ERROR << "KRMainThread::StartIdleOnMainThread control wake failed, ret=" << ret
++                         << "; fallback to immediate callback.";
++            uv_check_stop(check);
++            if (holder->func) {
++                holder->func();
++            }
++            uv_close(reinterpret_cast<uv_handle_t *>(check), [](uv_handle_t *h) {
++                auto *checkHandle = reinterpret_cast<uv_check_t *>(h);
++                delete static_cast<IdleTaskContext *>(checkHandle->data);
++                delete checkHandle;
++            });
++        }
++    }
++}
++
+ // 主线程 uv_async 回调：把队列里所有任务取出，根据 delay 决定立即执行还是注册 uv_timer。
+ // 注意：本函数在主线程（loop 线程）执行，因此 uv_timer_init / uv_timer_start 都是合规的。
+ // 异常路径：user task 是业务提供的回调；不套 C++ catch，让异常直接冒到 K/N
+@@ -126,6 +228,7 @@ void OnMainAsync(uv_async_t * /*handle*/) {
+ 
+ // 把任务塞进队列并唤醒主线程 loop。
+ void EnqueueAndNotify(std::function<void()> task, int delayMs) {
++    g_main_normal_generation.fetch_add(1, std::memory_order_release);
+     auto pending = std::make_unique<PendingTask>();
+     pending->func = std::move(task);
+     pending->delayMs = delayMs;
+@@ -182,6 +285,7 @@ void KRMainThread::RunOnMainThread(std::function<void()> task, int delayMillisec
+     }
+ 
+     if (IsCurrentMainThread()) {
++        g_main_normal_generation.fetch_add(1, std::memory_order_release);
+         // 已经在主线程（loop 线程），可以直接安全地操作 uv 句柄。
+         if (delayMilliseconds <= 0) {
+             // 立即执行：保持与原实现一致的"同步直跑"语义。
+@@ -221,6 +325,50 @@ void KRMainThread::RunOnMainThreadForNextLoop(std::function<void()> task) {
+     EnqueueAndNotify(std::move(task), 0);
+ }
+ 
++void KRMainThread::RunOnMainThreadWhenIdle(std::function<void()> task) {
++    if (!task) {
++        return;
++    }
++    if (!g_initialized.load() || g_main_loop == nullptr) {
++        KR_LOG_ERROR << "KRMainThread::RunOnMainThreadWhenIdle before Export, fallback to inline run";
++        task();
++        return;
++    }
++    const uint64_t generation = g_main_normal_generation.load(std::memory_order_acquire);
++    if (IsCurrentMainThread()) {
++        StartIdleOnMainThread(std::move(task), generation);
++        return;
++    }
++    // Installing the idle handle is control-plane work, not foreground app
++    // work, so do not route through EnqueueAndNotify (which would invalidate
++    // its own admission). Reuse the main async queue with a wrapper whose
++    // captured generation is checked again by the idle callback.
++    auto completed = std::make_shared<std::atomic<bool>>(false);
++    auto sharedTask = std::make_shared<std::function<void()>>(std::move(task));
++    auto invokeOnce = [completed, sharedTask]() {
++        if (!completed->exchange(true, std::memory_order_acq_rel) && *sharedTask) {
++            (*sharedTask)();
++        }
++    };
++    auto pending = std::make_unique<PendingTask>();
++    pending->func = [completed, invokeOnce, generation]() mutable {
++        if (!completed->load(std::memory_order_acquire)) {
++            StartIdleOnMainThread(std::move(invokeOnce), generation);
++        }
++    };
++    pending->delayMs = 0;
++    {
++        std::lock_guard<std::mutex> lock(g_queue_mutex);
++        g_pending_queue.push(std::move(pending));
++    }
++    const int ret = uv_async_send(&g_main_async);
++    if (ret != 0) {
++        KR_LOG_ERROR << "KRMainThread::RunOnMainThreadWhenIdle uv_async_send failed, ret=" << ret
++                     << "; fallback to immediate callback.";
++        invokeOnce();
++    }
++}
++
+ bool KRMainThread::IsCurrentOnMainThread() {
+     // Export 之前 g_main_thread_id 未赋值，无法做出可靠判断；
+     // 此时一律返回 false，让调用方走"非主线程"安全路径（跨线程投递）。
+@@ -228,4 +376,4 @@ bool KRMainThread::IsCurrentOnMainThread() {
+         return false;
+     }
+     return IsCurrentMainThread();
+-}
+\ No newline at end of file
++}
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.h b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.h
+index be7d7ff6f002833519b24f5658213b5dad4e4945..80fd02580ac97fab79da65dbd6354e9f02e25a2d 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRMainThread.h
+@@ -41,6 +41,9 @@ class KRMainThread {
+      */
+     static void RunOnMainThreadForNextLoop(std::function<void()> task);
+ 
++    /** Run one bounded task after two stable main-loop turns with no immediate work. */
++    static void RunOnMainThreadWhenIdle(std::function<void()> task);
++
+     /**
+      * @brief 当前调用线程是否为 ArkTS 主线程（即 Export 时记录的 loop 线程）。
+      *        仅在 Export 完成后返回值才有意义；未初始化时一律返回 false。
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.cpp b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.cpp
+index 26480a77e497a581d79b8a01780670de3b43f8fd..777754fc509a54d142f2d357341d0d7fa1b0d5ad 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.cpp
+@@ -182,15 +182,11 @@ void KRThread::OnAsync() {
+         std::lock_guard<std::mutex> lock(m_queueMutex);
+         std::swap(local, m_pending);
+     }
+-    if (local.empty()) {
+-        return;
+-    }
+-
+-    // 抢执行权：阻塞等待。即使此刻有 DirectRunOnCurThread 持锁，
+-    // worker 也只是被挂起到对方 unlock，期间不忙等、不浪费 CPU。
+-    // worker 线程不会自我重入（task 内嵌套提交同步任务走 m_isExecutingTask 快路径），
+-    // 故对 m_taskMutex 阻塞 lock 不会自死锁。
+-    {
++    if (!local.empty()) {
++        // 抢执行权：阻塞等待。即使此刻有 DirectRunOnCurThread 持锁，
++        // worker 也只是被挂起到对方 unlock，期间不忙等、不浪费 CPU。
++        // worker 线程不会自我重入（task 内嵌套提交同步任务走 m_isExecutingTask 快路径），
++        // 故对 m_taskMutex 阻塞 lock 不会自死锁。
+         std::lock_guard<std::mutex> taskLock(m_taskMutex);
+         m_isExecutingTask.store(true);
+         while (!local.empty()) {
+@@ -208,6 +204,52 @@ void KRThread::OnAsync() {
+         }
+         m_isExecutingTask.store(false);
+     }
++
++    // Normal work always wins. Re-check the shared queue after the captured
++    // batch completes because producers may have enqueued foreground work
++    // while the worker was executing it. Run at most one idle callback per
++    // loop turn so the next normal enqueue gets an admission point.
++    std::function<void()> idleTask;
++    bool moreIdlePending = false;
++    {
++        std::lock_guard<std::mutex> lock(m_queueMutex);
++        if (m_pending.empty() && !m_idlePending.empty()) {
++            idleTask = std::move(m_idlePending.front());
++            m_idlePending.pop();
++            moreIdlePending = !m_idlePending.empty();
++        }
++    }
++    if (!idleTask) {
++        return;
++    }
++    // libuv coalesces uv_async_send, so idle work queued by several pagers can
++    // share one wake-up. Re-signal while idle work remains so it does not wait
++    // for the next normal task.
++    if (moreIdlePending && !m_stop.load()) {
++        uv_async_send(&m_async);
++    }
++
++    {
++        std::lock_guard<std::mutex> taskLock(m_taskMutex);
++        struct IdleExecutionGuard {
++            std::atomic<bool> &executing;
++            explicit IdleExecutionGuard(std::atomic<bool> &flag) : executing(flag) {
++                executing.store(true);
++                int ret = OH_QoS_SetThreadQoS(QoS_Level::QOS_BACKGROUND);
++                if (ret != 0) {
++                    KR_LOG_ERROR << "KRThread idle OH_QoS_SetThreadQoS(background) failed, err=" << ret;
++                }
++            }
++            ~IdleExecutionGuard() {
++                int ret = OH_QoS_SetThreadQoS(QoS_Level::QOS_USER_INTERACTIVE);
++                if (ret != 0) {
++                    KR_LOG_ERROR << "KRThread idle OH_QoS_SetThreadQoS(restore) failed, err=" << ret;
++                }
++                executing.store(false);
++            }
++        } idleGuard(m_isExecutingTask);
++        idleTask();
++    }
+ }
+ 
+ void KRThread::AsyncCloseCb(uv_handle_t *handle) {
+@@ -317,6 +359,21 @@ void KRThread::DispatchAsync(std::function<void()> task, int delayMilliseconds)
+     uv_async_send(&m_async);
+ }
+ 
++void KRThread::DispatchIdle(std::function<void()> task) {
++    if (!task) {
++        return;
++    }
++    if (!m_loopReady.load()) {
++        KR_LOG_ERROR << "KRThread::DispatchIdle before loop ready, drop task";
++        return;
++    }
++    {
++        std::lock_guard<std::mutex> lock(m_queueMutex);
++        m_idlePending.push(std::move(task));
++    }
++    uv_async_send(&m_async);
++}
++
+ void KRThread::DirectRunOnCurThread(const std::function<void()> &task) {
+     if (!task) {
+         return;
+@@ -366,4 +423,4 @@ void KRThread::DirectRunOnCurThread(const std::function<void()> &task) {
+         KR_LOG_INFO << "DispatchAsync when run DirectRunOnCurThread";
+         DispatchAsync(task);
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.h b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.h
+index 17eae1012728def3e4246c405d8d44b2d395ae7b..fb6d190fc9f394d01dca62aa73d56495788797bb 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/foundation/thread/KRThread.h
+@@ -45,6 +45,13 @@ class KRThread {
+      */
+     void DispatchAsync(std::function<void()> task, int delayMilliseconds = 0);
+ 
++    /**
++     * Executes one bounded speculative task only after the immediate queue has
++     * drained. Idle tasks run at background QoS and yield to newly queued
++     * normal work between callbacks.
++     */
++    void DispatchIdle(std::function<void()> task);
++
+     /**
+      * @brief 在当前调用线程上"直跑"任务，与 worker 线程协调互斥；
+      *        若长时间拿不到 mutex 则降级为 DispatchAsync。沿用旧语义。
+@@ -122,6 +129,7 @@ class KRThread {
+     //   OnAsync 在 loop 线程上起 timer。
+     std::mutex m_queueMutex;
+     std::queue<std::function<void()>> m_pending;
++    std::queue<std::function<void()>> m_idlePending;
+     std::queue<std::unique_ptr<PendingTimer>> m_pendingTimers;
+ 
+     // ---- 任务执行权 / 同步主任务标志 ----
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.cpp b/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.cpp
+index 02bdb867528bbf1458f8594a157660347b017ce0..a051bde17204a1275b079d2abb45c48e96389541 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.cpp
+@@ -34,6 +34,7 @@ class KRContextSchedulerInternal {
+  public:
+     virtual ~KRContextSchedulerInternal() = default;
+     virtual void ScheduleTask(int delayMs, const KRSchedulerTask &task) = 0;
++    virtual void ScheduleIdleTask(const KRSchedulerTask &task) = 0;
+     virtual void ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) = 0;
+     virtual void DirectRunOnMainThread(bool isSync, const KRSchedulerTask &task) = 0;
+ 
+@@ -43,6 +44,7 @@ class KRContextSchedulerInternal {
+ class KRContextSchedulerMultiThreaded : public KRContextSchedulerInternal {
+  public:
+     void ScheduleTask(int delayMs, const KRSchedulerTask &task) override;
++    void ScheduleIdleTask(const KRSchedulerTask &task) override;
+     void ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) override;
+     void DirectRunOnMainThread(bool isSync, const KRSchedulerTask &task) override;
+     bool IsCurrentOnContextThread() override;
+@@ -93,6 +95,15 @@ void KRContextSchedulerMultiThreaded::ScheduleTask(int delayMs, const KRSchedule
+     GetContextThread()->DispatchAsync(task, delayMs);
+ }
+ 
++void KRContextSchedulerMultiThreaded::ScheduleIdleTask(const KRSchedulerTask &task) {
++    auto *contextThread = GetContextThread();
++    contextThread->DispatchIdle([contextThread, task]() {
++        KRMainThread::RunOnMainThreadWhenIdle([contextThread, task]() {
++            contextThread->DispatchIdle(task);
++        });
++    });
++}
++
+ void KRContextSchedulerMultiThreaded::ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) {
+     if (!task) {
+         return;
+@@ -198,6 +209,7 @@ bool KRContextSchedulerMultiThreaded::IsCurrentOnContextThread() {
+ class KRContextSchedulerSingleThreaded : public KRContextSchedulerInternal {
+  public:
+     void ScheduleTask(int delayMs, const KRSchedulerTask &task) override;
++    void ScheduleIdleTask(const KRSchedulerTask &task) override;
+     void ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) override;
+     void DirectRunOnMainThread(bool isSync, const KRSchedulerTask &task) override;
+     bool IsCurrentOnContextThread() override;
+@@ -217,6 +229,10 @@ void KRContextSchedulerSingleThreaded::ScheduleTask(int delayMs, const KRSchedul
+     KRMainThread::RunOnMainThread(task, delayMs);
+ }
+ 
++void KRContextSchedulerSingleThreaded::ScheduleIdleTask(const KRSchedulerTask &task) {
++    KRMainThread::RunOnMainThreadWhenIdle(task);
++}
++
+ void KRContextSchedulerSingleThreaded::ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) {
+     if (sync) {
+         task();
+@@ -252,6 +268,9 @@ std::shared_ptr<KRContextSchedulerInternal> KRContextScheduler::GetInstance() {
+ void KRContextScheduler::ScheduleTask(int delayMs, const KRSchedulerTask &task) {
+     GetInstance()->ScheduleTask(delayMs, task);
+ }
++void KRContextScheduler::ScheduleIdleTask(const KRSchedulerTask &task) {
++    GetInstance()->ScheduleIdleTask(task);
++}
+ void KRContextScheduler::ScheduleTaskOnMainThread(bool sync, const KRSchedulerTask &task) {
+     GetInstance()->ScheduleTaskOnMainThread(sync, task);
+ }
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.h b/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.h
+index 669efe4a7f7953e61d2e6f0d5a8cf21113d3ac42..89e6f50804b71c4ebc04eab23876246cf431cf64 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/scheduler/KRContextScheduler.h
+@@ -35,6 +35,9 @@ class KRContextScheduler {
+      */
+     static void ScheduleTask(int delayMs, const KRSchedulerTask &task);
+ 
++    /** Schedule one bounded task after normal context work drains. */
++    static void ScheduleIdleTask(const KRSchedulerTask &task);
++
+     /**
+      * Context线程调度任务到主线程执行(注：该方法只能在主线程或Context线程被调用)
+      * @param sync 是否同步执行
+diff --git a/core/src/ohosArm64Main/ohosInterop/cinterop/ohos.def b/core/src/ohosArm64Main/ohosInterop/cinterop/ohos.def
+index f137b69543af36f134555da15e64fdc60d3e419a..80fde51937951dae1542efffb2ae6042db8d56d9 100644
+--- a/core/src/ohosArm64Main/ohosInterop/cinterop/ohos.def
++++ b/core/src/ohosArm64Main/ohosInterop/cinterop/ohos.def
+@@ -338,6 +338,7 @@ extern int com_tencent_kuikly_SetCallKotlin(CallKotlin callKotlin);
+ extern void com_tencent_kuikly_CallNative(int methodId, const KRRenderCValue *arg0, const KRRenderCValue *arg1, const KRRenderCValue *arg2,
+                                            const KRRenderCValue *arg3, const KRRenderCValue *arg4, const KRRenderCValue *arg5, KRRenderCValue *result);
+ extern void com_tencent_kuikly_ScheduleContextTask(const char* pagerId, void (*onSchedule)(const char* pagerId));
++extern void com_tencent_kuikly_ScheduleContextIdleTask(const char* pagerId, void (*onSchedule)(const char* pagerId));
+ extern bool com_tencent_kuikly_IsCurrentOnContextThread(const char* pagerId);
+ 
+ long long com_tencent_kuikly_GetThreadCPUTimeInNanoseconds() {
+@@ -346,4 +347,4 @@ long long com_tencent_kuikly_GetThreadCPUTimeInNanoseconds() {
+         return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+     }
+     return 0;
+-}
+\ No newline at end of file
++}

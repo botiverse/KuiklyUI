@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:10:06 +0000
+Subject: feat(compose): add rememberAsyncImageBitmap for Canvas consumers
+
+Expose the shared Kuikly image cache as an ImageBitmap so Canvas drawing
+code can reuse images already loaded by rememberAsyncImagePainter. The
+bitmap may report zero size at first; its observable cache status triggers
+recomposition once decoding completes.
+
+Fork-Patch: compose-async-image-bitmap
+Origin: ad10ae89
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coil3/AsyncImagePainter.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coil3/AsyncImagePainter.kt
+index 457f50cd823d75ea73c0293a3afa522ac7de798c..1b50fa21de946673d24ea98c359412b034494d3d 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coil3/AsyncImagePainter.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/coil3/AsyncImagePainter.kt
+@@ -5,11 +5,26 @@ import androidx.compose.runtime.NonRestartableComposable
+ import androidx.compose.runtime.Stable
+ import androidx.compose.runtime.remember
+ import com.tencent.kuikly.compose.coil3.AsyncImagePainter.State
++import com.tencent.kuikly.compose.ui.KuiklyPainter
++import com.tencent.kuikly.compose.ui.graphics.ImageBitmap
+ import com.tencent.kuikly.compose.ui.graphics.painter.Painter
+ import com.tencent.kuikly.compose.ui.platform.LocalActivity
+-import com.tencent.kuikly.compose.ui.KuiklyPainter
+ import kotlinx.coroutines.flow.StateFlow
+ 
++/**
++ * Load [model] through the same shared image cache used by [rememberAsyncImagePainter] and expose
++ * the decoded bitmap to Canvas consumers. The returned bitmap can initially report a zero size;
++ * its observable cache status updates the composition when decoding completes.
++ */
++@Composable
++fun rememberAsyncImageBitmap(model: String?): ImageBitmap? {
++    val source = model?.trim()?.takeIf { it.isNotEmpty() } ?: return null
++    val activity = LocalActivity.current
++    return remember(activity, source) {
++        activity.imageCacheManager.loadImage(source)
++    }
++}
++
+ /**
+  * Return an [AsyncImagePainter] that executes an [ImageRequest] asynchronously and renders the result.
+  *
+@@ -155,4 +170,4 @@ abstract class AsyncImagePainter internal constructor() : Painter() {
+             // val result: Unit,
+         ) : State
+     }
+-}
+\ No newline at end of file
++}

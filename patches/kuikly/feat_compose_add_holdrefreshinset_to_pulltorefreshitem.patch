@@ -1,0 +1,612 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:19:55 +0000
+Subject: feat(compose): add holdRefreshInset to pullToRefreshItem
+
+Add holdRefreshInset (default true, current behaviour). When false the
+list does not keep the refreshThreshold top inset while refreshing:
+release goes straight to IDLE, clears the end-drag and current insets,
+and still calls onRefresh once. holdRefreshInset and refreshThreshold
+are read through a runtime config State, so changing them takes effect
+without replacing the scroll state or restarting the collector.
+Rebased onto upstream #1582 (withFrameNanos failsafe and
+suppressIdleInsetReset kept; the REFRESHING branch clears the flag
+before choosing held vs. non-held inset).
+
+Fork-Patch: compose-ptr-hold-refresh-inset
+Origin: 35290a17, aec013d5
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/material3/PullToRefresh.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/material3/PullToRefresh.kt
+index 867a8b2017971f21ae6f4ebb23b7e5ef4c8a28c6..0c0953a4f19fc0ae62bcb46ea83ceeddeb20b74a 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/material3/PullToRefresh.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/material3/PullToRefresh.kt
+@@ -19,6 +19,7 @@ package com.tencent.kuikly.compose.material3
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.Stable
++import androidx.compose.runtime.State
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+@@ -77,15 +78,62 @@ private fun Modifier.offsetWithParentAdjustment(
+     }
+ }
+ 
++internal data class PullToRefreshRuntimeConfig(
++    val holdRefreshInset: Boolean,
++    val refreshThresholdPx: Float,
++    val refreshThresholdLogical: Float
++)
++
++internal data class PullToRefreshSnapshot(
++    val contentOffset: Int,
++    val isAtTop: Boolean,
++    val isDragging: Boolean,
++    val isRefreshing: Boolean,
++    val holdRefreshInset: Boolean,
++    val refreshThresholdPx: Float,
++    val refreshThresholdLogical: Float
++) {
++    val pullDistance: Float
++        get() = if (contentOffset < 0) abs(contentOffset.toFloat()) else 0f
++
++    val progress: Float
++        get() = (pullDistance / refreshThresholdPx).coerceIn(0f, 1f)
++
++    val isThresholdReached: Boolean
++        get() = pullDistance >= refreshThresholdPx
++
++    val endDragInset: Float
++        get() = pullRefreshEndDragInset(
++            holdRefreshInset = holdRefreshInset,
++            refreshThreshold = refreshThresholdLogical
++        )
++}
++
+ /**
+- * Quadruple data class for monitoring multiple states in snapshotFlow
++ * Keeps the long-lived scroll collector connected to configuration updated by recomposition.
++ * The provider instance stays attached to the same scroll state while [configState] changes.
+  */
+-private data class Quad<A, B, C, D>(
+-    val first: A,
+-    val second: B,
+-    val third: C,
+-    val fourth: D
+-)
++internal class PullToRefreshSnapshotProvider(
++    private val configState: State<PullToRefreshRuntimeConfig>
++) {
++    fun snapshot(
++        contentOffset: Int,
++        isAtTop: Boolean,
++        isDragging: Boolean,
++        isRefreshing: Boolean
++    ): PullToRefreshSnapshot {
++        val config = configState.value
++        return PullToRefreshSnapshot(
++            contentOffset = contentOffset,
++            isAtTop = isAtTop,
++            isDragging = isDragging,
++            isRefreshing = isRefreshing,
++            holdRefreshInset = config.holdRefreshInset,
++            refreshThresholdPx = config.refreshThresholdPx,
++            refreshThresholdLogical = config.refreshThresholdLogical
++        )
++    }
++}
+ 
+ /**
+  * Creates a [PullToRefreshState] that is remembered across compositions.
+@@ -176,6 +224,11 @@ class PullToRefreshState(
+  * @param topInset Extra top inset for overlay header (e.g. collapsing HeaderBar).
+  *   Pass the header's maximum height, not its animated height.
+  * @param refreshThreshold Threshold to trigger refresh
++ * @param holdRefreshInset Whether the list should keep [refreshThreshold] top inset while
++ *   [state] is refreshing. Disable this when refresh progress is rendered outside the list and
++ *   existing content must return to its resting position immediately after the pull is released.
++ *   Runtime changes to this value and [refreshThreshold] take effect without replacing
++ *   [scrollState].
+  * @param content Custom refresh indicator content
+  */
+ fun LazyListScope.pullToRefreshItem(
+@@ -185,6 +238,7 @@ fun LazyListScope.pullToRefreshItem(
+     modifier: Modifier = Modifier,
+     topInset: Dp = 0.dp,
+     refreshThreshold: Dp = 80.dp,
++    holdRefreshInset: Boolean = true,
+     content: @Composable (
+         pullProgress: Float,
+         isRefreshing: Boolean,
+@@ -204,6 +258,7 @@ fun LazyListScope.pullToRefreshItem(
+             modifier = modifier,
+             topInset = topInset,
+             refreshThreshold = refreshThreshold,
++            holdRefreshInset = holdRefreshInset,
+             content = content
+         )
+     }
+@@ -221,6 +276,7 @@ internal fun PullToRefreshItem(
+     modifier: Modifier = Modifier,
+     topInset: Dp = 0.dp,
+     refreshThreshold: Dp = 80.dp,
++    holdRefreshInset: Boolean = true,
+     content: @Composable (
+         pullProgress: Float,
+         isRefreshing: Boolean,
+@@ -233,6 +289,16 @@ internal fun PullToRefreshItem(
+     val refreshThresholdPx = with(density) { refreshThreshold.toPx() }
+     val refreshThresholdLogical = refreshThresholdPx / density.density
+     val updatedOnRefresh by rememberUpdatedState(onRefresh)
++    val updatedRuntimeConfig = rememberUpdatedState(
++        PullToRefreshRuntimeConfig(
++            holdRefreshInset = holdRefreshInset,
++            refreshThresholdPx = refreshThresholdPx,
++            refreshThresholdLogical = refreshThresholdLogical
++        )
++    )
++    val snapshotProvider = remember(scrollState) {
++        PullToRefreshSnapshotProvider(updatedRuntimeConfig)
++    }
+ 
+     scrollState.kuiklyInfo.pullToRefreshTopInsetPx = with(density) { topInset.roundToPx() }
+ 
+@@ -249,10 +315,20 @@ internal fun PullToRefreshItem(
+             val isAtTop = scrollState.isAtTop()
+             val contentOffset = if (isAtTop) kuiklyInfo.contentOffset else 0
+             val isDragging = scrollState.kuiklyInfo.isDragging
+-            Quad(contentOffset, isAtTop, isDragging, state.isRefreshing)
++            snapshotProvider.snapshot(
++                contentOffset = contentOffset,
++                isAtTop = isAtTop,
++                isDragging = isDragging,
++                isRefreshing = state.isRefreshing
++            )
+         }
+         .distinctUntilChanged()
+-        .collectLatest { (contentOffset, isAtTop, isDragging, _) ->
++        .collectLatest { snapshot ->
++            val contentOffset = snapshot.contentOffset
++            val isAtTop = snapshot.isAtTop
++            val isDragging = snapshot.isDragging
++            val currentHoldRefreshInset = snapshot.holdRefreshInset
++            val currentRefreshThresholdPx = snapshot.refreshThresholdPx
+             val previousPullState = state.pullState
+             if (!isAtTop) {
+                 // Reset state when not at top
+@@ -274,8 +350,8 @@ internal fun PullToRefreshItem(
+ 
+             // Handle pull logic when at top
+             val scrollView = scrollState.kuiklyInfo.scrollView
+-            val pullDistance = if (contentOffset < 0) abs(contentOffset.toFloat()) else 0f
+-            val progress = (pullDistance / refreshThresholdPx).coerceIn(0f, 1f)
++            val pullDistance = snapshot.pullDistance
++            val progress = snapshot.progress
+             
+             state.updateProgress(progress)
+ 
+@@ -297,33 +373,50 @@ internal fun PullToRefreshItem(
+                     }
+                 }
+                 PullState.IDLE -> {
+-                    if (isDragging && pullDistance >= refreshThresholdPx) {
++                    val pullStarted = state.startPullToRefresh(
++                        snapshot = snapshot,
++                        setEndDragInset = { inset ->
++                            scrollView?.setContentInsetWhenEndDrag(top = inset)
++                        }
++                    )
++                    if (pullStarted) {
+                         pullToRefreshLog {
+                             "IDLE -> PULLING: offset=$contentOffset pullDistance=$pullDistance " +
+-                                "progress=$progress thresholdPx=$refreshThresholdPx"
++                                "progress=$progress thresholdPx=$currentRefreshThresholdPx"
+                         }
+-                        state.updatePullState(PullState.PULLING)
+-                        scrollView?.setContentInsetWhenEndDrag(top = refreshThresholdLogical)
+                     }
+                 }
+                 PullState.PULLING -> {
+                     if (isDragging) {
+-                        if (pullDistance < refreshThresholdPx) {
++                        if (!snapshot.isThresholdReached) {
+                             pullToRefreshLog {
+                                 "PULLING -> IDLE (drag, below threshold): offset=$contentOffset " +
+                                     "pullDistance=$pullDistance progress=$progress"
+                             }
+                             state.updatePullState(PullState.IDLE)
+                             scrollView?.setContentInsetWhenEndDrag(top = 0f)
++                        } else {
++                            scrollView?.setContentInsetWhenEndDrag(
++                                top = snapshot.endDragInset
++                            )
+                         }
+                     } else {
+                         // Released while pulling, start refresh
++                        val releasedState = pullStateAfterRefreshRelease(currentHoldRefreshInset)
+                         pullToRefreshLog {
+-                            "PULLING -> REFRESHING (release): offset=$contentOffset " +
+-                                "pullDistance=$pullDistance"
++                            "PULLING -> $releasedState (release): offset=$contentOffset " +
++                                "pullDistance=$pullDistance holdRefreshInset=$currentHoldRefreshInset"
+                         }
+-                        state.updatePullState(PullState.REFRESHING)
+-                        updatedOnRefresh()
++                        state.releasePullToRefresh(
++                            snapshot = snapshot,
++                            clearEndDragInset = {
++                                scrollView?.setContentInsetWhenEndDrag(top = 0f)
++                            },
++                            clearCurrentInset = {
++                                scrollView?.setContentInset(top = 0f, animated = false)
++                            },
++                            onRefresh = updatedOnRefresh
++                        )
+                     }
+                 }
+             }
+@@ -337,14 +430,20 @@ internal fun PullToRefreshItem(
+     }
+ 
+     // Handle inset changes based on pull state
+-    LaunchedEffect(state.pullState) {
++    LaunchedEffect(state.pullState, holdRefreshInset, refreshThresholdLogical) {
+         val scrollView = scrollState.kuiklyInfo.scrollView
+         val isDragging = scrollView?.isDragging == true
+         when (state.pullState) {
+             PullState.REFRESHING -> {
+                 suppressIdleInsetReset = false
+-                pullToRefreshLog { "apply inset REFRESHING top=$refreshThresholdLogical animated=true" }
+-                scrollView?.setContentInset(top = refreshThresholdLogical, animated = true)
++                if (holdRefreshInset) {
++                    pullToRefreshLog { "apply inset REFRESHING top=$refreshThresholdLogical animated=true" }
++                    scrollView?.setContentInset(top = refreshThresholdLogical, animated = true)
++                } else {
++                    pullToRefreshLog { "skip inset REFRESHING holdRefreshInset=false" }
++                    scrollView?.setContentInsetWhenEndDrag(top = 0f)
++                    scrollView?.setContentInset(top = 0f, animated = false)
++                }
+             }
+             PullState.IDLE -> {
+                 // Never apply contentInset while dragging:
+@@ -379,8 +478,8 @@ internal fun PullToRefreshItem(
+     }
+ 
+     // Sync external refresh state
+-    LaunchedEffect(state.isRefreshing) {
+-        if (state.isRefreshing) {
++    LaunchedEffect(state.isRefreshing, holdRefreshInset) {
++        if (state.isRefreshing && holdRefreshInset) {
+             if (state.pullState != PullState.REFRESHING) {
+                 state.updatePullState(PullState.REFRESHING)
+             }
+@@ -405,6 +504,46 @@ internal fun PullToRefreshItem(
+     }
+ }
+ 
++internal fun pullStateAfterRefreshRelease(holdRefreshInset: Boolean): PullState =
++    if (holdRefreshInset) PullState.REFRESHING else PullState.IDLE
++
++internal fun pullRefreshEndDragInset(
++    holdRefreshInset: Boolean,
++    refreshThreshold: Float
++): Float =
++    if (holdRefreshInset) refreshThreshold.coerceAtLeast(0f) else 0f
++
++internal fun PullToRefreshState.startPullToRefresh(
++    snapshot: PullToRefreshSnapshot,
++    setEndDragInset: (Float) -> Unit
++): Boolean {
++    if (pullState != PullState.IDLE || !snapshot.isDragging || !snapshot.isThresholdReached) {
++        return false
++    }
++    updatePullState(PullState.PULLING)
++    setEndDragInset(snapshot.endDragInset)
++    return true
++}
++
++internal fun PullToRefreshState.releasePullToRefresh(
++    snapshot: PullToRefreshSnapshot,
++    clearEndDragInset: () -> Unit,
++    clearCurrentInset: () -> Unit,
++    onRefresh: () -> Unit
++): Boolean {
++    if (pullState != PullState.PULLING) {
++        return false
++    }
++    updatePullState(pullStateAfterRefreshRelease(snapshot.holdRefreshInset))
++    if (!snapshot.holdRefreshInset) {
++        updateProgress(0f)
++        clearEndDragInset()
++        clearCurrentInset()
++    }
++    onRefresh()
++    return true
++}
++
+ /**
+  * Default refresh indicator
+  */
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/material3/PullToRefreshStateTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/material3/PullToRefreshStateTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b5d1a74d0000cdd52ff118ca5501c0b6e0465c8c
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/material3/PullToRefreshStateTest.kt
+@@ -0,0 +1,261 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2026 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.material3
++
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.snapshotFlow
++import androidx.compose.runtime.snapshots.Snapshot
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.async
++import kotlinx.coroutines.flow.onEach
++import kotlinx.coroutines.flow.take
++import kotlinx.coroutines.flow.toList
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeout
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertTrue
++
++class PullToRefreshStateTest {
++    @Test
++    fun releaseKeepsRefreshingStateWhenInsetIsHeld() {
++        assertEquals(
++            PullState.REFRESHING,
++            pullStateAfterRefreshRelease(holdRefreshInset = true)
++        )
++    }
++
++    @Test
++    fun releaseReturnsIdleWhenInsetIsNotHeld() {
++        assertEquals(
++            PullState.IDLE,
++            pullStateAfterRefreshRelease(holdRefreshInset = false)
++        )
++    }
++
++    @Test
++    fun thresholdCrossingDoesNotScheduleEndDragInsetWhenHoldIsDisabled() {
++        assertEquals(
++            0f,
++            pullRefreshEndDragInset(
++                holdRefreshInset = false,
++                refreshThreshold = 80f
++            )
++        )
++    }
++
++    @Test
++    fun thresholdCrossingKeepsLegacyEndDragInsetByDefault() {
++        assertEquals(
++            80f,
++            pullRefreshEndDragInset(
++                holdRefreshInset = true,
++                refreshThreshold = 80f
++            )
++        )
++    }
++
++    @Test
++    fun noHoldReleaseClearsInsetsBeforeExactlyOnceRefreshCallback() {
++        val state = PullToRefreshState(isRefreshing = false).apply {
++            updatePullState(PullState.PULLING)
++            updateProgress(1f)
++        }
++        val events = mutableListOf<String>()
++
++        repeat(2) {
++            state.releasePullToRefresh(
++                snapshot = snapshot(holdRefreshInset = false),
++                clearEndDragInset = { events += "end-drag-inset=0" },
++                clearCurrentInset = { events += "current-inset=0" },
++                onRefresh = { events += "refresh" }
++            )
++        }
++
++        assertEquals(PullState.IDLE, state.pullState)
++        assertEquals(0f, state.pullProgress)
++        assertEquals(
++            listOf("end-drag-inset=0", "current-inset=0", "refresh"),
++            events
++        )
++    }
++
++    @Test
++    fun heldReleaseKeepsLegacyStateAndDispatchesExactlyOnce() {
++        val state = PullToRefreshState(isRefreshing = false).apply {
++            updatePullState(PullState.PULLING)
++            updateProgress(1f)
++        }
++        val events = mutableListOf<String>()
++
++        repeat(2) {
++            state.releasePullToRefresh(
++                snapshot = snapshot(holdRefreshInset = true),
++                clearEndDragInset = { events += "unexpected-end-drag-clear" },
++                clearCurrentInset = { events += "unexpected-current-clear" },
++                onRefresh = { events += "refresh" }
++            )
++        }
++
++        assertEquals(PullState.REFRESHING, state.pullState)
++        assertEquals(1f, state.pullProgress)
++        assertEquals(listOf("refresh"), events)
++    }
++
++    @Test
++    fun sameCollectorAppliesTrueToFalseAndUpdatedThresholdOnNextGesture() {
++        val snapshots = collectRuntimeSnapshots(
++            initialConfig = PullToRefreshRuntimeConfig(
++                holdRefreshInset = true,
++                refreshThresholdPx = 80f,
++                refreshThresholdLogical = 80f
++            ),
++            updatedConfig = PullToRefreshRuntimeConfig(
++                holdRefreshInset = false,
++                refreshThresholdPx = 120f,
++                refreshThresholdLogical = 120f
++            )
++        )
++        assertTrue(snapshots[0].isThresholdReached)
++        assertEquals(80f, snapshots[0].endDragInset)
++        assertFalse(snapshots[1].isThresholdReached)
++        assertEquals(120f, snapshots[1].refreshThresholdPx)
++        assertEquals(0f, snapshots[1].endDragInset)
++        assertTrue(snapshots[2].isThresholdReached)
++        assertEquals(0f, snapshots[2].endDragInset)
++
++        val state = PullToRefreshState(isRefreshing = false)
++        val events = mutableListOf<String>()
++        val plannedInsets = mutableListOf<Float>()
++
++        assertTrue(state.startPullToRefresh(snapshots[2], plannedInsets::add))
++        repeat(2) {
++            state.releasePullToRefresh(
++                snapshot = snapshots[2],
++                clearEndDragInset = { events += "end-drag-inset=0" },
++                clearCurrentInset = { events += "current-inset=0" },
++                onRefresh = { events += "no-hold-refresh" }
++            )
++        }
++
++        assertEquals(PullState.IDLE, state.pullState)
++        assertEquals(listOf(0f), plannedInsets)
++        assertEquals(
++            listOf(
++                "end-drag-inset=0",
++                "current-inset=0",
++                "no-hold-refresh"
++            ),
++            events
++        )
++    }
++
++    @Test
++    fun sameCollectorAppliesFalseToTrueAndUpdatedThresholdOnNextGesture() {
++        val snapshots = collectRuntimeSnapshots(
++            initialConfig = PullToRefreshRuntimeConfig(
++                holdRefreshInset = false,
++                refreshThresholdPx = 80f,
++                refreshThresholdLogical = 80f
++            ),
++            updatedConfig = PullToRefreshRuntimeConfig(
++                holdRefreshInset = true,
++                refreshThresholdPx = 120f,
++                refreshThresholdLogical = 120f
++            )
++        )
++        assertTrue(snapshots[0].isThresholdReached)
++        assertEquals(0f, snapshots[0].endDragInset)
++        assertFalse(snapshots[1].isThresholdReached)
++        assertEquals(120f, snapshots[1].refreshThresholdPx)
++        assertEquals(120f, snapshots[1].endDragInset)
++        assertTrue(snapshots[2].isThresholdReached)
++        assertEquals(120f, snapshots[2].endDragInset)
++
++        val state = PullToRefreshState(isRefreshing = false)
++        val events = mutableListOf<String>()
++        val plannedInsets = mutableListOf<Float>()
++
++        assertTrue(state.startPullToRefresh(snapshots[2], plannedInsets::add))
++        repeat(2) {
++            state.releasePullToRefresh(
++                snapshot = snapshots[2],
++                clearEndDragInset = { events += "unexpected-held-end-drag-clear" },
++                clearCurrentInset = { events += "unexpected-held-current-clear" },
++                onRefresh = { events += "held-refresh" }
++            )
++        }
++
++        assertEquals(PullState.REFRESHING, state.pullState)
++        assertEquals(listOf(120f), plannedInsets)
++        assertEquals(listOf("held-refresh"), events)
++    }
++
++    private fun collectRuntimeSnapshots(
++        initialConfig: PullToRefreshRuntimeConfig,
++        updatedConfig: PullToRefreshRuntimeConfig
++    ): List<PullToRefreshSnapshot> = runBlocking {
++        val configState = mutableStateOf(initialConfig)
++        val contentOffset = mutableStateOf(-100)
++        val snapshotProvider = PullToRefreshSnapshotProvider(configState)
++        val firstSnapshot = CompletableDeferred<Unit>()
++        val updatedConfigSnapshot = CompletableDeferred<Unit>()
++        var emissionCount = 0
++        val snapshots = async(start = CoroutineStart.UNDISPATCHED) {
++            snapshotFlow {
++                snapshotProvider.snapshot(
++                    contentOffset = contentOffset.value,
++                    isAtTop = true,
++                    isDragging = true,
++                    isRefreshing = false
++                )
++            }
++                .onEach {
++                    emissionCount += 1
++                    when (emissionCount) {
++                        1 -> firstSnapshot.complete(Unit)
++                        2 -> updatedConfigSnapshot.complete(Unit)
++                    }
++                }
++                .take(3)
++                .toList()
++        }
++
++        withTimeout(5_000) { firstSnapshot.await() }
++        configState.value = updatedConfig
++        Snapshot.sendApplyNotifications()
++        withTimeout(5_000) { updatedConfigSnapshot.await() }
++        contentOffset.value = -130
++        Snapshot.sendApplyNotifications()
++        withTimeout(5_000) { snapshots.await() }
++    }
++
++    private fun snapshot(
++        holdRefreshInset: Boolean,
++        refreshThreshold: Float = 80f,
++        contentOffset: Int = -100
++    ): PullToRefreshSnapshot = PullToRefreshSnapshot(
++        contentOffset = contentOffset,
++        isAtTop = true,
++        isDragging = false,
++        isRefreshing = false,
++        holdRefreshInset = holdRefreshInset,
++        refreshThresholdPx = refreshThreshold,
++        refreshThresholdLogical = refreshThreshold
++    )
++}
+diff --git a/docs/Compose/list-and-scroll.md b/docs/Compose/list-and-scroll.md
+index eb399c8018cc80100c3ab45ca999090d81b5cee9..651621c7974de9ef59f7c7e12aa21ff047690c4b 100644
+--- a/docs/Compose/list-and-scroll.md
++++ b/docs/Compose/list-and-scroll.md
+@@ -173,7 +173,8 @@ fun PullToRefreshList(data: List<String>) {
+ | 参数 | 默认值 | 说明 |
+ |------|--------|------|
+ | `topInset` | `0.dp` | overlay HeaderBar 等场景下，PTR item 顶部的额外留白。传 **header 展开时的最大高度**，不是动画中的实时高度。框架会在 PTR item 内部自动应用等效 `padding(top)`，**请勿**再在 `modifier` 上重复设置 `padding(top = ...)`。未设置时行为与原来一致。 |
+-| `refreshThreshold` | `80.dp` | 触发刷新的下拉距离 |
++| `refreshThreshold` | `80.dp` | 触发刷新的下拉距离；同一个 `scrollState` 重组时更新即可生效，无需重建列表状态。 |
++| `holdRefreshInset` | `true` | 刷新期间是否持续保留 `refreshThreshold` 高度的顶部 content inset。若刷新进度由列表外的固定 Header 展示，并要求松手后列表内容立即回到原位，可设为 `false`；拖动阶段的 progress 与阈值触发语义不变。同一个 `scrollState` 下运行时切换也会作用于当前/下一次 pull。 |
+ 
+ #### overlay HeaderBar（`topInset`）
+ 

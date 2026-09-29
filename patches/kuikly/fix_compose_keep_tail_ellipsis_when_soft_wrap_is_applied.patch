@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:11:23 +0000
+Subject: fix(compose): keep tail ellipsis when soft wrap is applied
+
+applySoftWrap(true) replaced an already-set "tail" text overflow with
+"wordWrapping", so Text(maxLines = n, overflow = Ellipsis) lost its
+ellipsis on iOS once soft wrap was applied after the overflow. Leave a
+tail overflow untouched when soft wrap is enabled.
+
+Fork-Patch: compose-text-softwrap-keep-ellipsis
+Origin: 1cf83999
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+index 79a6db2e96c5fba4e499e68d14ebd5deb5bd3a46..8b22abb8423f3f9fce1fcf1da1ca891deff72800 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+@@ -265,6 +265,9 @@ internal fun TextAttr.applySoftWrap(softWrap: Boolean) {
+     val target = if (softWrap) "wordWrapping" else "clip"
+ 
+     val current = getProp(TextConst.TEXT_OVERFLOW) as? String
++    if (softWrap && current == "tail") {
++        return
++    }
+     if (softWrap && (current == null || current == target) && getProp(TextConst.LINES) == null) {
+         return
+     }

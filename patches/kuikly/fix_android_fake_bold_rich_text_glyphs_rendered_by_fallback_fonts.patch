@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:14:12 +0000
+Subject: fix(android): fake-bold rich text glyphs rendered by fallback fonts
+
+Stroke-based weight emulation does not reach glyphs drawn from a fallback
+typeface, so bold CJK/emoji runs rendered regular. Apply FontWeightSpan after
+FontFamilySpan, set isFakeBoldText for bold/extra-bold/black, and skip both
+the fake bold and the stroke when the resolved typeface is already bold.
+
+Fork-Patch: android-richtext-fake-bold-fallback
+Origin: da3d65fb 73fc777a
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+index 6886ecb90824e6752bf0ec1db261ee789cd4491d..0e4c45f3755a13f0a3994d494119948f3e92855a 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+@@ -184,8 +184,6 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+                 kuiklyContext.spToPxI(spanProps.fontSize)
+             }))
+         }
+-        val fontWeightSpan = FontWeightSpan(spanProps.fontWeight, index)
+-        textSpans.add(fontWeightSpan)
+         textSpans.add(StyleSpan(spanProps.fontStyle))
+         if (spanProps.fontVariant.isNotEmpty()) {
+             textSpans.add(FontVariantSpan(spanProps.fontVariant))
+@@ -193,6 +191,8 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+         if (spanProps.fontFamily.isNotEmpty()) {
+             textSpans.add(FontFamilySpan(spanProps.fontFamily, kuiklyContext?.getTypeFaceLoader()))
+         }
++        val fontWeightSpan = FontWeightSpan(spanProps.fontWeight, index)
++        textSpans.add(fontWeightSpan)
+ 
+         // 修饰相关
+         textSpans.add(ForegroundColorSpan(spanProps.color))
+@@ -413,10 +413,17 @@ internal class KRSkipInkCustomUnderlineSpan(
+  */
+ class FontWeightSpan(fontWeight: String, val index: Int = -1) : CharacterStyle() {
+ 
++    private val requestedWeight = fontWeight.toIntOrNull() ?: FONT_WEIGHT_NORMAL.toInt()
+     private val strokeWidth = getFontWeight(fontWeight)
++    private val fakeBold = isBoldWeight(fontWeight)
+ 
+     override fun updateDrawState(tp: TextPaint) {
+-        if (strokeWidth != 0f) {
++        val nativeTypefaceSatisfiesWeight =
++            requestedWeight == FONT_WEIGHT_BOLD.toInt() && tp.typeface?.isBold == true
++        if (fakeBold && !nativeTypefaceSatisfiesWeight) {
++            tp.isFakeBoldText = true
++        }
++        if (strokeWidth != 0f && !nativeTypefaceSatisfiesWeight) {
+             tp.style = Paint.Style.FILL_AND_STROKE
+             tp.strokeWidth = strokeWidth * tp.textSize
+         }
+@@ -449,6 +456,11 @@ class FontWeightSpan(fontWeight: String, val index: Int = -1) : CharacterStyle()
+                 else -> FONT_WEIGHT_NORMAL_VALUE
+             }
+         }
++
++        private fun isBoldWeight(fontWeight: String): Boolean =
++            fontWeight == FONT_WEIGHT_BOLD ||
++                fontWeight == FONT_WEIGHT_EXTRA_BOLD ||
++                fontWeight == FONT_WEIGHT_BLACK
+     }
+ }
+ 
