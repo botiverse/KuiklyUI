@@ -77,6 +77,7 @@ class KRImageView : public IKRRenderViewExport {
     bool RegisterLoadFailureCallback(const KRRenderCallback &event_callback);
     void FireOnImageCompleteEvent(ArkUI_NodeEvent *event);
     void FireOnImageErrorEvent(ArkUI_NodeEvent *event);
+    void FireAdapterImageErrorEvent();
     std::shared_ptr<KRImageLoadOption> ToImageLoadOption(const std::string &src);
     void LoadFromSrc(const std::string image_src);
     void LoadFromNetwork(const std::shared_ptr<KRImageLoadOption> image_option);
