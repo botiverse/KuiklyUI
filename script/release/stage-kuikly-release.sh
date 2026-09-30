@@ -291,6 +291,18 @@ run_ohos_renderer() (
   )
   mapfile -t release_hars < <(find core-render-ohos/build -type f -name '*.har' -print | sort)
   [[ ${#release_hars[@]} -eq 1 ]] || fail "expected exactly one release HAR, found ${#release_hars[@]}"
+  # The release HAR is built with hidden visibility; make sure every entry
+  # point libshared.so (Kotlin/Native) imports is still exported by libkuikly.so.
+  har_libs="$(mktemp -d)"
+  unzip -q -o "${release_hars[0]}" -d "$har_libs"
+  har_so="$(find "$har_libs" -type f -name libkuikly.so -path '*arm64*' -print -quit)"
+  [[ -n "$har_so" ]] || fail "release HAR has no arm64 libkuikly.so"
+  python3 tools/ohos-renderer-tests/check-cinterop-exports.py \
+    --def core/src/ohosArm64Main/ohosInterop/cinterop/ohos.def \
+    --so "$har_so" \
+    --nm "$OHOS_SDK_HOME/native/llvm/bin/llvm-nm" \
+    || fail "release HAR libkuikly.so is missing cinterop exports"
+  rm -rf "$har_libs"
   if [[ -n "${PUBLICATION_TAG_REF:-}" ]]; then
     python3 "$CONTRACT" package-ohos \
       --source-root "$PATCHES_ROOT" --har "${release_hars[0]}" \
