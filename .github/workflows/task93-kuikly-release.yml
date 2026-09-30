@@ -375,8 +375,24 @@ jobs:
             --manifest "$candidate/manifest.json" \
             --bundle "$candidate/bundle" \
             --output "$candidate/public-plan.json"
-          jq -e '.state == "ALL_ABSENT" or .state == "PARTIAL_EXACT" or .state == "ALL_COMPLETE_EXACT"' \
-            "$candidate/public-plan.json" >/dev/null
+          # The public plan is a hard gate only when this run can publish (a
+          # tag_ref was supplied). On the PR / push path the candidate is built
+          # from an unreleased tree and its set is expected to collide with
+          # whatever staging4 already holds for the same coordinates (a
+          # half-published or completed set). That is not a defect in the PR;
+          # report it and let the publish job (which re-plans with its own
+          # tag_ref-bound set) hold the real gate.
+          plan_state="$(jq -r '.state' "$candidate/public-plan.json")"
+          case "$plan_state" in
+            ALL_ABSENT|PARTIAL_EXACT|ALL_COMPLETE_EXACT) ;;
+            *)
+              if [[ -n "$PUBLICATION_TAG_REF" ]]; then
+                echo "::error::public plan state is $plan_state for a tagged candidate"
+                exit 1
+              fi
+              echo "::warning::public plan state is $plan_state on the PR/push path (no tag_ref); not gating -- the publish job re-plans and gates on its own set"
+              ;;
+          esac
           sha256sum \
             "$candidate/manifest.json" "$candidate/toolchains.json" \
             "$candidate/pom-consumer.json" \
@@ -579,7 +595,11 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 "$control_plane/script/release/kuikly_maven_publish.py" plan \
             --manifest "$final/manifest.json" --bundle "$final/bundle" \
             --output "$final/public-plan.json"
-          jq -e '((.state == "ALL_ABSENT" and .presentCount == 0) or (.state == "PARTIAL_EXACT" and .presentCount > 0)) and .presentCount < 920 and .productFileCount == 920 and
+          # PARTIAL_EXACT with every product file present is the state left behind
+          # when a previous publish uploaded all 920 objects but died before the
+          # completion manifest (e.g. a dropped readback GET); the publisher resumes
+          # it by re-verifying the public bytes and writing the completion manifest.
+          jq -e '((.state == "ALL_ABSENT" and .presentCount == 0) or (.state == "PARTIAL_EXACT" and .presentCount > 0)) and .presentCount <= 920 and .productFileCount == 920 and
             (.unexpected | length) == 0 and (.different | length) == 0 and
             (.listingDisagreement | length) == 0 and .completionPresent == false' \
             "$final/public-plan.json" >/dev/null

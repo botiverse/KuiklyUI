@@ -7,6 +7,7 @@ import os
 import sys
 import copy
 import hashlib
+import http.client
 import io
 import json
 import plistlib
@@ -2041,6 +2042,104 @@ class PublisherTests(unittest.TestCase):
             )
             self.assertTrue(http.raced)
             self.assertEqual("complete", json.loads(execution_path.read_text())["state"])
+
+    def test_all_products_present_without_completion_manifest_resumes_with_manifest_only(self) -> None:
+        # Regression for the 2.28.0-raft.4 publish: every product object was
+        # uploaded, then the readback GET died mid-body and the completion
+        # manifest was never written. The retry must classify that as a
+        # resumable PARTIAL_EXACT with present == expected, and finish by
+        # writing only the manifest (no product PUTs).
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            manifest, bundle_root, bundle = assemble_fixture(root)
+            products = {item["path"]: bundle[item["path"]] for item in manifest["publications"]}
+            http = MavenStateHttp(products)
+            plan = publisher.classify(http, manifest, bundle_root)
+            self.assertEqual("PARTIAL_EXACT", plan["state"])
+            self.assertEqual(len(manifest["publications"]), plan["presentCount"])
+            publisher.release(
+                http, manifest, plan, bundle_root, MavenStateHttp.TOKEN,
+                root / "execution.json",
+            )
+            puts = [without_prefix(event, "put:") for event in http.events if event.startswith("put:")]
+            self.assertEqual([contract.MANIFEST_PATH], puts)
+            self.assertEqual("complete", json.loads((root / "execution.json").read_text())["state"])
+
+    def test_classify_publication_state_table(self) -> None:
+        classify = publisher.classify_publication_state
+        self.assertEqual("ALL_ABSENT", classify(present_count=0, expected_count=920, manifest_found=False, conflict=False))
+        self.assertEqual("PARTIAL_EXACT", classify(present_count=1, expected_count=920, manifest_found=False, conflict=False))
+        self.assertEqual("PARTIAL_EXACT", classify(present_count=920, expected_count=920, manifest_found=False, conflict=False))
+        self.assertEqual("ALL_COMPLETE_EXACT", classify(present_count=920, expected_count=920, manifest_found=True, conflict=False))
+        self.assertEqual("CONFLICT", classify(present_count=919, expected_count=920, manifest_found=True, conflict=False))
+        self.assertEqual("CONFLICT", classify(present_count=0, expected_count=920, manifest_found=True, conflict=False))
+        self.assertEqual("CONFLICT", classify(present_count=920, expected_count=920, manifest_found=False, conflict=True))
+
+    def test_transient_transport_failures_are_retried_with_bound(self) -> None:
+        class Response:
+            status = 200
+
+            def read(self) -> bytes:
+                return b"body"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc) -> None:
+                return None
+
+        class Opener:
+            def __init__(self, failures: list[Exception]) -> None:
+                self.failures = list(failures)
+                self.calls = 0
+
+            def open(self, request, timeout=None):
+                self.calls += 1
+                if self.failures:
+                    raise self.failures.pop(0)
+                return Response()
+
+        def http_error(code: int) -> urllib.error.HTTPError:
+            return urllib.error.HTTPError("https://example.invalid/x", code, "err", {}, io.BytesIO(b""))
+
+        with mock.patch.object(publisher.time, "sleep") as sleep:
+            # truncated body twice, then success: retried, result returned
+            opener = Opener([
+                http.client.IncompleteRead(b"x" * 65536, 1893694),
+                ConnectionResetError("reset"),
+            ])
+            status, body = publisher.Http(opener=opener).request(contract.PUBLIC_MAVEN_ORIGIN, "/a", "GET")
+            self.assertEqual((200, b"body"), (status, body))
+            self.assertEqual(3, opener.calls)
+            self.assertEqual(2, sleep.call_count)
+
+            # transient HTTP statuses are retried the same way for GET
+            opener = Opener([http_error(503), http_error(429)])
+            self.assertEqual((200, b"body"), publisher.Http(opener=opener).request(contract.PUBLIC_MAVEN_ORIGIN, "/a", "GET"))
+            self.assertEqual(3, opener.calls)
+
+            # ...but a PUT status is returned to put_and_readback, which owns PUT retries
+            opener = Opener([http_error(503)])
+            self.assertEqual(503, publisher.Http(opener=opener).request(contract.PUBLIC_MAVEN_ORIGIN, "/a", "PUT", body=b"z")[0])
+            self.assertEqual(1, opener.calls)
+
+            # a non-transient status is returned on the first attempt
+            opener = Opener([http_error(404)])
+            self.assertEqual(404, publisher.Http(opener=opener).request(contract.PUBLIC_MAVEN_ORIGIN, "/a", "GET")[0])
+            self.assertEqual(1, opener.calls)
+
+            # the retry budget is bounded: persistent failure surfaces as PublishError
+            opener = Opener([urllib.error.URLError("down")] * (publisher.TRANSIENT_RETRY_ATTEMPTS + 2))
+            with self.assertRaises(publisher.PublishError):
+                publisher.Http(opener=opener).request(contract.PUBLIC_MAVEN_ORIGIN, "/a", "GET")
+            self.assertEqual(publisher.TRANSIENT_RETRY_ATTEMPTS, opener.calls)
+
+            # redirects are never retried or followed
+            opener = Opener([http_error(302)])
+            with self.assertRaises(publisher.PublishError):
+                publisher.Http(opener=opener).request(contract.PUBLIC_MAVEN_ORIGIN, "/a", "GET")
+            self.assertEqual(1, opener.calls)
+
 
 if __name__ == "__main__":
     if "--run-reconfigure-pipeline" in sys.argv:
