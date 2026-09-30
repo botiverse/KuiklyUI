@@ -14,14 +14,14 @@ Upstream-Status: not-upstreamable
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-ohos/oh-package.json5 b/core-render-ohos/oh-package.json5
-index 0ca89c32871e23439b0a49eded1c5e8135db20cd..61ac38e3b76c33261b32fda5cc9293e728136d52 100644
+index 0ca89c32871e23439b0a49eded1c5e8135db20cd..337b6cb358ea996d509f2dda86c6e37ca0a4fd86 100644
 --- a/core-render-ohos/oh-package.json5
 +++ b/core-render-ohos/oh-package.json5
 @@ -1,6 +1,6 @@
  {
    "name": "@kuikly-open/render",
 -  "version": "2.0.0",
-+  "version": "2.28.0-raft.3-2.0.21-ohos",
++  "version": "2.28.0-raft.4-2.0.21-ohos",
    "description": "Kuikly is a comprehensive cross-platform solution for UI and logic based on Kotlin multi-platform. It was launched by Tencent's company-level Oteam in the front-end field. It aims to provide a high-performance, full-platform development framework with unified codebase, ultimate ease of use, and dynamic flexibility",
    "main": "Index.ets",
    "author": {
