@@ -16,10 +16,10 @@ Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..39b7870c1b37c71cb7e813c5e9a317e7a3360f13
+index 0000000000000000000000000000000000000000..7e265b517a90e167208c894c56fc9c39226a4e56
 --- /dev/null
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,82 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -75,11 +75,35 @@ index 0000000000000000000000000000000000000000..39b7870c1b37c71cb7e813c5e9a317e7
 +    return child_count + 5;
 +}
 +
++// Range the chip chrome is measured over, in layout (UTF-16) offsets.
++//
++// Placeholder edges are real SkParagraph runs, so measuring the whole box
++// range [layout_start, layout_end) returns the reserved width and the view
++// only trims the margins. The zero-font letter-spaced edge carriers are not
++// reliably reported by OH_Drawing_TypographyGetRectsForRange: on-device the
++// trailing carrier contributed no width, so the chrome ended before the last
++// glyphs of the token even though layout had reserved the space. Measure the
++// children only ([layout_start + 1, layout_end - 1)) and let the view add
++// padding and border back around the text it actually painted.
++struct KRInlineBoxChromeRange {
++    int start = 0;
++    int end = 0;
++    bool includes_reserved_edges = false;
++};
++
++inline KRInlineBoxChromeRange KRMakeInlineBoxChromeRange(int layout_start, int layout_end,
++                                                          bool atomic_text_edges) {
++    if (!atomic_text_edges || layout_end - layout_start < 2) {
++        return KRInlineBoxChromeRange{layout_start, layout_end, true};
++    }
++    return KRInlineBoxChromeRange{layout_start + 1, layout_end - 1, false};
++}
++
 +}  // namespace kuikly::richtext
 +
 +#endif  // CORE_RENDER_OHOS_KRINLINEBOXATOMICTEXTEDGE_H
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
-index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade26176db7a54 100644
+index 9c785e25f45c2773efc057d0baee34486d23f6a9..10b48e917ae7913f849e18f2c1f45f1226fd7096 100644
 --- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
 @@ -36,6 +36,7 @@
@@ -106,7 +130,15 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
  constexpr char kInlineBoxPartLeading[] = "leading";
  constexpr char kInlineBoxPartGlue[] = "glue";
  constexpr char kInlineBoxPartChild[] = "child";
-@@ -535,12 +537,17 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -85,6 +87,7 @@ struct KRInlineBoxGroupPlan {
+     int span_index = -1;
+     int layout_start = -1;
+     int layout_end = -1;
++    bool atomic_text_edges = false;
+     int semantic_start = -1;
+     std::u16string semantic_text;
+     uint32_t fill_color = 0;
+@@ -535,12 +538,17 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              const float margin_end_vp = GetKRValue("inlineBoxMarginEnd", group_map, group_map)->toFloat();
              float content_height_vp = GetKRValue("fontSize", group_map, props_)->toFloat();
              if (content_height_vp <= 0) content_height_vp = 15.0f;
@@ -124,7 +156,7 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
              const float box_height_vp = content_height_vp + padding_top_vp + padding_bottom_vp + border_vp * 2.0f;
  
              KRInlineBoxGroupPlan plan;
-@@ -570,18 +577,41 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -570,18 +578,41 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
                  return map;
              };
  
@@ -172,7 +204,7 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
                  glue["text"] = glue["value"];
                  flattened.push_back(KRRenderValue::Make(glue));
  
-@@ -595,18 +625,41 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -595,18 +626,41 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
  
              auto trailing_glue = make_part(kInlineBoxPartGlue);
@@ -220,7 +252,7 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
              ++top_level_index;
          }
          spans = std::move(flattened);
-@@ -649,6 +702,32 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -649,6 +703,34 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
          semantic_text_content.append(semantic_text);
          layout_to_semantic_offsets.push_back(semantic_text_content.size());
      };
@@ -234,10 +266,12 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
 +        layout_to_semantic_offsets.back() = semantic_text_content.size();
 +        plan->layout_end = charOffset;
 +        span_offsets_.emplace_back(std::tuple(span_index, plan->layout_start, plan->layout_end));
++        const auto chrome_range = kuikly::richtext::KRMakeInlineBoxChromeRange(
++            plan->layout_start, plan->layout_end, plan->atomic_text_edges);
 +        context_thread_slock_chrome_runs_.push_back(
 +            KRSlockChromeRun{
-+                plan->layout_start,
-+                plan->layout_end,
++                chrome_range.start,
++                chrome_range.end,
 +                plan->fill_color,
 +                plan->border_color,
 +                plan->border_width_px,
@@ -247,13 +281,13 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
 +                plan->margin_end_px,
 +                plan->box_height_px,
 +                plan->corner_radius_px,
-+                true,
++                chrome_range.includes_reserved_edges,
 +            });
 +    };
      for (auto span : spans) {
          auto spanMap = span->toMap();
          const int spanIndex = GetKRValue(kTopLevelSpanIndexKey, spanMap, spanMap)->toInt();
-@@ -656,6 +735,12 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -656,6 +738,12 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
          const int inlineBoxChildIndex = GetKRValue(kInlineBoxChildIndexKey, spanMap, spanMap)->toInt();
          const std::string inlineBoxPart = GetKRValue(kInlineBoxPartKey, spanMap, spanMap)->toString();
          const bool isInlineBoxGroupPart = !inlineBoxPart.empty();
@@ -266,7 +300,15 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
          KRInlineBoxGroupPlan *inlineBoxGroupPlan = nullptr;
          if (isInlineBoxGroupPart) {
              auto plan_it = std::find_if(
-@@ -776,7 +861,10 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -668,6 +756,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+                 if (inlineBoxPart == kInlineBoxPartLeading && inlineBoxGroupPlan->layout_start < 0) {
+                     inlineBoxGroupPlan->layout_start = charOffset;
+                     inlineBoxGroupPlan->semantic_start = static_cast<int>(semantic_text_content.size());
++                    inlineBoxGroupPlan->atomic_text_edges = isInlineBoxAtomicTextEdge;
+                 }
+             }
+         }
+@@ -776,7 +865,10 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
              OH_Drawing_SetTextStyleForegroundBrush(txtStyle, textForegroundBrush);
          }
@@ -278,7 +320,7 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
          OH_Drawing_SetTextStyleFontWeight(txtStyle, fontWeight);
          OH_Drawing_SetTextStyleBaseLine(txtStyle, TEXT_BASELINE_ALPHABETIC);
          OH_Drawing_SetTextStyleDecoration(txtStyle, textDecoration);
-@@ -790,8 +878,11 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -790,8 +882,11 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
          }
          OH_Drawing_SetTextStyleFontStyle(txtStyle, fontStyle);
@@ -292,7 +334,7 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
          }
          if (lineSpacing > 0) {
              OH_Drawing_SetTextStyleFontHeight(txtStyle, lineSpacing + std::max(lineHeight, 1.0));
-@@ -893,28 +984,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -893,28 +988,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              }
              placeholder_count++;
              charOffset += 1;
@@ -323,7 +365,7 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
              }
          } else {
              OH_Drawing_TypographyHandlerAddText(handler, text.c_str());  // 添加文本
-@@ -929,6 +1001,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+@@ -929,6 +1005,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
              } else {
                  append_mapped_text(text16, text16, nullptr);
              }
@@ -335,10 +377,10 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..f0ccbc99178635939e9cab1a82ade261
          if (textForegroundPen) {
 diff --git a/core-render-ohos/src/test/cpp/inline_box_atomic_text_edge_test.cpp b/core-render-ohos/src/test/cpp/inline_box_atomic_text_edge_test.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..2df1dbcb475bd9d4a51676274c0633323ba95f8d
+index 0000000000000000000000000000000000000000..6a1e96e2187f185614e1ab382d718068ab3c60cd
 --- /dev/null
 +++ b/core-render-ohos/src/test/cpp/inline_box_atomic_text_edge_test.cpp
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,82 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -397,6 +439,26 @@ index 0000000000000000000000000000000000000000..2df1dbcb475bd9d4a51676274c063332
 +    assert(layout[box_start - 1] == kInlineBoxBoundaryBreak);
 +    assert(layout[box_end] == kInlineBoxBoundaryBreak);
 +    assert(box_end - box_start == token.size() + KRInlineBoxAtomicLayoutOnlyClusterCount(1) - 2);
++
++    // Chrome measurement range. Placeholder-edge boxes keep the full range
++    // and let the view trim margins; atomic-edge boxes measure the children
++    // only and let the view add padding and border, because the zero-font
++    // trailing carrier is not reliably reported by GetRectsForRange.
++    const auto placeholder_range = KRMakeInlineBoxChromeRange(10, 20, false);
++    assert(placeholder_range.start == 10);
++    assert(placeholder_range.end == 20);
++    assert(placeholder_range.includes_reserved_edges);
++    const auto atomic_range =
++        KRMakeInlineBoxChromeRange(static_cast<int>(box_start), static_cast<int>(box_end), true);
++    assert(atomic_range.start == static_cast<int>(box_start) + 1);
++    assert(atomic_range.end == static_cast<int>(box_end) - 1);
++    assert(!atomic_range.includes_reserved_edges);
++    assert(layout[atomic_range.start] == kInlineBoxWordJoiner);
++    assert(layout[atomic_range.end - 1] == kInlineBoxWordJoiner);
++    assert(layout.compare(atomic_range.start + 1, token.size(), token) == 0);
++    // Degenerate boxes (no room for both carriers) fall back to the full range.
++    const auto degenerate = KRMakeInlineBoxChromeRange(4, 5, true);
++    assert(degenerate.start == 4 && degenerate.end == 5 && degenerate.includes_reserved_edges);
 +
 +    std::cout << "OHOS inline-box atomic text edge test: PASS\n";
 +    return 0;
