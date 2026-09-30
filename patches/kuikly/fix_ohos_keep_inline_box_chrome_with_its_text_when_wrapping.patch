@@ -16,10 +16,10 @@ Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..7e265b517a90e167208c894c56fc9c39226a4e56
+index 0000000000000000000000000000000000000000..21068bea59e98a6441639a0400285191e1448bc9
 --- /dev/null
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,166 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -38,7 +38,9 @@ index 0000000000000000000000000000000000000000..7e265b517a90e167208c894c56fc9c39
 +#ifndef CORE_RENDER_OHOS_KRINLINEBOXATOMICTEXTEDGE_H
 +#define CORE_RENDER_OHOS_KRINLINEBOXATOMICTEXTEDGE_H
 +
++#include <cmath>
 +#include <cstddef>
++#include <vector>
 +
 +namespace kuikly::richtext {
 +
@@ -98,6 +100,88 @@ index 0000000000000000000000000000000000000000..7e265b517a90e167208c894c56fc9c39
 +    }
 +    return KRInlineBoxChromeRange{layout_start + 1, layout_end - 1, false};
 +}
++
++struct KRInlineBoxChromeEdges {
++    float left = 0.0f;
++    float right = 0.0f;
++};
++
++// Horizontal extent of one chrome fragment of an atomic-edge box.
++//
++// The chrome range of such a box covers the children only (see
++// KRMakeInlineBoxChromeRange). GetRectsForRange reports those children as if
++// the zero-font leading carrier had no advance, while the glyphs are drawn
++// after its reserved letter spacing, so the reported fragment sits to the left
++// of the ink by `shift_px`: the reserved width of every zero-font carrier that
++// precedes this fragment on its line -- earlier boxes' leading and trailing
++// carriers (see KRInlineBoxLineReservedWidths) plus the box's own leading edge
++// for the fragment that starts the box. A wrapped continuation starts a new
++// line, so only carriers already passed on that line count. Move the fragment
++// back over the ink first, then grow it by padding and border on real span
++// ends -- never on internal wrap boundaries.
++inline KRInlineBoxChromeEdges KRMakeInlineBoxAtomicChromeEdges(float fragment_left, float fragment_right,
++                                                                 bool is_span_start, bool is_span_end,
++                                                                 float shift_px, float padding_start_px,
++                                                                 float padding_end_px, float border_width_px) {
++    KRInlineBoxChromeEdges edges{fragment_left + shift_px, fragment_right + shift_px};
++    if (is_span_start) {
++        edges.left -= padding_start_px + border_width_px;
++    }
++    if (is_span_end) {
++        edges.right += padding_end_px + border_width_px;
++    }
++    return edges;
++}
++
++// Reserved widths of the zero-font carriers of an atomic-edge box: the layout
++// space the leading edge occupies before the first child glyph and the
++// trailing edge after the last one.
++inline float KRInlineBoxLeadingReservedWidth(float margin_start_px, float border_width_px,
++                                              float padding_start_px) {
++    return margin_start_px + border_width_px + padding_start_px;
++}
++
++inline float KRInlineBoxTrailingReservedWidth(float padding_end_px, float border_width_px,
++                                               float margin_end_px) {
++    return padding_end_px + border_width_px + margin_end_px;
++}
++
++// Per-line running sum of reserved carrier width already passed.
++//
++// The displacement accumulates along a line: every rect reported after a
++// zero-font carrier is short by that carrier's reserved width, so the second
++// chip on a line sat three reserved widths left of its ink (its predecessor's
++// leading and trailing carriers plus its own leading one) while the first sat
++// one. Lines are keyed by fragment centre y, matching the tolerance used when
++// fragments are merged per line.
++class KRInlineBoxLineReservedWidths {
++public:
++    float Before(float line_center_y) const {
++        for (const auto &entry : entries_) {
++            if (std::fabs(entry.center_y - line_center_y) <= 1.0f) {
++                return entry.px;
++            }
++        }
++        return 0.0f;
++    }
++
++    void Add(float line_center_y, float px) {
++        for (auto &entry : entries_) {
++            if (std::fabs(entry.center_y - line_center_y) <= 1.0f) {
++                entry.px += px;
++                return;
++            }
++        }
++        entries_.push_back(Entry{line_center_y, px});
++    }
++
++private:
++    struct Entry {
++        float center_y;
++        float px;
++    };
++    std::vector<Entry> entries_;
++};
 +
 +}  // namespace kuikly::richtext
 +
@@ -375,12 +459,89 @@ index 9c785e25f45c2773efc057d0baee34486d23f6a9..10b48e917ae7913f849e18f2c1f45f12
          }
          OH_Drawing_DestroyTextStyle(txtStyle);
          if (textForegroundPen) {
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
+index 6f4fd938b0700ea7f3e34ec439d3fa5698704440..11316b061690e399df9b131aba07c33b60988096 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextView.cpp
+@@ -15,6 +15,8 @@
+ 
+ #include "libohos_render/expand/components/richtext/KRRichTextView.h"
+ 
++#include "libohos_render/expand/components/richtext/KRInlineBoxAtomicTextEdge.h"
++
+ #include <algorithm>
+ #include <cmath>
+ #include <codecvt>
+@@ -132,11 +134,24 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
+     OH_Drawing_Brush *brush = OH_Drawing_BrushCreate();
+     OH_Drawing_BrushSetAntiAlias(brush, drawFill);
+ 
++    // Zero-font edge carriers displace every rect reported after them on the
++    // same line; runs arrive in document order, so track what each line has
++    // passed so far and move each fragment back over its ink.
++    kuikly::richtext::KRInlineBoxLineReservedWidths reservedPassed;
+     for (const auto &run : runs) {
+         auto fragments = KRCollectSlockChromeFragments(typography, run);
+         if (fragments.empty()) {
+             continue;
+         }
++        const bool atomicEdges = !run.includes_reserved_edges;
++        const float leadingReserved = atomicEdges
++            ? kuikly::richtext::KRInlineBoxLeadingReservedWidth(
++                  run.margin_start_px, run.border_width_px, run.padding_start_px)
++            : 0.0f;
++        const float trailingReserved = atomicEdges
++            ? kuikly::richtext::KRInlineBoxTrailingReservedWidth(
++                  run.padding_end_px, run.border_width_px, run.margin_end_px)
++            : 0.0f;
+         // Native Drawing captures the brush state when it is attached to the
+         // canvas. Set the per-run color first; mutating an already attached
+         // brush leaves some HarmonyOS versions drawing the default black.
+@@ -148,13 +163,31 @@ void KRDrawSlockChipChrome(OH_Drawing_Canvas *canvas, OH_Drawing_Typography *typ
+             const auto &fragment = fragments[i];
+             const bool isSpanStart = i == 0;
+             const bool isSpanEnd = i + 1 == fragments.size();
+-            const float left = run.includes_reserved_edges
+-                ? fragment.left + (isSpanStart ? run.margin_start_px : 0.0f)
+-                : fragment.left - (isSpanStart ? run.padding_start_px + borderWidth : 0.0f);
+-            const float right = run.includes_reserved_edges
+-                ? fragment.right - (isSpanEnd ? run.margin_end_px : 0.0f)
+-                : fragment.right + (isSpanEnd ? run.padding_end_px + borderWidth : 0.0f);
+-            const float centerY = (fragment.top + fragment.bottom) / 2.0f - drawOffsetY;
++            const float lineCenterY = (fragment.top + fragment.bottom) / 2.0f;
++            const float passed = reservedPassed.Before(lineCenterY);
++            float left = 0.0f;
++            float right = 0.0f;
++            if (run.includes_reserved_edges) {
++                left = fragment.left + passed + (isSpanStart ? run.margin_start_px : 0.0f);
++                right = fragment.right + passed - (isSpanEnd ? run.margin_end_px : 0.0f);
++            } else {
++                // Children-only range (see KRMakeInlineBoxAtomicChromeEdges):
++                // the fragment that starts the box also sits behind its own
++                // leading carrier; a wrapped continuation starts its line.
++                const auto edges = kuikly::richtext::KRMakeInlineBoxAtomicChromeEdges(
++                    fragment.left, fragment.right, isSpanStart, isSpanEnd,
++                    passed + (isSpanStart ? leadingReserved : 0.0f),
++                    run.padding_start_px, run.padding_end_px, borderWidth);
++                left = edges.left;
++                right = edges.right;
++            }
++            if (isSpanStart) {
++                reservedPassed.Add(lineCenterY, leadingReserved);
++            }
++            if (isSpanEnd) {
++                reservedPassed.Add(lineCenterY, trailingReserved);
++            }
++            const float centerY = lineCenterY - drawOffsetY;
+             const float top = centerY - chipHeight / 2.0f;
+             const float bottom = centerY + chipHeight / 2.0f;
+             if (drawFill && run.fill_color != 0) {
 diff --git a/core-render-ohos/src/test/cpp/inline_box_atomic_text_edge_test.cpp b/core-render-ohos/src/test/cpp/inline_box_atomic_text_edge_test.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6a1e96e2187f185614e1ab382d718068ab3c60cd
+index 0000000000000000000000000000000000000000..6b2c88c9a696ea645e47b42f49d6529a46551eee
 --- /dev/null
 +++ b/core-render-ohos/src/test/cpp/inline_box_atomic_text_edge_test.cpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,140 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -459,6 +620,64 @@ index 0000000000000000000000000000000000000000..6a1e96e2187f185614e1ab382d718068
 +    // Degenerate boxes (no room for both carriers) fall back to the full range.
 +    const auto degenerate = KRMakeInlineBoxChromeRange(4, 5, true);
 +    assert(degenerate.start == 4 && degenerate.end == 5 && degenerate.includes_reserved_edges);
++
++    // Fragment geometry. Regression shape (2.28.0-raft.4, OHOS ⑦): a bold
++    // mention chip with margin 2 / border 1 / padding 4 vp at dpi 3 was drawn
++    // with too much room on the left and its glyphs touching or crossing the
++    // right edge -- the whole box sat one leading reserved width (21 px) to
++    // the left of the ink. The measured fragment is [100, 160); the ink is
++    // [121, 181).
++    const float margin = 6.0f, border = 3.0f, padding = 12.0f;
++    const float leading_reserved = KRInlineBoxLeadingReservedWidth(margin, border, padding);
++    assert(leading_reserved == 21.0f);
++    const auto single = KRMakeInlineBoxAtomicChromeEdges(100.0f, 160.0f, true, true, leading_reserved,
++                                                        padding, padding, border);
++    assert(single.left == 121.0f - (padding + border));
++    assert(single.right == 181.0f + (padding + border));
++    // A wrapped box: the first fragment ends at an internal wrap boundary (no
++    // trailing growth); the continuation starts a new line, so nothing on its
++    // line precedes it (no shift) and it only grows at the real span end.
++    const auto head = KRMakeInlineBoxAtomicChromeEdges(300.0f, 340.0f, true, false, leading_reserved,
++                                                      padding, padding, border);
++    assert(head.left == 321.0f - (padding + border));
++    assert(head.right == 361.0f);
++    const auto tail = KRMakeInlineBoxAtomicChromeEdges(0.0f, 30.0f, false, true, 0.0f, padding, padding, border);
++    assert(tail.left == 0.0f);
++    assert(tail.right == 30.0f + (padding + border));
++    // Inline code (margin 0 / border 0 / padding 4 vp): with no shift the box
++    // is exactly tight on the right -- the raft.4 symptom; with the shift it is
++    // padded symmetrically.
++    const float code_reserved = KRInlineBoxLeadingReservedWidth(0.0f, 0.0f, 12.0f);
++    assert(code_reserved == 12.0f);
++    const auto code = KRMakeInlineBoxAtomicChromeEdges(50.0f, 90.0f, true, true, code_reserved, 12.0f, 12.0f, 0.0f);
++    assert(code.left == 50.0f && code.right == 114.0f);
++
++    // Per-line accumulation (measured on 10000978: two mention chips on one
++    // line, the first 45 px / -2 px, the second 95 px / -53 px). The second
++    // box sits behind its predecessor's leading and trailing carriers plus
++    // its own leading one; a chip on another line starts from zero.
++    KRInlineBoxLineReservedWidths passed;
++    const float trailing_reserved = KRInlineBoxTrailingReservedWidth(padding, border, margin);
++    assert(trailing_reserved == 21.0f);
++    assert(passed.Before(200.0f) == 0.0f);
++    const float first_shift = passed.Before(200.0f) + leading_reserved;
++    assert(first_shift == 21.0f);
++    passed.Add(200.0f, leading_reserved);
++    passed.Add(200.0f, trailing_reserved);
++    assert(passed.Before(200.0f) == 42.0f);
++    assert(passed.Before(200.5f) == 42.0f);  // same line within merge tolerance
++    assert(passed.Before(260.0f) == 0.0f);   // another line
++    const float second_shift = passed.Before(200.0f) + leading_reserved;
++    assert(second_shift == 63.0f);
++    const auto second = KRMakeInlineBoxAtomicChromeEdges(400.0f, 470.0f, true, true, second_shift,
++                                                        padding, padding, border);
++    assert(second.left == 463.0f - (padding + border));
++    assert(second.right == 533.0f + (padding + border));
++    // A placeholder-edge box later on the same line is displaced by the
++    // carriers passed, but has no carriers of its own to add.
++    passed.Add(200.0f, leading_reserved);
++    passed.Add(200.0f, trailing_reserved);
++    assert(passed.Before(200.0f) == 84.0f);
 +
 +    std::cout << "OHOS inline-box atomic text edge test: PASS\n";
 +    return 0;
