@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jony <raft-mobile-jony@mail.build>
+Date: Fri, 2 Oct 2026 22:06:34 +0800
+Subject: fix(ios): complete failed asynchronous image cache loads
+
+Subscribe to both image outcomes and settle each load once. Remove failed entries so callers can retry, preserve newer same-key loads, and avoid retaining modules through loading views.
+
+Fork-Patch: ios-memory-cache-completion
+Upstream-Status: pending
+Signed-off-by: Jony <raft-mobile-jony@mail.build>
+
+diff --git a/core-render-ios/Extension/Modules/KRMemoryCacheModule.m b/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
+index 93f1919f1abbceaac81c3a4782410f01a612fad0..d6d3fe4d931bafb3405c6d90f318b7bc84b79855 100644
+--- a/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
++++ b/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
+@@ -182,28 +182,48 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+         strongSelf->_imageCache[cacheKey] = imageView;
+         [strongSelf->_imageCacheLock unlock];
+         
+-        KuiklyRenderCallback imageLoadSuccessCB = nil;
+-        if(callback){
+-            imageLoadSuccessCB = ^(id _Nullable result){
+-                UIImage* img = imageView.image;
+-                // update cache
+-                [strongSelf->_imageCacheLock lock];
+-                strongSelf->_imageCache[cacheKey] = img;
+-                [strongSelf->_imageCacheLock unlock];
+-                
+-                result = @{
++        // Cache owns the in-flight view; callbacks must not retain the module
++        // or the view. Complete both outcomes even when no callback was passed.
++        __weak KRImageView *weakImageView = imageView;
++        __block BOOL completed = NO;
++        void (^finish)(BOOL) = ^(BOOL loaded) {
++            KRMemoryCacheModule *module = weakSelf;
++            KRImageView *view = weakImageView;
++            if (!module || !view || completed) {
++                return;
++            }
++            completed = YES;
++            UIImage *image = loaded ? view.image : nil;
++            [module->_imageCacheLock lock];
++            // A late completion must not replace/evict a newer same-key load.
++            if (module->_imageCache[cacheKey] == view) {
++                if (image) {
++                    module->_imageCache[cacheKey] = image;
++                } else {
++                    [module->_imageCache removeObjectForKey:cacheKey];
++                }
++            }
++            [module->_imageCacheLock unlock];
++            KuiklyRenderCallback clearedCallback = nil;
++            [view hrv_setPropWithKey:@"loadSuccess" propValue:clearedCallback];
++            [view hrv_setPropWithKey:@"loadFailure" propValue:clearedCallback];
++            if (callback) {
++                callback(@{
+                     @"state": kCacheStateComplete,
+-                    @"errorCode": @(0),
+-                    @"errorMsg": @"",
++                    @"errorCode": image ? @(0) : @(-1),
++                    @"errorMsg": image ? @"" : @"Image load failed",
+                     @"cacheKey": cacheKey,
+-                    @"width": @(img.size.width),
+-                    @"height": @(img.size.height)
+-                };
+-                callback(result);
+-            };
+-        }
+-        
+-        [imageView hrv_setPropWithKey:@"loadSuccess" propValue:imageLoadSuccessCB];
++                    @"width": @(image.size.width),
++                    @"height": @(image.size.height)
++                });
++            }
++        };
++        [imageView hrv_setPropWithKey:@"loadSuccess" propValue:^(id result) {
++            finish(YES);
++        }];
++        [imageView hrv_setPropWithKey:@"loadFailure" propValue:^(id result) {
++            finish(NO);
++        }];
+         if ([src hasPrefix:KRImageBase64Prefix]) {
+             NSString *cacheKeySrc = [NSString stringWithFormat:@"data:image_Md5_%@", cacheKey];
+             [self setMemoryObjectWithKey:cacheKeySrc value:src];
+diff --git a/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m b/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..a96e8ec7e4ada20e679dadbefd3294a7ad2437d7
+--- /dev/null
++++ b/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m
+@@ -0,0 +1,93 @@
++#import <AppKit/AppKit.h>
++#import "KRMemoryCacheModule.h"
++#import "KRImageView.h"
++
++NSString *const KRImageBase64Prefix = @"data:image";
++NSString *const KRImageAssetsPrefix = @"assets://";
++NSString *const KRImageLocalPathPrefix = @"file://";
++NSString *const KR_PARAM_KEY = @"param";
++NSString *const KR_CALLBACK_KEY = @"callback";
++@implementation TDFBaseModule
++@end
++@implementation KRBaseModule
++@synthesize hr_rootView;
++@end
++@implementation NSString (CacheFixture)
++- (NSString *)kr_md5String { return self; }
++@end
++@implementation NSDictionary (CacheFixture)
++- (NSString *)hr_dictionaryToString {
++    return [[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:self options:0 error:nil] encoding:NSUTF8StringEncoding];
++}
++@end
++
++static NSMutableArray<KRImageView *> *loads;
++@interface KRImageView ()
++@property(nonatomic, copy) KuiklyRenderCallback success;
++@property(nonatomic, copy) KuiklyRenderCallback failure;
++@end
++@implementation KRImageView
++@synthesize hr_rootView;
++- (void)hrv_setPropWithKey:(NSString *)key propValue:(id)value {
++    if ([key isEqualToString:@"loadSuccess"]) self.success = value;
++    else if ([key isEqualToString:@"loadFailure"]) self.failure = value;
++    else if ([key isEqualToString:@"src"]) [loads addObject:self];
++}
++@end
++@interface KRMemoryCacheModule (Fixture)
++- (NSString *)cacheImage:(NSString *)src sync:(BOOL)sync callback:(KuiklyRenderCallback)callback;
++@end
++static void Check(BOOL ok, NSString *message) {
++    if (!ok) { NSLog(@"FAIL: %@", message); exit(1); }
++}
++static KRImageView *Start(KRMemoryCacheModule *cache, NSString *key, KuiklyRenderCallback cb) {
++    NSUInteger before = loads.count;
++    NSString *receipt = [cache cacheImage:key sync:NO callback:cb];
++    Check([receipt containsString:@"InProgress"], @"async starts in progress");
++    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2];
++    while (loads.count == before && deadline.timeIntervalSinceNow > 0)
++        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
++    Check(loads.count == before + 1, @"loader installed");
++    return loads.lastObject;
++}
++int main(void) {
++    @autoreleasepool {
++        loads = [NSMutableArray new];
++        KRMemoryCacheModule *cache = [KRMemoryCacheModule new];
++        __block NSUInteger count = 0;
++        __block NSDictionary *out;
++        KRImageView *failed = Start(cache, @"remote-a", ^(id r) { count++; out = r; });
++        Check(failed.failure != nil, @"failure handler registered");
++        KuiklyRenderCallback lateSuccess = failed.success;
++        failed.failure(@{@"errorCode": @404});
++        lateSuccess(@{});
++        Check(count == 1 && [out[@"state"] isEqual:@"Complete"] && [out[@"errorCode"] intValue] != 0, @"failure terminates once");
++        Check([cache imageWithKey:@"remote-a"] == nil && failed.failure == nil && failed.success == nil, @"failure clears callbacks and cache");
++
++        KRImageView *retry = Start(cache, @"remote-a", ^(id r) { count++; out = r; });
++        retry.image = [[UIImage alloc] initWithSize:NSMakeSize(3,4)];
++        retry.success(@{});
++        Check(count == 2 && [out[@"errorCode"] intValue] == 0 && [out[@"width"] intValue] == 3 && [cache imageWithKey:@"remote-a"] == retry.image, @"retry succeeds and caches dimensions");
++
++        KRImageView *old = Start(cache, @"same-key", nil);
++        KRImageView *fresh = Start(cache, @"same-key", nil);
++        fresh.image = [[UIImage alloc] initWithSize:NSMakeSize(5,6)];
++        fresh.success(@{});
++        old.failure(@{});
++        Check([cache imageWithKey:@"same-key"] == fresh.image, @"old failure preserves newer cached result; nil callback still settles");
++
++        KRImageView *empty = Start(cache, @"empty-success", ^(id r) { out = r; });
++        empty.success(@{});
++        Check([out[@"errorCode"] intValue] != 0, @"success without image is failure");
++
++        __weak KRMemoryCacheModule *weakCache;
++        @autoreleasepool {
++            KRMemoryCacheModule *temporary = [KRMemoryCacheModule new];
++            weakCache = temporary;
++            Start(temporary, @"never-finishes", ^(id r) {});
++        }
++        Check(weakCache == nil, @"inflight callbacks do not retain module");
++        NSLog(@"PASS: memory cache failure, retry, stale completion, nil callback and lifetime");
++    }
++    return 0;
++}
+diff --git a/tools/ios-renderer-tests/run-memory-cache-completion-test.sh b/tools/ios-renderer-tests/run-memory-cache-completion-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..7f4c08f414c0d3f8441059e3f2db42843de719cc
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-memory-cache-completion-test.sh
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
++build_dir="${1:-$repo_root/build/ios-memory-cache-completion-test}"
++mkdir -p "$build_dir"
++
++xcrun clang \
++  -fobjc-arc \
++  -fblocks \
++  -fmodules \
++  -Werror \
++  -Wno-incomplete-implementation \
++  -Wno-protocol \
++  -Wno-unused-parameter \
++  -DTARGET_OS_OSX=1 \
++  -framework AppKit \
++  -framework Foundation \
++  -framework QuartzCore \
++  -I "$repo_root/core-render-ios/include" \
++  -I "$repo_root/core-render-ios/MacSupport" \
++  "$repo_root/core-render-ios/MacSupport/KRUIKit.m" \
++  "$repo_root/core-render-ios/Extension/Modules/KRMemoryCacheModule.m" \
++  "$repo_root/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m" \
++  -o "$build_dir/KRMemoryCacheCompletionTest"
++
++"$build_dir/KRMemoryCacheCompletionTest"
