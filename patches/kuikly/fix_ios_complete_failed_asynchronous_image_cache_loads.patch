@@ -10,11 +10,30 @@ Upstream-Status: pending
 Signed-off-by: Jony <raft-mobile-jony@mail.build>
 
 diff --git a/core-render-ios/Extension/Modules/KRMemoryCacheModule.m b/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
-index 93f1919f1abbceaac81c3a4782410f01a612fad0..d6d3fe4d931bafb3405c6d90f318b7bc84b79855 100644
+index 93f1919f1abbceaac81c3a4782410f01a612fad0..7b4bdf3c459b12bff232505fae0bad2c261f020c 100644
 --- a/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
 +++ b/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
-@@ -182,28 +182,48 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+@@ -28,6 +28,7 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+ 
+ @interface KRMemoryCacheModule(){
+     NSMutableDictionary* _imageCache;
++    NSMutableSet<KRImageView *> *_inFlightImageViews;
+     NSLock* _imageCacheLock;
+ }
+ 
+@@ -40,6 +41,7 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+ - (instancetype)init{
+     if(self = [super init]){
+         _imageCacheLock = [[NSLock alloc] init];
++        _inFlightImageViews = [[NSMutableSet alloc] init];
+         return self;
+     }
+     return nil;
+@@ -180,30 +182,53 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+         
+         [strongSelf->_imageCacheLock lock];
          strongSelf->_imageCache[cacheKey] = imageView;
++        [strongSelf->_inFlightImageViews addObject:imageView];
          [strongSelf->_imageCacheLock unlock];
          
 -        KuiklyRenderCallback imageLoadSuccessCB = nil;
@@ -27,8 +46,9 @@ index 93f1919f1abbceaac81c3a4782410f01a612fad0..d6d3fe4d931bafb3405c6d90f318b7bc
 -                [strongSelf->_imageCacheLock unlock];
 -                
 -                result = @{
-+        // Cache owns the in-flight view; callbacks must not retain the module
-+        // or the view. Complete both outcomes even when no callback was passed.
++        // Each request owns its loading view independently of the cache slot.
++        // A same-key replacement must not destroy an older caller's request.
++        // Callbacks do not retain the module or view, so teardown is still safe.
 +        __weak KRImageView *weakImageView = imageView;
 +        __block BOOL completed = NO;
 +        void (^finish)(BOOL) = ^(BOOL loaded) {
@@ -48,6 +68,7 @@ index 93f1919f1abbceaac81c3a4782410f01a612fad0..d6d3fe4d931bafb3405c6d90f318b7bc
 +                    [module->_imageCache removeObjectForKey:cacheKey];
 +                }
 +            }
++            [module->_inFlightImageViews removeObject:view];
 +            [module->_imageCacheLock unlock];
 +            KuiklyRenderCallback clearedCallback = nil;
 +            [view hrv_setPropWithKey:@"loadSuccess" propValue:clearedCallback];
@@ -82,12 +103,26 @@ index 93f1919f1abbceaac81c3a4782410f01a612fad0..d6d3fe4d931bafb3405c6d90f318b7bc
          if ([src hasPrefix:KRImageBase64Prefix]) {
              NSString *cacheKeySrc = [NSString stringWithFormat:@"data:image_Md5_%@", cacheKey];
              [self setMemoryObjectWithKey:cacheKeySrc value:src];
+@@ -236,10 +261,13 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+     
+     NSDictionary* cache = _imageCache;
+     _imageCache = nil;
++    NSSet *inFlightImageViews = _inFlightImageViews;
++    _inFlightImageViews = nil;
+     dispatch_async(dispatch_get_main_queue(), ^{
+         // ImageView is used for loading the images,
+         // post it back to main thread for deallocation
+         (void)cache;
++        (void)inFlightImageViews;
+     });
+ }
+ 
 diff --git a/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m b/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m
 new file mode 100644
-index 0000000000000000000000000000000000000000..a96e8ec7e4ada20e679dadbefd3294a7ad2437d7
+index 0000000000000000000000000000000000000000..2b3e60887dd32b9213537b13efa0a79479fdfe25
 --- /dev/null
 +++ b/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,127 @@
 +#import <AppKit/AppKit.h>
 +#import "KRMemoryCacheModule.h"
 +#import "KRImageView.h"
@@ -111,7 +146,7 @@ index 0000000000000000000000000000000000000000..a96e8ec7e4ada20e679dadbefd3294a7
 +}
 +@end
 +
-+static NSMutableArray<KRImageView *> *loads;
++static NSPointerArray *loads; // Observes loaders without extending their lifetime.
 +@interface KRImageView ()
 +@property(nonatomic, copy) KuiklyRenderCallback success;
 +@property(nonatomic, copy) KuiklyRenderCallback failure;
@@ -121,7 +156,7 @@ index 0000000000000000000000000000000000000000..a96e8ec7e4ada20e679dadbefd3294a7
 +- (void)hrv_setPropWithKey:(NSString *)key propValue:(id)value {
 +    if ([key isEqualToString:@"loadSuccess"]) self.success = value;
 +    else if ([key isEqualToString:@"loadFailure"]) self.failure = value;
-+    else if ([key isEqualToString:@"src"]) [loads addObject:self];
++    else if ([key isEqualToString:@"src"]) [loads addPointer:(__bridge void *)self];
 +}
 +@end
 +@interface KRMemoryCacheModule (Fixture)
@@ -138,11 +173,11 @@ index 0000000000000000000000000000000000000000..a96e8ec7e4ada20e679dadbefd3294a7
 +    while (loads.count == before && deadline.timeIntervalSinceNow > 0)
 +        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
 +    Check(loads.count == before + 1, @"loader installed");
-+    return loads.lastObject;
++    return (__bridge KRImageView *)[loads pointerAtIndex:loads.count - 1];
 +}
 +int main(void) {
 +    @autoreleasepool {
-+        loads = [NSMutableArray new];
++        loads = [NSPointerArray weakObjectsPointerArray];
 +        KRMemoryCacheModule *cache = [KRMemoryCacheModule new];
 +        __block NSUInteger count = 0;
 +        __block NSDictionary *out;
@@ -165,6 +200,40 @@ index 0000000000000000000000000000000000000000..a96e8ec7e4ada20e679dadbefd3294a7
 +        fresh.success(@{});
 +        old.failure(@{});
 +        Check([cache imageWithKey:@"same-key"] == fresh.image, @"old failure preserves newer cached result; nil callback still settles");
++
++        // No fixture-owned strong view references: replacing a cache slot
++        // must leave both callers alive, then release each view at completion.
++        for (NSNumber *oldSucceeds in @[@NO, @YES]) {
++            NSString *key = [NSString stringWithFormat:@"replacement-%@", oldSucceeds];
++            __weak KRImageView *oldView;
++            __weak KRImageView *newView;
++            __block NSUInteger oldCalls = 0, newCalls = 0;
++            __block NSDictionary *oldResult;
++            @autoreleasepool {
++                oldView = Start(cache, key, ^(id r) { oldCalls++; oldResult = r; });
++            }
++            @autoreleasepool {
++                newView = Start(cache, key, ^(id r) { newCalls++; });
++            }
++            Check(oldView != nil && newView != nil, @"same-key callers retain independent inflight ownership");
++            UIImage *newImage = [[UIImage alloc] initWithSize:NSMakeSize(7,8)];
++            @autoreleasepool {
++                newView.image = newImage;
++                newView.success(@{});
++            }
++            Check(newCalls == 1 && newView == nil, @"new request settles and releases its view");
++            @autoreleasepool {
++                if (oldSucceeds.boolValue) {
++                    oldView.image = [[UIImage alloc] initWithSize:NSMakeSize(1,2)];
++                    oldView.success(@{});
++                } else {
++                    oldView.failure(@{});
++                }
++            }
++            Check(oldCalls == 1 && [oldResult[@"state"] isEqual:@"Complete"], @"old nonempty caller receives terminal");
++            Check(([oldResult[@"errorCode"] intValue] == 0) == oldSucceeds.boolValue, @"old caller receives its own outcome");
++            Check(oldView == nil && [cache imageWithKey:key] == newImage, @"old request releases without replacing or evicting newer image");
++        }
 +
 +        KRImageView *empty = Start(cache, @"empty-success", ^(id r) { out = r; });
 +        empty.success(@{});
