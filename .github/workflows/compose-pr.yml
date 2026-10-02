@@ -159,6 +159,8 @@ jobs:
         run: tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
       - name: Run gradient rich-text optional dispatch fixture
         run: tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
+      - name: Run native memory cache completion fixture
+        run: tools/ios-renderer-tests/run-memory-cache-completion-test.sh
       - name: Build production renderer with warnings as errors
         run: |
           mkdir -p build

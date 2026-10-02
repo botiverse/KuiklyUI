@@ -28,6 +28,7 @@ static NSString *const kCacheStateInProgress = @"InProgress";
 
 @interface KRMemoryCacheModule(){
     NSMutableDictionary* _imageCache;
+    NSMutableSet<KRImageView *> *_inFlightImageViews;
     NSLock* _imageCacheLock;
 }
 
@@ -40,6 +41,7 @@ static NSString *const kCacheStateInProgress = @"InProgress";
 - (instancetype)init{
     if(self = [super init]){
         _imageCacheLock = [[NSLock alloc] init];
+        _inFlightImageViews = [[NSMutableSet alloc] init];
         return self;
     }
     return nil;
@@ -180,30 +182,53 @@ static NSString *const kCacheStateInProgress = @"InProgress";
         
         [strongSelf->_imageCacheLock lock];
         strongSelf->_imageCache[cacheKey] = imageView;
+        [strongSelf->_inFlightImageViews addObject:imageView];
         [strongSelf->_imageCacheLock unlock];
         
-        KuiklyRenderCallback imageLoadSuccessCB = nil;
-        if(callback){
-            imageLoadSuccessCB = ^(id _Nullable result){
-                UIImage* img = imageView.image;
-                // update cache
-                [strongSelf->_imageCacheLock lock];
-                strongSelf->_imageCache[cacheKey] = img;
-                [strongSelf->_imageCacheLock unlock];
-                
-                result = @{
+        // Each request owns its loading view independently of the cache slot.
+        // A same-key replacement must not destroy an older caller's request.
+        // Callbacks do not retain the module or view, so teardown is still safe.
+        __weak KRImageView *weakImageView = imageView;
+        __block BOOL completed = NO;
+        void (^finish)(BOOL) = ^(BOOL loaded) {
+            KRMemoryCacheModule *module = weakSelf;
+            KRImageView *view = weakImageView;
+            if (!module || !view || completed) {
+                return;
+            }
+            completed = YES;
+            UIImage *image = loaded ? view.image : nil;
+            [module->_imageCacheLock lock];
+            // A late completion must not replace/evict a newer same-key load.
+            if (module->_imageCache[cacheKey] == view) {
+                if (image) {
+                    module->_imageCache[cacheKey] = image;
+                } else {
+                    [module->_imageCache removeObjectForKey:cacheKey];
+                }
+            }
+            [module->_inFlightImageViews removeObject:view];
+            [module->_imageCacheLock unlock];
+            KuiklyRenderCallback clearedCallback = nil;
+            [view hrv_setPropWithKey:@"loadSuccess" propValue:clearedCallback];
+            [view hrv_setPropWithKey:@"loadFailure" propValue:clearedCallback];
+            if (callback) {
+                callback(@{
                     @"state": kCacheStateComplete,
-                    @"errorCode": @(0),
-                    @"errorMsg": @"",
+                    @"errorCode": image ? @(0) : @(-1),
+                    @"errorMsg": image ? @"" : @"Image load failed",
                     @"cacheKey": cacheKey,
-                    @"width": @(img.size.width),
-                    @"height": @(img.size.height)
-                };
-                callback(result);
-            };
-        }
-        
-        [imageView hrv_setPropWithKey:@"loadSuccess" propValue:imageLoadSuccessCB];
+                    @"width": @(image.size.width),
+                    @"height": @(image.size.height)
+                });
+            }
+        };
+        [imageView hrv_setPropWithKey:@"loadSuccess" propValue:^(id result) {
+            finish(YES);
+        }];
+        [imageView hrv_setPropWithKey:@"loadFailure" propValue:^(id result) {
+            finish(NO);
+        }];
         if ([src hasPrefix:KRImageBase64Prefix]) {
             NSString *cacheKeySrc = [NSString stringWithFormat:@"data:image_Md5_%@", cacheKey];
             [self setMemoryObjectWithKey:cacheKeySrc value:src];
@@ -236,10 +261,13 @@ static NSString *const kCacheStateInProgress = @"InProgress";
     
     NSDictionary* cache = _imageCache;
     _imageCache = nil;
+    NSSet *inFlightImageViews = _inFlightImageViews;
+    _inFlightImageViews = nil;
     dispatch_async(dispatch_get_main_queue(), ^{
         // ImageView is used for loading the images,
         // post it back to main thread for deallocation
         (void)cache;
+        (void)inFlightImageViews;
     });
 }
 
