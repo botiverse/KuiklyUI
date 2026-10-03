@@ -14,6 +14,7 @@ import argparse
 import base64
 import concurrent.futures
 import hashlib
+import http.client
 import json
 import os
 import sys
@@ -59,6 +60,9 @@ PUBLISH_USERNAME = "raft-ci"
 PUBLISH_TOKEN_ENV = "RAFT_ARTIFACTS_PUBLISH_TOKEN"
 USER_AGENT = "kuikly-maven-publish/1.0"
 MAX_PARALLEL_REQUESTS = 8
+TRANSIENT_RETRY_ATTEMPTS = 4
+TRANSIENT_RETRY_BASE_SECONDS = 2.0
+TRANSIENT_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
 PUT_MAX_ATTEMPTS = 5
 PUT_RETRYABLE_STATUS = {423, 429, 500, 502, 503, 504}
 
@@ -124,17 +128,46 @@ class Http:
         if content_type is not None:
             headers["Content-Type"] = content_type
         request = urllib.request.Request(origin + path, data=body, method=method, headers=headers)
-        try:
-            with self.opener.open(request, timeout=180) as response:
-                return response.status, response.read()
-        except PublishError:
-            raise
-        except urllib.error.HTTPError as error:
-            if 300 <= error.code <= 399:
-                raise PublishError(f"redirect rejected before another request: HTTP {error.code}") from error
-            return error.code, error.read() or b""
-        except urllib.error.URLError as error:
-            raise PublishError(f"transport error: {error.reason}") from error
+        # A single dropped read must not abort a 920-object release. Transient
+        # transport faults (truncated body, reset, timeout, remote disconnect)
+        # are retried a bounded number of times for every verb: GETs are pure
+        # and PUTs are byte-idempotent by contract (an existing identical object
+        # is treated as an idempotent retry by the caller). Transient HTTP
+        # statuses (408/429/5xx) are retried here only for GET; PUT status
+        # retries stay in put_and_readback, which re-reads the object first.
+        last_error: Exception | None = None
+        for attempt in range(TRANSIENT_RETRY_ATTEMPTS):
+            try:
+                with self.opener.open(request, timeout=180) as response:
+                    return response.status, response.read()
+            except PublishError:
+                raise
+            except urllib.error.HTTPError as error:
+                if 300 <= error.code <= 399:
+                    raise PublishError(f"redirect rejected before another request: HTTP {error.code}") from error
+                if method == "GET" and error.code in TRANSIENT_HTTP_STATUSES and attempt + 1 < TRANSIENT_RETRY_ATTEMPTS:
+                    last_error = error
+                    self._backoff(attempt, f"HTTP {error.code} {method} {path}")
+                    continue
+                return error.code, error.read() or b""
+            except urllib.error.URLError as error:
+                if attempt + 1 < TRANSIENT_RETRY_ATTEMPTS:
+                    last_error = error
+                    self._backoff(attempt, f"{error.reason} {method} {path}")
+                    continue
+                raise PublishError(f"transport error: {error.reason}") from error
+            except (http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError, TimeoutError) as error:
+                if attempt + 1 < TRANSIENT_RETRY_ATTEMPTS:
+                    last_error = error
+                    self._backoff(attempt, f"{type(error).__name__} {method} {path}")
+                    continue
+                raise PublishError(f"transport error: {error}") from error
+        raise PublishError(f"transport error after {TRANSIENT_RETRY_ATTEMPTS} attempts: {last_error}")
+
+    def _backoff(self, attempt: int, what: str) -> None:
+        delay = TRANSIENT_RETRY_BASE_SECONDS * (2 ** attempt)
+        print(f"transient transport failure ({what}); retry {attempt + 1}/{TRANSIENT_RETRY_ATTEMPTS - 1} in {delay:.0f}s", flush=True)
+        time.sleep(delay)
 
 
 def load_json(path: Path, label: str) -> dict[str, Any]:
@@ -258,17 +291,12 @@ def classify(http: Http, manifest: dict[str, Any], bundle: Path) -> dict[str, An
     manifest_different = manifest_found and not completion_matches(manifest_body, manifest)
 
     conflict = bool(unexpected or different or listing_disagreement or manifest_different)
-    if manifest_found and len(present) != len(expected):
-        conflict = True
-    if conflict:
-        state = "CONFLICT"
-    elif not manifest_found and not present:
-        state = "ALL_ABSENT"
-    elif not manifest_found:
-        state = "PARTIAL_EXACT"
-    else:
-        require(len(present) == len(expected), "internal state classifier error")
-        state = "ALL_COMPLETE_EXACT"
+    state = classify_publication_state(
+        present_count=len(present),
+        expected_count=len(expected),
+        manifest_found=manifest_found,
+        conflict=conflict,
+    )
 
     for relative, entry in expected.items():
         read_bundle(bundle, relative, entry)
@@ -289,6 +317,28 @@ def classify(http: Http, manifest: dict[str, Any], bundle: Path) -> dict[str, An
         "listingDisagreement": sorted(listing_disagreement),
         "completionPresent": manifest_found,
     }
+
+
+def classify_publication_state(*, present_count: int, expected_count: int, manifest_found: bool, conflict: bool) -> str:
+    """Classify the public state of one immutable release set.
+
+    ALL_ABSENT        nothing published yet.
+    PARTIAL_EXACT     some or ALL product objects present with exact bytes, but
+                      the completion manifest is absent. This includes the case
+                      where a previous publish uploaded every object and failed
+                      before writing the completion manifest; it is resumable.
+    ALL_COMPLETE_EXACT completion manifest present and every object present.
+    CONFLICT          anything else (foreign objects, different bytes, listing
+                      disagreement, or a completion manifest without all objects).
+    """
+    if conflict or (manifest_found and present_count != expected_count):
+        return "CONFLICT"
+    if not manifest_found and present_count == 0:
+        return "ALL_ABSENT"
+    if not manifest_found:
+        return "PARTIAL_EXACT"
+    require(present_count == expected_count, "internal state classifier error")
+    return "ALL_COMPLETE_EXACT"
 
 
 def validate_plan(plan: dict[str, Any], manifest: dict[str, Any]) -> None:
