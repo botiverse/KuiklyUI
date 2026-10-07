@@ -10,7 +10,7 @@ Upstream-Status: pending
 Signed-off-by: Jony <raft-mobile-jony@mail.build>
 
 diff --git a/core-render-ios/Extension/Modules/KRMemoryCacheModule.m b/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
-index 93f1919f1abbceaac81c3a4782410f01a612fad0..7b4bdf3c459b12bff232505fae0bad2c261f020c 100644
+index 93f1919f1abbceaac81c3a4782410f01a612fad0..6efc85e9e330cd167823536c6127084cc0acd97d 100644
 --- a/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
 +++ b/core-render-ios/Extension/Modules/KRMemoryCacheModule.m
 @@ -28,6 +28,7 @@ static NSString *const kCacheStateInProgress = @"InProgress";
@@ -29,7 +29,7 @@ index 93f1919f1abbceaac81c3a4782410f01a612fad0..7b4bdf3c459b12bff232505fae0bad2c
          return self;
      }
      return nil;
-@@ -180,30 +182,53 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+@@ -180,30 +182,57 @@ static NSString *const kCacheStateInProgress = @"InProgress";
          
          [strongSelf->_imageCacheLock lock];
          strongSelf->_imageCache[cacheKey] = imageView;
@@ -95,15 +95,19 @@ index 93f1919f1abbceaac81c3a4782410f01a612fad0..7b4bdf3c459b12bff232505fae0bad2c
 +            }
 +        };
 +        [imageView hrv_setPropWithKey:@"loadSuccess" propValue:^(id result) {
-+            finish(YES);
++            // finish clears both handlers, which may release this handler and
++            // its captured finish block. Keep finish alive through its return.
++            __attribute__((objc_precise_lifetime)) void (^completion)(BOOL) = finish;
++            completion(YES);
 +        }];
 +        [imageView hrv_setPropWithKey:@"loadFailure" propValue:^(id result) {
-+            finish(NO);
++            __attribute__((objc_precise_lifetime)) void (^completion)(BOOL) = finish;
++            completion(NO);
 +        }];
          if ([src hasPrefix:KRImageBase64Prefix]) {
              NSString *cacheKeySrc = [NSString stringWithFormat:@"data:image_Md5_%@", cacheKey];
              [self setMemoryObjectWithKey:cacheKeySrc value:src];
-@@ -236,10 +261,13 @@ static NSString *const kCacheStateInProgress = @"InProgress";
+@@ -236,10 +265,13 @@ static NSString *const kCacheStateInProgress = @"InProgress";
      
      NSDictionary* cache = _imageCache;
      _imageCache = nil;
@@ -119,10 +123,10 @@ index 93f1919f1abbceaac81c3a4782410f01a612fad0..7b4bdf3c459b12bff232505fae0bad2c
  
 diff --git a/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m b/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b3e60887dd32b9213537b13efa0a79479fdfe25
+index 0000000000000000000000000000000000000000..0db2856f4fa8ea44a2d3f377c03b410337d8ae45
 --- /dev/null
 +++ b/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,151 @@
 +#import <AppKit/AppKit.h>
 +#import "KRMemoryCacheModule.h"
 +#import "KRImageView.h"
@@ -150,8 +154,14 @@ index 0000000000000000000000000000000000000000..2b3e60887dd32b9213537b13efa0a794
 +@interface KRImageView ()
 +@property(nonatomic, copy) KuiklyRenderCallback success;
 +@property(nonatomic, copy) KuiklyRenderCallback failure;
++- (void)fireSuccess;
++- (void)fireFailure;
 +@end
 +@implementation KRImageView
++// Production KRImageView invokes its ivar directly. A property getter here
++// returns an autoreleased block and can accidentally keep finish alive.
++- (void)fireSuccess { if (_success) _success(@{}); }
++- (void)fireFailure { if (_failure) _failure(@{}); }
 +@synthesize hr_rootView;
 +- (void)hrv_setPropWithKey:(NSString *)key propValue:(id)value {
 +    if ([key isEqualToString:@"loadSuccess"]) self.success = value;
@@ -179,26 +189,44 @@ index 0000000000000000000000000000000000000000..2b3e60887dd32b9213537b13efa0a794
 +    @autoreleasepool {
 +        loads = [NSPointerArray weakObjectsPointerArray];
 +        KRMemoryCacheModule *cache = [KRMemoryCacheModule new];
++        // Neither handler is copied by the caller: finish must survive clearing
++        // both handlers while delivering a nonempty success or failure callback.
++        for (NSNumber *succeeds in @[@YES, @NO]) {
++            NSString *key = [NSString stringWithFormat:@"direct-terminal-%@", succeeds];
++            __block NSUInteger calls = 0;
++            __block NSDictionary *terminal;
++            KRImageView *view = Start(cache, key, ^(id r) { calls++; terminal = r; });
++            if (succeeds.boolValue) {
++                view.image = [[UIImage alloc] initWithSize:NSMakeSize(9,10)];
++                [view fireSuccess];
++            } else {
++                [view fireFailure];
++            }
++            Check(calls == 1 && [terminal[@"state"] isEqual:@"Complete"], @"direct ivar completion delivers terminal once");
++            Check(([terminal[@"errorCode"] intValue] == 0) == succeeds.boolValue, @"direct ivar completion keeps outcome");
++            Check(view.success == nil && view.failure == nil, @"direct ivar completion clears both handlers");
++        }
++
 +        __block NSUInteger count = 0;
 +        __block NSDictionary *out;
 +        KRImageView *failed = Start(cache, @"remote-a", ^(id r) { count++; out = r; });
 +        Check(failed.failure != nil, @"failure handler registered");
 +        KuiklyRenderCallback lateSuccess = failed.success;
-+        failed.failure(@{@"errorCode": @404});
++        [failed fireFailure];
 +        lateSuccess(@{});
 +        Check(count == 1 && [out[@"state"] isEqual:@"Complete"] && [out[@"errorCode"] intValue] != 0, @"failure terminates once");
 +        Check([cache imageWithKey:@"remote-a"] == nil && failed.failure == nil && failed.success == nil, @"failure clears callbacks and cache");
 +
 +        KRImageView *retry = Start(cache, @"remote-a", ^(id r) { count++; out = r; });
 +        retry.image = [[UIImage alloc] initWithSize:NSMakeSize(3,4)];
-+        retry.success(@{});
++        [retry fireSuccess];
 +        Check(count == 2 && [out[@"errorCode"] intValue] == 0 && [out[@"width"] intValue] == 3 && [cache imageWithKey:@"remote-a"] == retry.image, @"retry succeeds and caches dimensions");
 +
 +        KRImageView *old = Start(cache, @"same-key", nil);
 +        KRImageView *fresh = Start(cache, @"same-key", nil);
 +        fresh.image = [[UIImage alloc] initWithSize:NSMakeSize(5,6)];
-+        fresh.success(@{});
-+        old.failure(@{});
++        [fresh fireSuccess];
++        [old fireFailure];
 +        Check([cache imageWithKey:@"same-key"] == fresh.image, @"old failure preserves newer cached result; nil callback still settles");
 +
 +        // No fixture-owned strong view references: replacing a cache slot
@@ -219,15 +247,15 @@ index 0000000000000000000000000000000000000000..2b3e60887dd32b9213537b13efa0a794
 +            UIImage *newImage = [[UIImage alloc] initWithSize:NSMakeSize(7,8)];
 +            @autoreleasepool {
 +                newView.image = newImage;
-+                newView.success(@{});
++                [newView fireSuccess];
 +            }
 +            Check(newCalls == 1 && newView == nil, @"new request settles and releases its view");
 +            @autoreleasepool {
 +                if (oldSucceeds.boolValue) {
 +                    oldView.image = [[UIImage alloc] initWithSize:NSMakeSize(1,2)];
-+                    oldView.success(@{});
++                    [oldView fireSuccess];
 +                } else {
-+                    oldView.failure(@{});
++                    [oldView fireFailure];
 +                }
 +            }
 +            Check(oldCalls == 1 && [oldResult[@"state"] isEqual:@"Complete"], @"old nonempty caller receives terminal");
@@ -236,7 +264,7 @@ index 0000000000000000000000000000000000000000..2b3e60887dd32b9213537b13efa0a794
 +        }
 +
 +        KRImageView *empty = Start(cache, @"empty-success", ^(id r) { out = r; });
-+        empty.success(@{});
++        [empty fireSuccess];
 +        Check([out[@"errorCode"] intValue] != 0, @"success without image is failure");
 +
 +        __weak KRMemoryCacheModule *weakCache;
@@ -252,10 +280,10 @@ index 0000000000000000000000000000000000000000..2b3e60887dd32b9213537b13efa0a794
 +}
 diff --git a/tools/ios-renderer-tests/run-memory-cache-completion-test.sh b/tools/ios-renderer-tests/run-memory-cache-completion-test.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..7f4c08f414c0d3f8441059e3f2db42843de719cc
+index 0000000000000000000000000000000000000000..41a73d96bdfc1fd630026eb4ef0e90307d6520e1
 --- /dev/null
 +++ b/tools/ios-renderer-tests/run-memory-cache-completion-test.sh
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
@@ -264,6 +292,7 @@ index 0000000000000000000000000000000000000000..7f4c08f414c0d3f8441059e3f2db4284
 +mkdir -p "$build_dir"
 +
 +xcrun clang \
++  -O2 \
 +  -fobjc-arc \
 +  -fblocks \
 +  -fmodules \
@@ -282,4 +311,4 @@ index 0000000000000000000000000000000000000000..7f4c08f414c0d3f8441059e3f2db4284
 +  "$repo_root/tools/ios-renderer-tests/KRMemoryCacheCompletionTest.m" \
 +  -o "$build_dir/KRMemoryCacheCompletionTest"
 +
-+"$build_dir/KRMemoryCacheCompletionTest"
++MallocScribble=1 "$build_dir/KRMemoryCacheCompletionTest"
