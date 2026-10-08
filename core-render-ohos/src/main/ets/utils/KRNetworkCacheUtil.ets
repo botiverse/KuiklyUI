@@ -18,6 +18,8 @@ import { common } from '@kit.AbilityKit';
 import { BusinessError, request } from '@kit.BasicServicesKit';
 
 import fs from '@ohos.file.fs';
+import util from '@ohos.util';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { KRRenderLog } from '../adapter/KRRenderLog';
 
 export class  KRNetworkCacheUtil {
@@ -29,13 +31,27 @@ export class  KRNetworkCacheUtil {
    * @param callback
    */
   static fetchFileByDownloadOrCache(context: common.UIAbilityContext, url: string, callback: KuiklyRenderCallback) {
-    let cacheFilePath = KRNetworkCacheUtil.generateCacheFilePathByUrl(context, url)
+    let cacheFilePath = ''
+    try {
+      cacheFilePath = KRNetworkCacheUtil.generateCacheFilePathByUrl(context, url)
+    } catch (e) {
+      // A failure to derive the cache path is a failed fetch for this url,
+      // not a reason to let the exception escape the module call and take
+      // the whole page down.
+      const err = e as BusinessError;
+      KRRenderLog.i('KRNetworkCacheUtil', `cache file path failed with error message: ${err.message}, error code: ${err.code}`)
+      callback(null)
+      return
+    }
     if (cacheFilePath.length) {
       if (!(KRNetworkCacheUtil.downloadTasks.has(url))) {
         fs.access(cacheFilePath, (err, res) => {
           if (err) {//mhttps://developer.huawei.com/consumer/cn/doc/harmonyos-references-V2/js-apis-file-fs-0000001451843016-V2
             KRRenderLog.i('KRNetworkCacheUtil', `access failed with error message: ${err.message}, error code: ${err.code}`)
-            KRNetworkCacheUtil.handleLoadFailure(url, cacheFilePath);
+            // Nothing has been registered in downloadTasks on this path, so
+            // handleLoadFailure would find no callbacks and the caller would
+            // never hear back; finish the request directly.
+            callback(null);
           } else {
             if (res) {
               callback(cacheFilePath);
@@ -99,8 +115,16 @@ export class  KRNetworkCacheUtil {
     }
   }
 
+  /**
+   * Cache file name for a url: a fixed-length SHA-256 hex digest of the
+   * complete url (scheme, host, path and query all participate, so two
+   * signed urls for the same object with different signatures stay distinct)
+   * plus a bounded extension. Earlier versions used the url itself with
+   * punctuation replaced, which has no length limit and makes fs.access /
+   * download fail with ENAMETOOLONG (13900030) on long signed urls.
+   */
   static urlToFilename(url: string): string {
-    return url.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return KRNetworkCacheUtil.sha256Hex(url);
   }
 
   /**
@@ -108,10 +132,17 @@ export class  KRNetworkCacheUtil {
    * @param url
    */
   static generateCacheFilePathByUrl(context: common.UIAbilityContext, url: string): string {
-    const type = KRNetworkCacheUtil.getPathExtension(url) ?? 'data';
-    return `${context.cacheDir}/${KRNetworkCacheUtil.urlToFilename(url)}.${type}`;
+    return `${context.cacheDir}/${KRNetworkCacheUtil.generateCacheFileNameByUrl(url)}`;
   }
 
+  /**
+   * File name component only (no directory); kept separate so it can be
+   * checked without a UIAbilityContext.
+   */
+  static generateCacheFileNameByUrl(url: string): string {
+    const type = KRNetworkCacheUtil.getPathExtension(url) ?? 'data';
+    return `${KRNetworkCacheUtil.urlToFilename(url)}.${type}`;
+  }
 
   static  getPathExtension(url: string): string | null {
     const pathWithoutQuery = url.split('?')[0]; // 先去掉查询参数部分
@@ -120,9 +151,31 @@ export class  KRNetworkCacheUtil {
     const fileParts = fileName.split('.');
 
     if (fileParts.length > 1) {
-      return fileParts[fileParts.length - 1];
+      const ext = fileParts[fileParts.length - 1];
+      // The extension is the only url-derived text left in the file name;
+      // keep it to a short alphanumeric token so it cannot reintroduce an
+      // over-long or unsafe name.
+      if (/^[a-zA-Z0-9]{1,16}$/.test(ext)) {
+        return ext;
+      }
+      return null;
     } else {
       return null;
     }
+  }
+
+  private static sha256Hex(text: string): string {
+    const md = cryptoFramework.createMd('SHA256');
+    // Encode with TextEncoder rather than @ohos.buffer: Buffer.buffer does not
+    // expose the pooled backing store with the Buffer's own byteOffset, so
+    // viewing it as Uint8Array(buffer, byteOffset, length) threw
+    // "RangeError: The newByteLength is out of range" (1.13.0 11300009).
+    md.updateSync({ data: new util.TextEncoder().encodeInto(text) });
+    const digest = md.digestSync().data;
+    let hex = '';
+    for (let i = 0; i < digest.length; i++) {
+      hex += digest[i].toString(16).padStart(2, '0');
+    }
+    return hex;
   }
 }
