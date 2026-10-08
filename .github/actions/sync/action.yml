@@ -32,6 +32,17 @@ runs:
         set -euo pipefail
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
         git config --global --add safe.directory "$GITHUB_WORKSPACE/src"
-        script/sync --force
+        # The restored src/.git cache has twice (2026-10-07 raft.7 candidate
+        # normal-macos, 2026-10-08 #183 ios-renderer) left git on the macOS
+        # runners unable to write objects during `git am` ("unable to create
+        # temporary file: Invalid argument" -> "git write-tree failed"). The
+        # patch set itself was unchanged and applied cleanly on re-run. If the
+        # cached objects are unusable, drop them and materialize from a fresh
+        # upstream fetch instead of failing the lane.
+        if ! script/sync --force; then
+          echo "::warning::script/sync failed against the restored src/.git cache; retrying from a fresh upstream fetch"
+          rm -rf src/.git
+          script/sync --force
+        fi
         echo "tree=$(git -C src rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
         echo "commit=$(git -C src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
