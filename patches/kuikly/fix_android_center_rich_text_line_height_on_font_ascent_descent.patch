@@ -15,7 +15,7 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
-index 034ce5768731ba6730e20d46c0801f4e2a5b5821..3b86283c33a9c6c887d27f1a51e423e2fe2099ea 100644
+index b4bb0542db766939a05aab612c9438d260b7521a..50738d82b9221cf73b9bcd9eee27d33590e643d4 100644
 --- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
 +++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
 @@ -54,7 +54,6 @@ import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
@@ -26,7 +26,7 @@ index 034ce5768731ba6730e20d46c0801f4e2a5b5821..3b86283c33a9c6c887d27f1a51e423e2
  import kotlin.math.max
  
  internal const val INLINE_BOX_LAYOUT_JOINER = '\u2060'
-@@ -869,6 +868,12 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
+@@ -857,6 +856,12 @@ class FontFamilySpan(fontFamily: String, typeFaceLoader: TypeFaceLoader?) : Type
  
  class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
  
@@ -39,7 +39,7 @@ index 034ce5768731ba6730e20d46c0801f4e2a5b5821..3b86283c33a9c6c887d27f1a51e423e2
      override fun chooseHeight(
          text: CharSequence?,
          start: Int,
-@@ -877,11 +882,12 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
+@@ -865,11 +870,12 @@ class HRLineHeightSpan(internal val height: Int) : LineHeightSpan {
          lineHeight: Int,
          fm: Paint.FontMetricsInt
      ) {

@@ -139,7 +139,7 @@ index 2eb00c0b6d4211502ebe39744b17c2f8921e8986..9c180632dfa08adaca9b1daa2d6bce35
              if (phSpanTextRange != null) {
  
 diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
-index 0e4c45f3755a13f0a3994d494119948f3e92855a..034ce5768731ba6730e20d46c0801f4e2a5b5821 100644
+index 6886ecb90824e6752bf0ec1db261ee789cd4491d..b4bb0542db766939a05aab612c9438d260b7521a 100644
 --- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
 +++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
 @@ -57,6 +57,12 @@ import kotlin.math.ceil
