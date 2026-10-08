@@ -17,7 +17,7 @@ Upstream-Status: pending
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
-index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a19863f42 100644
+index 7b7dfab379e808d3380e11b2db95bf567b018307..4243e9c0225a6771eeeaed8bd8ba875c366c65ef 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
 @@ -44,6 +44,8 @@ import com.tencent.kuikly.compose.ui.unit.isSpecified
@@ -123,7 +123,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a
  
          // Check if this range is a placeholder
          val isPlaceholder = placeholders?.any {
-@@ -363,23 +426,73 @@ internal fun RichTextAttr.applyAnnotatedString(
+@@ -363,23 +426,65 @@ internal fun RichTextAttr.applyAnnotatedString(
          if (isPlaceholder) {
              // Create PlaceholderSpan
              placeholders!!.find { it.start == start }?.let { placeholder ->
@@ -165,11 +165,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a
 +                            range.start <= inlineBoxRange.start && range.end >= inlineBoxRange.end
 +                        }
 +                        .forEach { range ->
-+                            applySpanStyle(
-+                                range.item,
-+                                density,
-+                                preserveInheritedFontFamily = true,
-+                            )
++                            applySpanStyle(range.item, density)
 +                        }
 +
 +                    // Geometry and background belong to the outer group. Children keep
@@ -189,11 +185,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a
 +                            range.start > inlineBoxRange.start || range.end < inlineBoxRange.end
 +                        }
 +                        .forEach { range ->
-+                            applySpanStyle(
-+                                range.item,
-+                                density,
-+                                preserveInheritedFontFamily = true,
-+                            )
++                            applySpanStyle(range.item, density)
 +                        }
 +                } else {
 +                    overlappingSpanStyles.forEach { range ->
@@ -203,7 +195,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a
  
                  // Apply ParagraphStyle
                  annoText.paragraphStyles
-@@ -392,18 +505,15 @@ internal fun RichTextAttr.applyAnnotatedString(
+@@ -392,18 +497,15 @@ internal fun RichTextAttr.applyAnnotatedString(
                          }
                      }
  
@@ -230,7 +222,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a
                      }
  
                      // Add click event handler
-@@ -414,9 +524,11 @@ internal fun RichTextAttr.applyAnnotatedString(
+@@ -414,9 +516,11 @@ internal fun RichTextAttr.applyAnnotatedString(
                      // Call applyLinkStyle for future extensions
                      applyLinkStyle(range.item)
                  }
@@ -243,28 +235,7 @@ index 13943446ce1fad6d6f77d6463fb0c2bcf80cf0d9..7bf45f9fc0590ca8ba92adfbd5bc528a
  
      if (spans.isEmpty()) {
          spans.add(TextSpan().apply {
-@@ -433,12 +545,18 @@ internal fun TextSpan.applyLinkStyle(link: LinkAnnotation) {
- }
- 
- // Helper method to apply SpanStyle
--internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
-+internal fun TextSpan.applySpanStyle(
-+    spanStyle: SpanStyle,
-+    density: Density,
-+    preserveInheritedFontFamily: Boolean = false,
-+) {
-     // Apply font styles
-     if (spanStyle.fontSize.isSpecified) {
-         fontSize(scaleToDensity(density, spanStyle.fontSize.value))
-     }
--    applyFontFamily(spanStyle.fontFamily)
-+    if (!preserveInheritedFontFamily || spanStyle.fontFamily != null) {
-+        applyFontFamily(spanStyle.fontFamily)
-+    }
-     applyFontWeight(spanStyle.fontWeight)
-     applyFontStyle(spanStyle.fontStyle)
-     applyShadow(spanStyle.shadow)
-@@ -478,3 +596,17 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+@@ -482,3 +586,17 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
          letterSpacing(spanStyle.letterSpacing.value)
      }
  }
@@ -559,7 +530,7 @@ index d993c1628f3a6eb587c089776853dcaae71c5fff..5f1670b36f3059aee083cdeaf9beb1d3
              shadow = shadow,
  //            platformStyle = platformStyle?.spanStyle,
 diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
-index 499d7f0437c94ea911c81ca5d63474f5e2be1320..735f15af131552caa600ca8a8bfc090764770346 100644
+index fc955d8a75f3c043970cb94d41f8a16db3b95755..e8139bb3a9448825877da6cd1d7e27bd002d2982 100644
 --- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
 +++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/foundation/text/InlineBoxGroupLoweringTest.kt
 @@ -7,18 +7,28 @@
@@ -591,11 +562,10 @@ index 499d7f0437c94ea911c81ca5d63474f5e2be1320..735f15af131552caa600ca8a8bfc0907
  import kotlin.test.assertIs
  
  class InlineBoxGroupLoweringTest {
-@@ -47,4 +57,199 @@ class InlineBoxGroupLoweringTest {
-         assertEquals("serif", spans[1].spanPropsMap()[TextConst.FONT_FAMILY])
+@@ -48,6 +58,201 @@ class InlineBoxGroupLoweringTest {
          assertEquals("700", spans[1].spanPropsMap()[TextConst.FONT_WEIGHT])
      }
-+
+ 
 +    @Test
 +    fun inlineBoxLinkStyleStillAppliesChildTypography() {
 +        val box = InlineBoxSpanStyle(
@@ -790,7 +760,10 @@ index 499d7f0437c94ea911c81ca5d63474f5e2be1320..735f15af131552caa600ca8a8bfc0907
 +            RichTextAttr().applyAnnotatedString(text, density = Density(1f))
 +        }
 +    }
- }
++
+     @Test
+     fun nestedSpanWithoutFontFamilyInheritsOuterFontFamily() {
+         val builder = AnnotatedString.Builder()
 diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyleTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/text/InlineBoxSpanStyleTest.kt
 new file mode 100644
 index 0000000000000000000000000000000000000000..d611508955d2dbefca2181158ac7eaf1b62e696f
