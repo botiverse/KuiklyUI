@@ -317,6 +317,8 @@ jobs:
         run: python3 tools/check-layout-size-report-rounding.py --self-test
       - name: Keep every cinterop entry point exported by libkuikly.so
         run: python3 tools/ohos-renderer-tests/check-cinterop-exports.py --self-test
+      - name: Keep OHOS network cache file names hashed and access errors answered
+        run: python3 tools/ohos-renderer-tests/check-network-cache-file-name.py --self-test
       - name: Keep OHOS contentInset leading offsets aligned with the margin model
         run: core-render-ohos/src/test/cpp/run_scroller_content_inset_offset_test.sh
       - name: Keep OHOS layout size report formatter ceiled to the hundredth

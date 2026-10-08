@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Thu, 8 Oct 2026 16:30:04 +0000
+Subject: fix(ohos): hash network cache file names and complete fetches on
+ access errors
+
+KRNetworkCacheUtil named cache files after the whole url with punctuation
+replaced, with no length limit. A signed image url easily exceeds NAME_MAX,
+so fs.access failed with 13900030 (File name too long); and because that
+branch reported through handleLoadFailure before any callback had been
+registered in downloadTasks, the FetchFileByDownloadOrCache caller was never
+answered and the image stayed on its placeholder (mobile 1.13.0 11300008,
+raft.7 HAR 05774fd4).
+
+Name cache files <sha256(url)>.<ext>: the complete url participates, so two
+signed urls for the same object stay distinct, and the name is fixed-length.
+Bound the extension to a short alphanumeric token. On an fs.access error
+complete the request with callback(null) directly.
+
+tools/ohos-renderer-tests/check-network-cache-file-name.py locks the three
+invariants (digest name, bounded extension, access-error callback) with a
+mutation self-test.
+
+Upstream-Status: pending
+Fork-Patch: ohos-network-cache-hashed-file-names
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets b/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets
+index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..e19ee1d7f0aeed756e4a7a86d7b38b80769bde64 100644
+--- a/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets
++++ b/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets
+@@ -18,6 +18,8 @@ import { common } from '@kit.AbilityKit';
+ import { BusinessError, request } from '@kit.BasicServicesKit';
+ 
+ import fs from '@ohos.file.fs';
++import buffer from '@ohos.buffer';
++import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+ import { KRRenderLog } from '../adapter/KRRenderLog';
+ 
+ export class  KRNetworkCacheUtil {
+@@ -35,7 +37,10 @@ export class  KRNetworkCacheUtil {
+         fs.access(cacheFilePath, (err, res) => {
+           if (err) {//mhttps://developer.huawei.com/consumer/cn/doc/harmonyos-references-V2/js-apis-file-fs-0000001451843016-V2
+             KRRenderLog.i('KRNetworkCacheUtil', `access failed with error message: ${err.message}, error code: ${err.code}`)
+-            KRNetworkCacheUtil.handleLoadFailure(url, cacheFilePath);
++            // Nothing has been registered in downloadTasks on this path, so
++            // handleLoadFailure would find no callbacks and the caller would
++            // never hear back; finish the request directly.
++            callback(null);
+           } else {
+             if (res) {
+               callback(cacheFilePath);
+@@ -99,8 +104,16 @@ export class  KRNetworkCacheUtil {
+     }
+   }
+ 
++  /**
++   * Cache file name for a url: a fixed-length SHA-256 hex digest of the
++   * complete url (scheme, host, path and query all participate, so two
++   * signed urls for the same object with different signatures stay distinct)
++   * plus a bounded extension. Earlier versions used the url itself with
++   * punctuation replaced, which has no length limit and makes fs.access /
++   * download fail with ENAMETOOLONG (13900030) on long signed urls.
++   */
+   static urlToFilename(url: string): string {
+-    return url.replace(/[^a-zA-Z0-9_-]/g, '_');
++    return KRNetworkCacheUtil.sha256Hex(url);
+   }
+ 
+   /**
+@@ -108,10 +121,17 @@ export class  KRNetworkCacheUtil {
+    * @param url
+    */
+   static generateCacheFilePathByUrl(context: common.UIAbilityContext, url: string): string {
+-    const type = KRNetworkCacheUtil.getPathExtension(url) ?? 'data';
+-    return `${context.cacheDir}/${KRNetworkCacheUtil.urlToFilename(url)}.${type}`;
++    return `${context.cacheDir}/${KRNetworkCacheUtil.generateCacheFileNameByUrl(url)}`;
+   }
+ 
++  /**
++   * File name component only (no directory); kept separate so it can be
++   * checked without a UIAbilityContext.
++   */
++  static generateCacheFileNameByUrl(url: string): string {
++    const type = KRNetworkCacheUtil.getPathExtension(url) ?? 'data';
++    return `${KRNetworkCacheUtil.urlToFilename(url)}.${type}`;
++  }
+ 
+   static  getPathExtension(url: string): string | null {
+     const pathWithoutQuery = url.split('?')[0]; // 先去掉查询参数部分
+@@ -120,9 +140,28 @@ export class  KRNetworkCacheUtil {
+     const fileParts = fileName.split('.');
+ 
+     if (fileParts.length > 1) {
+-      return fileParts[fileParts.length - 1];
++      const ext = fileParts[fileParts.length - 1];
++      // The extension is the only url-derived text left in the file name;
++      // keep it to a short alphanumeric token so it cannot reintroduce an
++      // over-long or unsafe name.
++      if (/^[a-zA-Z0-9]{1,16}$/.test(ext)) {
++        return ext;
++      }
++      return null;
+     } else {
+       return null;
+     }
+   }
++
++  private static sha256Hex(text: string): string {
++    const md = cryptoFramework.createMd('SHA256');
++    const bytes = buffer.from(text, 'utf-8');
++    md.updateSync({ data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length) });
++    const digest = md.digestSync().data;
++    let hex = '';
++    for (let i = 0; i < digest.length; i++) {
++      hex += digest[i].toString(16).padStart(2, '0');
++    }
++    return hex;
++  }
+ }
+\ No newline at end of file
+diff --git a/tools/ohos-renderer-tests/check-network-cache-file-name.py b/tools/ohos-renderer-tests/check-network-cache-file-name.py
+new file mode 100755
+index 0000000000000000000000000000000000000000..1e82a13141c87bc8adb4836144ca24f288b39ff5
+--- /dev/null
++++ b/tools/ohos-renderer-tests/check-network-cache-file-name.py
+@@ -0,0 +1,115 @@
++#!/usr/bin/env python3
++"""Fail closed if KRNetworkCacheUtil can derive an unbounded cache file name
++from a url, or can drop a FetchFileByDownloadOrCache callback on an
++fs.access error.
++
++Long signed image urls used to become `<url with punctuation replaced>.<ext>`
++with no length limit, so fs.access / downloadFile failed with ENAMETOOLONG
++(13900030); and because the access-error branch reported through
++handleLoadFailure before any callback was registered in downloadTasks, the
++caller never heard back and the image stayed on its placeholder.
++
++Usage:
++  check-network-cache-file-name.py            # check the working tree
++  check-network-cache-file-name.py --self-test
++"""
++from __future__ import annotations
++
++import argparse
++import re
++from pathlib import Path
++
++SOURCE = Path("core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets")
++
++
++def strip_comments(source: str) -> str:
++    source = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group(0)), source, flags=re.S)
++    return re.sub(r"//[^\n]*", "", source)
++
++
++def compact(source: str) -> str:
++    return re.sub(r"\s+", "", strip_comments(source))
++
++
++def block_after(source: str, marker: str) -> str:
++    clean = strip_comments(source)
++    start = clean.find(marker)
++    if start < 0:
++        raise AssertionError(f"missing required function/method: {marker}")
++    brace = clean.find("{", start)
++    depth = 0
++    for index in range(brace, len(clean)):
++        if clean[index] == "{":
++            depth += 1
++        elif clean[index] == "}":
++            depth -= 1
++            if depth == 0:
++                return clean[brace + 1 : index]
++    raise AssertionError("unterminated block body")
++
++
++def check(source: str) -> None:
++    name = compact(block_after(source, "static urlToFilename(url: string): string"))
++    if "returnKRNetworkCacheUtil.sha256Hex(url);" not in name:
++        raise AssertionError("urlToFilename must return a fixed-length digest of the whole url")
++    if ".replace(" in name:
++        raise AssertionError("urlToFilename must not derive the file name from the url text")
++
++    digest = compact(block_after(source, "private static sha256Hex(text: string): string"))
++    if "cryptoFramework.createMd('SHA256')" not in digest or "digestSync()" not in digest:
++        raise AssertionError("sha256Hex must compute a SHA-256 digest synchronously")
++
++    ext = compact(block_after(source, "static  getPathExtension(url: string): string | null"))
++    if "/^[a-zA-Z0-9]{1,16}$/.test(ext)" not in ext:
++        raise AssertionError("getPathExtension must bound the extension to a short alphanumeric token")
++
++    fetch = compact(block_after(source, "static fetchFileByDownloadOrCache("))
++    access_err = re.search(r"fs\.access\(cacheFilePath,\(err,res\)=>\{if\(err\)\{(.*?)\}else\{", fetch)
++    if access_err is None:
++        raise AssertionError("fetchFileByDownloadOrCache must branch on the fs.access error")
++    if "callback(null);" not in access_err.group(1):
++        raise AssertionError("an fs.access error must complete the request with callback(null)")
++    if "handleLoadFailure(" in access_err.group(1):
++        raise AssertionError("the fs.access error branch must not report through downloadTasks (nothing is registered yet)")
++
++
++def self_test(source: str) -> None:
++    check(source)
++    mutations = {
++        "url text as file name": source.replace(
++            "return KRNetworkCacheUtil.sha256Hex(url);",
++            "return url.replace(/[^a-zA-Z0-9_-]/g, '_');",
++        ),
++        "unbounded extension": source.replace("/^[a-zA-Z0-9]{1,16}$/.test(ext)", "ext.length > 0"),
++        "silent access failure": source.replace(
++            "            callback(null);\n          } else {",
++            "            KRNetworkCacheUtil.handleLoadFailure(url, cacheFilePath);\n          } else {",
++        ),
++    }
++    for label, mutated in mutations.items():
++        if mutated == source:
++            raise AssertionError(f"self-test mutation did not apply: {label}")
++        try:
++            check(mutated)
++        except AssertionError:
++            continue
++        raise AssertionError(f"check accepted a broken source: {label}")
++    print("check-network-cache-file-name: self-test OK")
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    parser.add_argument("--source", type=Path, default=SOURCE)
++    args = parser.parse_args()
++    source = args.source.read_text(encoding="utf-8")
++    if args.self_test:
++        self_test(source)
++    else:
++        check(source)
++        print("check-network-cache-file-name: OK")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
