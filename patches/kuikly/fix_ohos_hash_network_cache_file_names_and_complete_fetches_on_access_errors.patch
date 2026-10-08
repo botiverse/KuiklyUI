@@ -26,19 +26,37 @@ Fork-Patch: ohos-network-cache-hashed-file-names
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets b/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets
-index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..e19ee1d7f0aeed756e4a7a86d7b38b80769bde64 100644
+index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..3fee49f91a4d1c84c39fbf53378a58a885b3897e 100644
 --- a/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets
 +++ b/core-render-ohos/src/main/ets/utils/KRNetworkCacheUtil.ets
 @@ -18,6 +18,8 @@ import { common } from '@kit.AbilityKit';
  import { BusinessError, request } from '@kit.BasicServicesKit';
  
  import fs from '@ohos.file.fs';
-+import buffer from '@ohos.buffer';
++import util from '@ohos.util';
 +import { cryptoFramework } from '@kit.CryptoArchitectureKit';
  import { KRRenderLog } from '../adapter/KRRenderLog';
  
  export class  KRNetworkCacheUtil {
-@@ -35,7 +37,10 @@ export class  KRNetworkCacheUtil {
+@@ -29,13 +31,27 @@ export class  KRNetworkCacheUtil {
+    * @param callback
+    */
+   static fetchFileByDownloadOrCache(context: common.UIAbilityContext, url: string, callback: KuiklyRenderCallback) {
+-    let cacheFilePath = KRNetworkCacheUtil.generateCacheFilePathByUrl(context, url)
++    let cacheFilePath = ''
++    try {
++      cacheFilePath = KRNetworkCacheUtil.generateCacheFilePathByUrl(context, url)
++    } catch (e) {
++      // A failure to derive the cache path is a failed fetch for this url,
++      // not a reason to let the exception escape the module call and take
++      // the whole page down.
++      const err = e as BusinessError;
++      KRRenderLog.i('KRNetworkCacheUtil', `cache file path failed with error message: ${err.message}, error code: ${err.code}`)
++      callback(null)
++      return
++    }
+     if (cacheFilePath.length) {
+       if (!(KRNetworkCacheUtil.downloadTasks.has(url))) {
          fs.access(cacheFilePath, (err, res) => {
            if (err) {//mhttps://developer.huawei.com/consumer/cn/doc/harmonyos-references-V2/js-apis-file-fs-0000001451843016-V2
              KRRenderLog.i('KRNetworkCacheUtil', `access failed with error message: ${err.message}, error code: ${err.code}`)
@@ -50,7 +68,7 @@ index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..e19ee1d7f0aeed756e4a7a86d7b38b80
            } else {
              if (res) {
                callback(cacheFilePath);
-@@ -99,8 +104,16 @@ export class  KRNetworkCacheUtil {
+@@ -99,8 +115,16 @@ export class  KRNetworkCacheUtil {
      }
    }
  
@@ -68,7 +86,7 @@ index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..e19ee1d7f0aeed756e4a7a86d7b38b80
    }
  
    /**
-@@ -108,10 +121,17 @@ export class  KRNetworkCacheUtil {
+@@ -108,10 +132,17 @@ export class  KRNetworkCacheUtil {
     * @param url
     */
    static generateCacheFilePathByUrl(context: common.UIAbilityContext, url: string): string {
@@ -88,7 +106,7 @@ index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..e19ee1d7f0aeed756e4a7a86d7b38b80
  
    static  getPathExtension(url: string): string | null {
      const pathWithoutQuery = url.split('?')[0]; // 先去掉查询参数部分
-@@ -120,9 +140,28 @@ export class  KRNetworkCacheUtil {
+@@ -120,9 +151,31 @@ export class  KRNetworkCacheUtil {
      const fileParts = fileName.split('.');
  
      if (fileParts.length > 1) {
@@ -108,8 +126,11 @@ index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..e19ee1d7f0aeed756e4a7a86d7b38b80
 +
 +  private static sha256Hex(text: string): string {
 +    const md = cryptoFramework.createMd('SHA256');
-+    const bytes = buffer.from(text, 'utf-8');
-+    md.updateSync({ data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length) });
++    // Encode with TextEncoder rather than @ohos.buffer: Buffer.buffer does not
++    // expose the pooled backing store with the Buffer's own byteOffset, so
++    // viewing it as Uint8Array(buffer, byteOffset, length) threw
++    // "RangeError: The newByteLength is out of range" (1.13.0 11300009).
++    md.updateSync({ data: new util.TextEncoder().encodeInto(text) });
 +    const digest = md.digestSync().data;
 +    let hex = '';
 +    for (let i = 0; i < digest.length; i++) {
@@ -121,10 +142,10 @@ index 12703a4af39f5d740f713e1bdd3707ce8b3e9fef..e19ee1d7f0aeed756e4a7a86d7b38b80
 \ No newline at end of file
 diff --git a/tools/ohos-renderer-tests/check-network-cache-file-name.py b/tools/ohos-renderer-tests/check-network-cache-file-name.py
 new file mode 100755
-index 0000000000000000000000000000000000000000..1e82a13141c87bc8adb4836144ca24f288b39ff5
+index 0000000000000000000000000000000000000000..5d7e20bd1f98d626f1e8f397c776ca28fe64dfc2
 --- /dev/null
 +++ b/tools/ohos-renderer-tests/check-network-cache-file-name.py
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,129 @@
 +#!/usr/bin/env python3
 +"""Fail closed if KRNetworkCacheUtil can derive an unbounded cache file name
 +from a url, or can drop a FetchFileByDownloadOrCache callback on an
@@ -185,6 +206,15 @@ index 0000000000000000000000000000000000000000..1e82a13141c87bc8adb4836144ca24f2
 +    digest = compact(block_after(source, "private static sha256Hex(text: string): string"))
 +    if "cryptoFramework.createMd('SHA256')" not in digest or "digestSync()" not in digest:
 +        raise AssertionError("sha256Hex must compute a SHA-256 digest synchronously")
++    if "newutil.TextEncoder().encodeInto(text)" not in digest or "buffer" in digest:
++        raise AssertionError(
++            "sha256Hex must feed the digest from TextEncoder, not a @ohos.buffer view "
++            "(Buffer.buffer + byteOffset threw RangeError on device)"
++        )
++
++    fetch_head = compact(block_after(source, "static fetchFileByDownloadOrCache("))
++    if not re.search(r"try\{cacheFilePath=KRNetworkCacheUtil\.generateCacheFilePathByUrl\(context,url\)\}catch\(e\)\{.*?callback\(null\)return\}", fetch_head):
++        raise AssertionError("fetchFileByDownloadOrCache must answer callback(null) if deriving the cache path throws")
 +
 +    ext = compact(block_after(source, "static  getPathExtension(url: string): string | null"))
 +    if "/^[a-zA-Z0-9]{1,16}$/.test(ext)" not in ext:
@@ -208,6 +238,11 @@ index 0000000000000000000000000000000000000000..1e82a13141c87bc8adb4836144ca24f2
 +            "return url.replace(/[^a-zA-Z0-9_-]/g, '_');",
 +        ),
 +        "unbounded extension": source.replace("/^[a-zA-Z0-9]{1,16}$/.test(ext)", "ext.length > 0"),
++        "buffer view for the digest": source.replace(
++            "md.updateSync({ data: new util.TextEncoder().encodeInto(text) });",
++            "const bytes = buffer.from(text, 'utf-8');\n    md.updateSync({ data: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length) });",
++        ),
++        "escaping cache path error": source.replace("      callback(null)\n      return\n    }", "      throw e\n    }"),
 +        "silent access failure": source.replace(
 +            "            callback(null);\n          } else {",
 +            "            KRNetworkCacheUtil.handleLoadFailure(url, cacheFilePath);\n          } else {",
