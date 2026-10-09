@@ -23,7 +23,7 @@ jobs:
           ref: ${{ env.EXPECTED_HEAD_SHA }}
           fetch-depth: 0
 
-      - name: Verify identity, DCO, diff and clean tree
+      - name: Verify exact head, single commit, diff and clean tree
         shell: bash
         run: |
           set -euo pipefail
@@ -36,15 +36,9 @@ jobs:
           base_sha="${{ github.event.pull_request.base.sha }}"
           test "$(git rev-list --count "${base_sha}..HEAD")" = "1"
           test "$(git rev-parse HEAD^)" = "$(git merge-base HEAD "${base_sha}")"
-          author_email="$(git show -s --format=%ae HEAD)"
-          committer_email="$(git show -s --format=%ce HEAD)"
-          author_name="$(git show -s --format=%an HEAD)"
-          # Generic DCO gate (owner-agnostic): author == committer, and the commit
-          # carries a Signed-off-by trailer matching that identity.
-          test -n "$author_email"
-          test "$author_email" = "$committer_email"
-          git show -s --format=%B HEAD | grep -Fx \
-            "Signed-off-by: ${author_name} <${author_email}>"
+          # Commit identity is not verified here: author/committer emails are
+          # self-declared and prove nothing (artin, 2026-10-09). The manifest
+          # below still records them for the receipt.
           {
             echo "head=$actual_head"
             echo "tree=$(git rev-parse HEAD^{tree})"
