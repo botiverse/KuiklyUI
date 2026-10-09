@@ -21,10 +21,26 @@ Fork-Patch: ohos-image-cache-fetch-trace
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp
-index 7733a7750d29e80d413f7fb685d716ae9b241808..f02c6a3a82df2c73c8aaa565b42d135a721ca59f 100644
+index 7733a7750d29e80d413f7fb685d716ae9b241808..d06cf184eaacd6a3a9496d90eb142aebf66246c9 100644
 --- a/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp
-@@ -327,29 +327,54 @@ KRAnyValue KRMemoryCacheModule::CacheImage(const KRAnyValue &params, const KRRen
+@@ -259,6 +259,15 @@ KRAnyValue KRMemoryCacheModule::SetObject(const KRAnyValue &params) {
+     return KREmptyValue();
+ }
+ 
++// Short, url-free correlation id for the fetch pipeline logs below. Signed
++// urls must not be logged; the id lets one request be followed from
++// CacheImage through the ArkTS fetch callback to the pixelmap result.
++static std::string KRCacheTraceId(const std::string &src) {
++    std::ostringstream oss;
++    oss << std::hex << (std::hash<std::string>{}(src) & 0xffffffffu);
++    return oss.str();
++}
++
+ OH_PixelmapNative *KRMemoryCacheModule::LoadPixelmapFromLocal(std::string &src) {
+     OH_PixelmapNative *pixelmap = nullptr;
+     OH_ImageSourceNative *source = nullptr;
+@@ -327,29 +336,54 @@ KRAnyValue KRMemoryCacheModule::CacheImage(const KRAnyValue &params, const KRRen
          auto network_module = std::dynamic_pointer_cast<KRNetworkModule>(rootView->GetModuleOrCreate(kNetworkModuleName));
          if (network_module) {
              std::weak_ptr<IKRRenderModuleExport> weak_self = shared_from_this();
@@ -84,19 +100,3 @@ index 7733a7750d29e80d413f7fb685d716ae9b241808..f02c6a3a82df2c73c8aaa565b42d135a
                  }
              });
              KRRenderValueMap result;
-@@ -381,6 +406,15 @@ void KRMemoryCacheModule::SetImage(const std::string &cache_key, OH_PixelmapNati
-     }
- }
- 
-+// Short, url-free correlation id for the fetch pipeline logs below. Signed
-+// urls must not be logged; the id lets one request be followed from
-+// CacheImage through the ArkTS fetch callback to the pixelmap result.
-+static std::string KRCacheTraceId(const std::string &src) {
-+    std::ostringstream oss;
-+    oss << std::hex << (std::hash<std::string>{}(src) & 0xffffffffu);
-+    return oss.str();
-+}
-+
- std::string KRMemoryCacheModule::GenerateCacheKey(const std::string &src) {
-     std::ostringstream oss;
-     oss << kCacheKeyPrefix;
