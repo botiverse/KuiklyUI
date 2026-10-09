@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Fri, 9 Oct 2026 02:30:51 +0000
+Subject: feat(ohos): trace the image cache fetch pipeline with a url-free id
+
+KRMemoryCacheModule.CacheImage hands network images to the ArkTS
+FetchFileByDownloadOrCache bridge and decodes the returned path with
+LoadPixelmapFromLocal, but nothing logged whether the bridge callback ever
+arrived, whether it carried a path, or whether the decode produced a
+pixelmap. On HarmonyOS 1.13.0 11300010 a remote PNG downloads and decodes
+through the host adapter yet its preview stays on the placeholder, and the
+pipeline could not be told apart from the host display chain.
+
+Log one INFO line per hop (dispatch, callback arrival with hasPath, result
+with state and WxH) and an ERROR line for each terminal failure (module
+released, no path / decode failure, no callback to deliver to), all keyed
+by a short hash of the src so signed urls are never written to hilog.
+
+Upstream-Status: pending
+Fork-Patch: ohos-image-cache-fetch-trace
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp
+index 7733a7750d29e80d413f7fb685d716ae9b241808..f02c6a3a82df2c73c8aaa565b42d135a721ca59f 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/modules/cache/KRMemoryCacheModule.cpp
+@@ -327,29 +327,54 @@ KRAnyValue KRMemoryCacheModule::CacheImage(const KRAnyValue &params, const KRRen
+         auto network_module = std::dynamic_pointer_cast<KRNetworkModule>(rootView->GetModuleOrCreate(kNetworkModuleName));
+         if (network_module) {
+             std::weak_ptr<IKRRenderModuleExport> weak_self = shared_from_this();
+-            network_module->FetchFileByDownloadOrCache(src, [weak_self, cache_key, callback](KRAnyValue res) {
++            const std::string trace_id = KRCacheTraceId(src);
++            KR_LOG_INFO_WITH_TAG(kMemoryCacheModuleName)
++                << "cache fetch dispatch id=" << trace_id << " srcLen=" << src.size()
++                << " hasCallback=" << (callback ? 1 : 0);
++            network_module->FetchFileByDownloadOrCache(src, [weak_self, cache_key, callback, trace_id](KRAnyValue res) {
+                 KRMemoryCacheModule *module_self;
+                 if (auto self = weak_self.lock()) {
+                     module_self = reinterpret_cast<KRMemoryCacheModule *>(self.get());
+                 } else {
++                    KR_LOG_ERROR_WITH_TAG(kMemoryCacheModuleName)
++                        << "cache fetch callback id=" << trace_id << " dropped: module released";
+                     return;
+                 }
+                 OH_PixelmapNative *pixelmap = nullptr;
+-                if (res && !res->isNull() && res->isString()) {
++                const bool has_path = res && !res->isNull() && res->isString() && !res->toString().empty();
++                KR_LOG_INFO_WITH_TAG(kMemoryCacheModuleName)
++                    << "cache fetch callback id=" << trace_id << " hasPath=" << (has_path ? 1 : 0);
++                if (has_path) {
+                     auto filePath = res->toString();
+-                    if (!filePath.empty()) {
+-                        pixelmap = module_self->LoadPixelmapFromLocal(filePath);
+-                    }
++                    pixelmap = module_self->LoadPixelmapFromLocal(filePath);
+                 }
+                 KRRenderValueMap result;
+                 if (pixelmap) {
++                    uint32_t width = 0;
++                    uint32_t height = 0;
++                    OH_Pixelmap_ImageInfo *info = nullptr;
++                    if (OH_PixelmapImageInfo_Create(&info) == IMAGE_SUCCESS && info != nullptr) {
++                        if (OH_PixelmapNative_GetImageInfo(pixelmap, info) == IMAGE_SUCCESS) {
++                            OH_PixelmapImageInfo_GetWidth(info, &width);
++                            OH_PixelmapImageInfo_GetHeight(info, &height);
++                        }
++                        OH_PixelmapImageInfo_Release(info);
++                    }
+                     module_self->SetImage(cache_key, pixelmap);
+                     result = module_self->GenerateResult(cache_key, pixelmap);
++                    KR_LOG_INFO_WITH_TAG(kMemoryCacheModuleName)
++                        << "cache fetch result id=" << trace_id << " state=complete " << width << "x" << height;
+                 } else {
+                     result = module_self->GenerateError(-1, "fetch failed");
++                    KR_LOG_ERROR_WITH_TAG(kMemoryCacheModuleName)
++                        << "cache fetch result id=" << trace_id << " state=error hasPath=" << (has_path ? 1 : 0)
++                        << " (download/path failure if hasPath=0, local decode failure if 1)";
+                 }
+                 if (callback) {
+                     callback(NewKRRenderValue(result));
++                } else {
++                    KR_LOG_ERROR_WITH_TAG(kMemoryCacheModuleName)
++                        << "cache fetch result id=" << trace_id << " has no callback to deliver to";
+                 }
+             });
+             KRRenderValueMap result;
+@@ -381,6 +406,15 @@ void KRMemoryCacheModule::SetImage(const std::string &cache_key, OH_PixelmapNati
+     }
+ }
+ 
++// Short, url-free correlation id for the fetch pipeline logs below. Signed
++// urls must not be logged; the id lets one request be followed from
++// CacheImage through the ArkTS fetch callback to the pixelmap result.
++static std::string KRCacheTraceId(const std::string &src) {
++    std::ostringstream oss;
++    oss << std::hex << (std::hash<std::string>{}(src) & 0xffffffffu);
++    return oss.str();
++}
++
+ std::string KRMemoryCacheModule::GenerateCacheKey(const std::string &src) {
+     std::ostringstream oss;
+     oss << kCacheKeyPrefix;
