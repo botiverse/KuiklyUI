@@ -1,0 +1,620 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Fri, 9 Oct 2026 11:35:39 +0000
+Subject: feat(compose): lower PathEffect dashes to the canvas lineDash command
+
+The vendored DrawScope kept every pathEffect parameter commented out, so a
+Compose Canvas could not draw a dashed line even though every renderer's
+CanvasView already implements lineDash. Restore the Jetpack Compose surface
+(PathEffect.dashPathEffect, Stroke.pathEffect, Paint.pathEffect, the
+pathEffect parameters of drawLine/drawPoints) and lower it in KuiklyCanvas:
+a DashPathEffect becomes lineDash(intervals / density), a null effect sends
+an empty lineDash, and the sticky native dash state is only re-sent when it
+changes or after the canvas is rebound (reset).
+
+drawLine now also honors the paint's stroke cap, like fillOrStroke does.
+Only the dash effect is supported; phase is accepted for source
+compatibility and ignored because no renderer exposes it.
+
+Fork-Patch: compose-canvas-path-effect-dash
+Upstream-Status: pending
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..e5aaa69c8feaf04f8feba2ddba3edafb4b8e02f6
+--- /dev/null
++++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
+@@ -0,0 +1,204 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui
++
++import com.tencent.kuikly.compose.ui.geometry.Offset
++import com.tencent.kuikly.compose.ui.geometry.Size
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.graphics.PathEffect
++import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasDrawScope
++import com.tencent.kuikly.compose.ui.graphics.drawscope.DrawScope
++import com.tencent.kuikly.compose.ui.graphics.drawscope.Stroke
++import com.tencent.kuikly.compose.ui.unit.Density
++import com.tencent.kuikly.compose.ui.unit.LayoutDirection
++import com.tencent.kuikly.core.base.ViewBuilder
++import com.tencent.kuikly.core.manager.BridgeManager
++import com.tencent.kuikly.core.manager.NativeMethod
++import com.tencent.kuikly.core.manager.PagerManager
++import com.tencent.kuikly.core.nvi.NativeBridge
++import com.tencent.kuikly.core.nvi.serialization.json.JSONObject
++import com.tencent.kuikly.core.pager.Pager
++import com.tencent.kuikly.core.views.CanvasView
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFailsWith
++import kotlin.test.assertNull
++import kotlin.test.assertTrue
++
++/**
++ * The Compose canvas talks to every renderer through `callViewMethod` commands on the
++ * CanvasView. These teeth pin how [PathEffect] and the text primitive are lowered onto
++ * that wire: which commands go out, in what order, and in density-independent units.
++ */
++class KuiklyCanvasDashAndTextLoweringTest {
++
++    private val density = Density(density = 2f)
++
++    @Test
++    fun dashedStrokeLowersToLineDashInDensityIndependentUnits() {
++        withCanvasFixture { fixture ->
++            fixture.draw {
++                drawLine(
++                    color = Color.Red,
++                    start = Offset(0f, 0f),
++                    end = Offset(100f, 0f),
++                    strokeWidth = 4f,
++                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
++                )
++            }
++            val lineDash = fixture.commandsNamed("lineDash")
++            assertEquals(1, lineDash.size)
++            assertEquals(listOf(6.0, 4.0), lineDash.single().intervals())
++            assertEquals(
++                listOf("beginPath", "moveTo", "lineTo", "strokeStyle", "lineWidth", "lineDash", "stroke"),
++                fixture.commandNames().filterNot { it == "reset" }
++            )
++        }
++    }
++
++    @Test
++    fun unchangedDashIsSentOnceAndClearedWhenTheNextStrokeIsSolid() {
++        withCanvasFixture { fixture ->
++            val dashed = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f)))
++            fixture.draw {
++                drawRect(Color.Blue, topLeft = Offset.Zero, size = Size(10f, 10f), style = dashed)
++                drawCircle(Color.Blue, radius = 5f, style = dashed)
++                drawRect(Color.Blue, topLeft = Offset.Zero, size = Size(10f, 10f), style = Stroke(width = 2f))
++            }
++            val lineDash = fixture.commandsNamed("lineDash")
++            assertEquals(2, lineDash.size, "second dashed stroke must reuse the sticky lineDash")
++            assertEquals(listOf(3.0, 2.0), lineDash[0].intervals())
++            assertNull(lineDash[1].intervals(), "solid stroke after a dash must clear lineDash")
++        }
++    }
++
++    @Test
++    fun dashStateIsResetWhenTheCanvasIsReboundToTheView() {
++        withCanvasFixture { fixture ->
++            val dashed = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f)))
++            fixture.draw { drawRect(Color.Blue, size = Size(10f, 10f), style = dashed) }
++            fixture.draw { drawRect(Color.Blue, size = Size(10f, 10f), style = dashed) }
++            assertEquals(2, fixture.commandsNamed("lineDash").size, "reset clears native dash state; resend after rebind")
++        }
++    }
++
++    @Test
++    fun fillStrokeDoesNotEmitLineDash() {
++        withCanvasFixture { fixture ->
++            fixture.draw { drawRect(Color.Blue, size = Size(10f, 10f)) }
++            assertTrue(fixture.commandsNamed("lineDash").isEmpty())
++        }
++    }
++
++    @Test
++    fun dashPathEffectRejectsOddOrNegativeIntervals() {
++        assertFailsWith<IllegalArgumentException> { PathEffect.dashPathEffect(floatArrayOf(4f)) }
++        assertFailsWith<IllegalArgumentException> { PathEffect.dashPathEffect(floatArrayOf(4f, 2f, 1f)) }
++        assertFailsWith<IllegalArgumentException> { PathEffect.dashPathEffect(floatArrayOf(4f, -2f)) }
++        assertEquals(
++            PathEffect.dashPathEffect(floatArrayOf(4f, 2f)),
++            PathEffect.dashPathEffect(floatArrayOf(4f, 2f))
++        )
++    }
++
++    @Test
++    fun strokeEqualityIncludesPathEffect() {
++        val dashed = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f)))
++        assertEquals(dashed, Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f))))
++        assertTrue(dashed != Stroke(width = 2f))
++        assertTrue(dashed.hashCode() != Stroke(width = 2f).hashCode())
++    }
++
++    private class RecordedCommand(val method: String, val params: String?) {
++        fun json(): JSONObject = JSONObject(params ?: "{}")
++        fun intervals(): List<Double>? {
++            val array = json().optJSONArray("intervals") ?: return null
++            return List(array.length()) { array.optDouble(it) }
++        }
++    }
++
++    private class CanvasFixture(
++        private val view: CanvasView,
++        private val commands: MutableList<RecordedCommand>,
++        private val density: Density,
++    ) {
++        private val canvas = KuiklyCanvas()
++        private val scope = CanvasDrawScope()
++
++        fun draw(block: DrawScope.() -> Unit) {
++            commands.clear()
++            canvas.view = view
++            scope.draw(density, LayoutDirection.Ltr, canvas, Size(200f, 200f), block)
++            canvas.view = null
++        }
++
++        fun commandNames(): List<String> = commands.map { it.method }
++
++        fun commandsNamed(method: String): List<RecordedCommand> = commands.filter { it.method == method }
++    }
++
++    private fun withCanvasFixture(
++        measuredSize: String = "0|0",
++        block: (CanvasFixture) -> Unit,
++    ) {
++        val pagerId = "KuiklyCanvasDashAndTextLoweringTest"
++        val pageName = pagerId
++        val commands = mutableListOf<RecordedCommand>()
++        val bridge = NativeBridge().apply {
++            delegate = object : NativeBridge.NativeBridgeDelegate {
++                override fun callNative(
++                    methodId: Int,
++                    arg0: Any?,
++                    arg1: Any?,
++                    arg2: Any?,
++                    arg3: Any?,
++                    arg4: Any?,
++                    arg5: Any?
++                ): Any? = when (methodId) {
++                    NativeMethod.CALL_VIEW_METHOD -> {
++                        commands += RecordedCommand(arg2 as String, arg3 as? String)
++                        null
++                    }
++                    NativeMethod.CALCULATE_RENDER_VIEW_SIZE -> measuredSize
++                    else -> null
++                }
++            }
++        }
++        @Suppress("DEPRECATION")
++        val previousPageId = BridgeManager.currentPageId
++        @Suppress("DEPRECATION")
++        fun setCurrentPageId(value: String) {
++            BridgeManager.currentPageId = value
++        }
++        BridgeManager.registerNativeBridge(pagerId, bridge)
++        PagerManager.registerPageRouter(pageName) {
++            object : Pager() {
++                override fun body(): ViewBuilder = {}
++            }
++        }
++        setCurrentPageId(pagerId)
++        PagerManager.createPager(pagerId, pageName, "{\"density\":${density.density}}")
++        try {
++            val view = CanvasView()
++            view.pagerId = pagerId
++            view.createRenderView()
++            block(CanvasFixture(view, commands, density))
++        } finally {
++            PagerManager.destroyPager(pagerId)
++            setCurrentPageId(previousPageId)
++        }
++    }
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
+index db519f2d9e1a7586e72e3fd9238cb2f50b8fedc0..d2437986ba33c6768cef09ef51c362afe9bca27c 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
+@@ -20,12 +20,14 @@ import com.tencent.kuikly.compose.ui.geometry.Rect
+ import com.tencent.kuikly.compose.ui.geometry.RoundRect
+ import com.tencent.kuikly.compose.ui.graphics.Canvas
+ import com.tencent.kuikly.compose.ui.graphics.ClipOp
++import com.tencent.kuikly.compose.ui.graphics.DashPathEffect
+ import com.tencent.kuikly.compose.ui.graphics.ImageBitmap
+ import com.tencent.kuikly.compose.ui.graphics.LinearGradient
+ import com.tencent.kuikly.compose.ui.graphics.Matrix
+ import com.tencent.kuikly.compose.ui.graphics.Paint
+ import com.tencent.kuikly.compose.ui.graphics.PaintingStyle
+ import com.tencent.kuikly.compose.ui.graphics.Path
++import com.tencent.kuikly.compose.ui.graphics.PathEffect
+ import com.tencent.kuikly.compose.ui.graphics.PointMode
+ import com.tencent.kuikly.compose.ui.graphics.SolidColor
+ import com.tencent.kuikly.compose.ui.graphics.StrokeCap
+@@ -67,10 +69,23 @@ internal class KuiklyCanvas : Canvas {
+                     StrokeCap.Square -> lineCapSquare()
+                 }
+             }
++            applyPathEffect(paint.pathEffect)
+             stroke()
+         }
+     }
+ 
++    /**
++     * Lowers [PathEffect] to the renderer's `lineDash` state. The dash state is sticky on the
++     * native canvas (it is not part of save/restore), so only send it when it changes; it is
++     * cleared again by `reset` on every bind.
++     */
++    private fun CanvasContext.applyPathEffect(effect: PathEffect?) {
++        if (pathEffect == effect) return
++        pathEffect = effect
++        val dash = effect as? DashPathEffect
++        setLineDash(dash?.intervals?.map { it / densityValue } ?: emptyList())
++    }
++
+     override var view: DeclarativeBaseView<*, *>? = null
+         set(value) {
+             if (value is CanvasView) {
+@@ -82,6 +97,7 @@ internal class KuiklyCanvas : Canvas {
+                     value.renderView?.callMethod("reset", "")
+                 }
+                 strokeCap = StrokeCap.Butt
++                pathEffect = null
+             } else {
+                 context = null
+             }
+@@ -91,6 +107,7 @@ internal class KuiklyCanvas : Canvas {
+     private var context: CanvasContext? = null
+     private var densityValue: Float = 1f
+     private var strokeCap = StrokeCap.Butt
++    private var pathEffect: PathEffect? = null
+ 
+     override fun save() {
+         context?.save()
+@@ -163,8 +180,19 @@ internal class KuiklyCanvas : Canvas {
+             beginPath()
+             moveTo(p1.x / densityValue, p1.y / densityValue)
+             lineTo(p2.x / densityValue, p2.y / densityValue)
++            // A line is always stroked, whatever the paint style says; honor the cap and
++            // dash pattern carried by the paint like fillOrStroke does.
+             strokeStyle(paint.toKuiklyColor())
+             lineWidth(paint.strokeWidth / densityValue)
++            if (strokeCap != paint.strokeCap) {
++                strokeCap = paint.strokeCap
++                when (paint.strokeCap) {
++                    StrokeCap.Butt -> lineCapButt()
++                    StrokeCap.Round -> lineCapRound()
++                    StrokeCap.Square -> lineCapSquare()
++                }
++            }
++            applyPathEffect(paint.pathEffect)
+             stroke()
+         }
+     }
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt
+index 85da21f1f6b24ce3fe217af2ccb722826e8531ae..5f9f65b2dfe287b18329e8cb9579a85a456fa42b 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt
+@@ -54,6 +54,7 @@ class KuiklyPaint : Paint {
+     override var strokeMiterLimit: Float = 4f
+     override var style: PaintingStyle = PaintingStyle.Fill
+     override var shader: Any? = null
++    override var pathEffect: PathEffect? = null
+ }
+ 
+ interface Paint {
+@@ -121,4 +122,10 @@ interface Paint {
+      * When this is null, the [color] is used instead.
+      */
+     var shader: Any?
++
++    /**
++     * Specifies the effect applied to the geometry of a stroked shape, for example a dash
++     * pattern. Defaults to null, which draws a solid outline.
++     */
++    var pathEffect: PathEffect?
+ }
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9a54a1a69c888cbf9a1a90ccd3bebd3e4e7f804
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt
+@@ -0,0 +1,67 @@
++/*
++ * Copyright 2020 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.graphics
++
++/**
++ * Effect applied to the geometry of a drawing primitive. For example, this can be used
++ * to draw a dashed line.
++ *
++ * The Kuikly canvas lowers a [PathEffect] to the renderer's `lineDash` command, so only
++ * [dashPathEffect] is provided. Corner, stamped and chained effects would need renderer
++ * support on every platform first.
++ */
++interface PathEffect {
++    companion object {
++        /**
++         * Replaces the outline of the shape with a series of dashes.
++         *
++         * @param intervals Array of "on" and "off" distances for the dashed line segments.
++         * Must contain an even number of entries (>= 2). The even indices specify the "on"
++         * intervals, the odd indices specify the "off" intervals, in pixels.
++         * @param phase Pixel offset into the intervals array. The Kuikly canvas does not
++         * support a phase offset on any renderer yet; the value is kept for source
++         * compatibility with Jetpack Compose and is currently ignored.
++         */
++        fun dashPathEffect(intervals: FloatArray, phase: Float = 0f): PathEffect =
++            DashPathEffect(intervals, phase)
++    }
++}
++
++/**
++ * Dashed stroke pattern. Compared by content so the canvas can skip re-sending an
++ * unchanged `lineDash` command.
++ */
++internal class DashPathEffect(val intervals: FloatArray, val phase: Float) : PathEffect {
++
++    init {
++        require(intervals.size >= 2 && intervals.size % 2 == 0) {
++            "dashPathEffect requires an even number of intervals (>= 2), got ${intervals.size}"
++        }
++        require(intervals.all { it >= 0f }) { "dashPathEffect intervals must not be negative" }
++    }
++
++    override fun equals(other: Any?): Boolean {
++        if (this === other) return true
++        if (other !is DashPathEffect) return false
++        return phase == other.phase && intervals.contentEquals(other.intervals)
++    }
++
++    override fun hashCode(): Int = 31 * intervals.contentHashCode() + phase.hashCode()
++
++    override fun toString(): String =
++        "DashPathEffect(intervals=${intervals.contentToString()}, phase=$phase)"
++}
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/CanvasDrawScope.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/CanvasDrawScope.kt
+index 3b0f62e70af0f9091c9fa77866bde5909b95dbfb..4ed8ad2157d5addf742e0307108078f9135ddd86 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/CanvasDrawScope.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/CanvasDrawScope.kt
+@@ -30,6 +30,7 @@ import com.tencent.kuikly.compose.ui.graphics.KuiklyPaint
+ import com.tencent.kuikly.compose.ui.graphics.Matrix
+ import com.tencent.kuikly.compose.ui.graphics.Paint
+ import com.tencent.kuikly.compose.ui.graphics.PaintingStyle
++import com.tencent.kuikly.compose.ui.graphics.PathEffect
+ import com.tencent.kuikly.compose.ui.graphics.Path
+ import com.tencent.kuikly.compose.ui.graphics.PointMode
+ import com.tencent.kuikly.compose.ui.graphics.StrokeCap
+@@ -101,7 +102,7 @@ class CanvasDrawScope : DrawScope {
+         end: Offset,
+         strokeWidth: Float,
+         cap: StrokeCap,
+-//        pathEffect: PathEffect?,
++        pathEffect: PathEffect?,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float,
+ //        colorFilter: ColorFilter?,
+ //        blendMode: BlendMode
+@@ -114,7 +115,7 @@ class CanvasDrawScope : DrawScope {
+             Stroke.DefaultMiter,
+             cap,
+             StrokeJoin.Miter,
+-//            pathEffect,
++            pathEffect,
+             alpha,
+ //            colorFilter,
+ //            blendMode
+@@ -130,7 +131,7 @@ class CanvasDrawScope : DrawScope {
+         end: Offset,
+         strokeWidth: Float,
+         cap: StrokeCap,
+-//        pathEffect: PathEffect?,
++        pathEffect: PathEffect?,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float,
+ //        colorFilter: ColorFilter?,
+ //        blendMode: BlendMode
+@@ -143,7 +144,7 @@ class CanvasDrawScope : DrawScope {
+             Stroke.DefaultMiter,
+             cap,
+             StrokeJoin.Miter,
+-//            pathEffect,
++            pathEffect,
+             alpha,
+ //            colorFilter,
+ //            blendMode
+@@ -464,7 +465,7 @@ class CanvasDrawScope : DrawScope {
+         color: Color,
+         strokeWidth: Float,
+         cap: StrokeCap,
+-//        pathEffect: PathEffect?,
++        pathEffect: PathEffect?,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float,
+ //        colorFilter: ColorFilter?,
+ //        blendMode: BlendMode
+@@ -477,7 +478,7 @@ class CanvasDrawScope : DrawScope {
+             Stroke.DefaultMiter,
+             cap,
+             StrokeJoin.Miter,
+-//            pathEffect,
++            pathEffect,
+             alpha,
+ //            colorFilter,
+ //            blendMode
+@@ -493,7 +494,7 @@ class CanvasDrawScope : DrawScope {
+         brush: Brush,
+         strokeWidth: Float,
+         cap: StrokeCap,
+-//        pathEffect: PathEffect?,
++        pathEffect: PathEffect?,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float,
+ //        colorFilter: ColorFilter?,
+ //        blendMode: BlendMode
+@@ -506,7 +507,7 @@ class CanvasDrawScope : DrawScope {
+             Stroke.DefaultMiter,
+             cap,
+             StrokeJoin.Miter,
+-//            pathEffect,
++            pathEffect,
+             alpha,
+ //            colorFilter,
+ //            blendMode
+@@ -593,7 +594,7 @@ class CanvasDrawScope : DrawScope {
+                         if (strokeCap != drawStyle.cap) strokeCap = drawStyle.cap
+                         if (strokeMiterLimit != drawStyle.miter) strokeMiterLimit = drawStyle.miter
+ //                        if (strokeJoin != drawStyle.join) strokeJoin = drawStyle.join
+-//                        if (pathEffect != drawStyle.pathEffect) pathEffect = drawStyle.pathEffect
++                        if (pathEffect != drawStyle.pathEffect) pathEffect = drawStyle.pathEffect
+                     }
+         }
+ 
+@@ -649,7 +650,7 @@ class CanvasDrawScope : DrawScope {
+         miter: Float,
+         cap: StrokeCap,
+         join: StrokeJoin,
+-//        pathEffect: PathEffect?,
++        pathEffect: PathEffect?,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float,
+ //        colorFilter: ColorFilter?,
+ //        blendMode: BlendMode,
+@@ -667,7 +668,7 @@ class CanvasDrawScope : DrawScope {
+             if (this.strokeMiterLimit != miter) this.strokeMiterLimit = miter
+             if (this.strokeCap != cap) this.strokeCap = cap
+ //            if (this.strokeJoin != join) this.strokeJoin = join
+-//            if (this.pathEffect != pathEffect) this.pathEffect = pathEffect
++            if (this.pathEffect != pathEffect) this.pathEffect = pathEffect
+ //            if (this.filterQuality != filterQuality) this.filterQuality = filterQuality
+         }
+ 
+@@ -677,7 +678,7 @@ class CanvasDrawScope : DrawScope {
+         miter: Float,
+         cap: StrokeCap,
+         join: StrokeJoin,
+-//        pathEffect: PathEffect?,
++        pathEffect: PathEffect?,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float,
+ //        colorFilter: ColorFilter?,
+ //        blendMode: BlendMode,
+@@ -694,7 +695,7 @@ class CanvasDrawScope : DrawScope {
+         if (this.strokeMiterLimit != miter) this.strokeMiterLimit = miter
+         if (this.strokeCap != cap) this.strokeCap = cap
+ //        if (this.strokeJoin != join) this.strokeJoin = join
+-//        if (this.pathEffect != pathEffect) this.pathEffect = pathEffect
++        if (this.pathEffect != pathEffect) this.pathEffect = pathEffect
+ //        if (this.filterQuality != filterQuality) this.filterQuality = filterQuality
+     }
+ 
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt
+index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83aa56320fc 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt
+@@ -35,7 +35,7 @@ import com.tencent.kuikly.compose.ui.graphics.PointMode
+ import com.tencent.kuikly.compose.ui.graphics.StrokeCap
+ import com.tencent.kuikly.compose.ui.graphics.StrokeJoin
+ import com.tencent.kuikly.compose.ui.graphics.degrees
+-//import com.tencent.kuikly.compose.ui.graphics.PathEffect
++import com.tencent.kuikly.compose.ui.graphics.PathEffect
+ //import com.tencent.kuikly.compose.ui.graphics.PointMode
+ //import com.tencent.kuikly.compose.ui.graphics.StrokeCap
+ //import com.tencent.kuikly.compose.ui.graphics.StrokeJoin
+@@ -379,7 +379,7 @@ interface DrawScope : Density {
+         end: Offset,
+         strokeWidth: Float = Stroke.HairlineWidth,
+         cap: StrokeCap = Stroke.DefaultCap,
+-//        pathEffect: PathEffect? = null,
++        pathEffect: PathEffect? = null,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
+ //        colorFilter: ColorFilter? = null,
+ //        blendMode: BlendMode = DefaultBlendMode
+@@ -406,7 +406,7 @@ interface DrawScope : Density {
+         end: Offset,
+         strokeWidth: Float = Stroke.HairlineWidth,
+         cap: StrokeCap = Stroke.DefaultCap,
+-//        pathEffect: PathEffect? = null,
++        pathEffect: PathEffect? = null,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
+ //        colorFilter: ColorFilter? = null,
+ //        blendMode: BlendMode = DefaultBlendMode
+@@ -849,7 +849,7 @@ interface DrawScope : Density {
+         color: Color,
+         strokeWidth: Float = Stroke.HairlineWidth,
+         cap: StrokeCap = StrokeCap.Butt,
+-//        pathEffect: PathEffect? = null,
++        pathEffect: PathEffect? = null,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
+ //        colorFilter: ColorFilter? = null,
+ //        blendMode: BlendMode = DefaultBlendMode
+@@ -877,7 +877,7 @@ interface DrawScope : Density {
+         brush: Brush,
+         strokeWidth: Float = Stroke.HairlineWidth,
+         cap: StrokeCap = StrokeCap.Butt,
+-//        pathEffect: PathEffect? = null,
++        pathEffect: PathEffect? = null,
+         @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
+ //        colorFilter: ColorFilter? = null,
+ //        blendMode: BlendMode = DefaultBlendMode
+@@ -936,7 +936,7 @@ class Stroke(
+     val miter: Float = DefaultMiter,
+     val cap: StrokeCap = DefaultCap,
+     val join: StrokeJoin = DefaultJoin,
+-//    val pathEffect: PathEffect? = null
++    val pathEffect: PathEffect? = null
+ ) : DrawStyle() {
+     companion object {
+ 
+@@ -969,7 +969,7 @@ class Stroke(
+         if (miter != other.miter) return false
+         if (cap != other.cap) return false
+         if (join != other.join) return false
+-//        if (pathEffect != other.pathEffect) return false
++        if (pathEffect != other.pathEffect) return false
+ 
+         return true
+     }
+@@ -979,12 +979,11 @@ class Stroke(
+         result = 31 * result + miter.hashCode()
+         result = 31 * result + cap.hashCode()
+         result = 31 * result + join.hashCode()
+-//        result = 31 * result + (pathEffect?.hashCode() ?: 0)
++        result = 31 * result + (pathEffect?.hashCode() ?: 0)
+         return result
+     }
+ 
+     override fun toString(): String {
+-        return "Stroke(width=$width, miter=$miter, cap=$cap, join=$join)"
+-//        return "Stroke(width=$width, miter=$miter, cap=$cap, join=$join, pathEffect=$pathEffect)"
++        return "Stroke(width=$width, miter=$miter, cap=$cap, join=$join, pathEffect=$pathEffect)"
+     }
+ }

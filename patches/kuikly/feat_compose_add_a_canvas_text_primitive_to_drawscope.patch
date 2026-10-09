@@ -1,0 +1,470 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Fri, 9 Oct 2026 11:35:52 +0000
+Subject: feat(compose): add a canvas text primitive to DrawScope
+
+Kuikly's DrawScope had no way to draw or measure text, so a Compose Canvas
+could not render diagram labels even though every renderer's CanvasView
+implements font/textAlign/fillText/strokeText/measureText. Porting the
+Jetpack Compose drawText(TextMeasurer, ...) stack is not possible here: the
+renderer shapes the text itself and never hands back a TextLayoutResult.
+
+Add DrawScope.drawText(text, origin, style, alpha, drawStyle) and
+DrawScope.measureText(text, style) as Kuikly-specific extensions with HTML
+canvas semantics: origin is the alphabetic baseline point, style.textAlign
+chooses which side of origin.x the run extends to, and TextStyle color,
+fontSize (sp scaled by density, like the Text composable), fontWeight,
+fontStyle and fontFamily are lowered to the renderer font command.
+KuiklyCanvas sends font/textAlign only when they change within a bind and
+converts pixels to the renderer's density-independent units.
+
+Fork-Patch: compose-canvas-draw-text
+Upstream-Status: pending
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
+index e5aaa69c8feaf04f8feba2ddba3edafb4b8e02f6..67920a07b5b9f9d2ef725aea24faf9bdaf5a85e5 100644
+--- a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
++++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
+@@ -19,11 +19,21 @@ import com.tencent.kuikly.compose.ui.geometry.Offset
+ import com.tencent.kuikly.compose.ui.geometry.Size
+ import com.tencent.kuikly.compose.ui.graphics.Color
+ import com.tencent.kuikly.compose.ui.graphics.PathEffect
++import com.tencent.kuikly.compose.ui.graphics.StrokeCap
+ import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasDrawScope
++import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasTextMetrics
+ import com.tencent.kuikly.compose.ui.graphics.drawscope.DrawScope
+ import com.tencent.kuikly.compose.ui.graphics.drawscope.Stroke
++import com.tencent.kuikly.compose.ui.graphics.drawscope.drawText
++import com.tencent.kuikly.compose.ui.graphics.drawscope.measureText
++import com.tencent.kuikly.compose.ui.text.TextStyle
++import com.tencent.kuikly.compose.ui.text.font.FontFamily
++import com.tencent.kuikly.compose.ui.text.font.FontStyle
++import com.tencent.kuikly.compose.ui.text.font.FontWeight
++import com.tencent.kuikly.compose.ui.text.style.TextAlign
+ import com.tencent.kuikly.compose.ui.unit.Density
+ import com.tencent.kuikly.compose.ui.unit.LayoutDirection
++import com.tencent.kuikly.compose.ui.unit.sp
+ import com.tencent.kuikly.core.base.ViewBuilder
+ import com.tencent.kuikly.core.manager.BridgeManager
+ import com.tencent.kuikly.core.manager.NativeMethod
+@@ -35,6 +45,7 @@ import com.tencent.kuikly.core.views.CanvasView
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
+ import kotlin.test.assertFailsWith
++import kotlin.test.assertNotNull
+ import kotlin.test.assertNull
+ import kotlin.test.assertTrue
+ 
+@@ -122,6 +133,113 @@ class KuiklyCanvasDashAndTextLoweringTest {
+         assertTrue(dashed.hashCode() != Stroke(width = 2f).hashCode())
+     }
+ 
++    @Test
++    fun drawTextLowersFontAlignColorAndBaselineOrigin() {
++        withCanvasFixture { fixture ->
++            fixture.draw {
++                drawText(
++                    text = "Node A",
++                    origin = Offset(40f, 60f),
++                    style = TextStyle(
++                        color = Color.Red,
++                        fontSize = 14.sp,
++                        fontWeight = FontWeight.Bold,
++                        fontStyle = FontStyle.Italic,
++                        fontFamily = FontFamily.Monospace,
++                        textAlign = TextAlign.Center
++                    )
++                )
++            }
++            assertEquals(
++                listOf("font", "textAlign", "fillStyle", "fillText"),
++                fixture.commandNames().filterNot { it == "reset" }
++            )
++            val font = fixture.commandsNamed("font").single().json()
++            assertEquals("italic", font.optString("style"))
++            assertEquals("700", font.optString("weight"))
++            assertEquals(14.0, font.optDouble("size"))
++            assertEquals("monospace", font.optString("family"))
++            assertEquals("center", fixture.commandsNamed("textAlign").single().params)
++            val fillText = fixture.commandsNamed("fillText").single().json()
++            assertEquals("Node A", fillText.optString("text"))
++            assertEquals(20.0, fillText.optDouble("x"))
++            assertEquals(30.0, fillText.optDouble("y"))
++        }
++    }
++
++    @Test
++    fun drawTextDefaultsToRendererFontAndStartAlignment() {
++        withCanvasFixture { fixture ->
++            fixture.draw { drawText("x", Offset(2f, 4f)) }
++            val font = fixture.commandsNamed("font").single().json()
++            assertEquals("normal", font.optString("style"))
++            assertEquals("400", font.optString("weight"))
++            assertEquals(15.0, font.optDouble("size"))
++            assertTrue(!font.has("family"))
++            assertEquals("left", fixture.commandsNamed("textAlign").single().params)
++        }
++    }
++
++    @Test
++    fun drawTextReusesFontAndAlignAcrossRunsAndSkipsEmptyText() {
++        withCanvasFixture { fixture ->
++            val style = TextStyle(fontSize = 12.sp)
++            fixture.draw {
++                drawText("a", Offset(0f, 10f), style)
++                drawText("", Offset(0f, 20f), style)
++                drawText("b", Offset(0f, 30f), style)
++                drawText("c", Offset(0f, 40f), style.copy(fontSize = 16.sp))
++            }
++            assertEquals(2, fixture.commandsNamed("font").size)
++            assertEquals(1, fixture.commandsNamed("textAlign").size)
++            assertEquals(listOf("a", "b", "c"), fixture.commandsNamed("fillText").map { it.json().optString("text") })
++        }
++    }
++
++    @Test
++    fun strokedDrawTextUsesStrokeTextWithTheStrokeWidth() {
++        withCanvasFixture { fixture ->
++            fixture.draw {
++                drawText(
++                    "outline",
++                    Offset(0f, 0f),
++                    TextStyle(color = Color.Green),
++                    drawStyle = Stroke(width = 3f, cap = StrokeCap.Round)
++                )
++            }
++            assertEquals(
++                listOf("font", "textAlign", "strokeStyle", "lineWidth", "strokeText"),
++                fixture.commandNames().filterNot { it == "reset" }
++            )
++            assertEquals(1.5, fixture.commandsNamed("lineWidth").single().json().optDouble("width"))
++        }
++    }
++
++    @Test
++    fun measureTextScalesRendererMetricsBackToPixels() {
++        withCanvasFixture(measuredSize = "50|20") { fixture ->
++            var metrics: CanvasTextMetrics? = null
++            fixture.draw { metrics = measureText("hello", TextStyle(fontSize = 15.sp)) }
++            val measured = assertNotNull(metrics)
++            assertEquals(100f, measured.width)
++            assertEquals(40f, measured.height)
++            // Font size 15dp in a 20dp line box: the renderer splits the leading evenly.
++            assertEquals(35f, measured.ascent)
++            assertEquals(5f, measured.descent)
++            assertEquals(1, fixture.commandsNamed("font").size, "measure pushes the font state once")
++        }
++    }
++
++    @Test
++    fun measureTextOutsideADrawPassReturnsNull() {
++        val scope = CanvasDrawScope()
++        var metrics: CanvasTextMetrics? = CanvasTextMetrics(1f, 1f, 1f)
++        scope.draw(density, LayoutDirection.Ltr, KuiklyCanvas(), Size(10f, 10f)) {
++            metrics = measureText("hello")
++        }
++        assertNull(metrics)
++    }
++
+     private class RecordedCommand(val method: String, val params: String?) {
+         fun json(): JSONObject = JSONObject(params ?: "{}")
+         fun intervals(): List<Double>? {
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
+index d2437986ba33c6768cef09ef51c362afe9bca27c..45f5baa48005f9f73212bf0ccc7ced69f68b7098 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
+@@ -41,8 +41,23 @@ import com.tencent.kuikly.core.base.RenderView
+ import com.tencent.kuikly.core.views.CanvasContext
+ import com.tencent.kuikly.core.views.CanvasLinearGradient
+ import com.tencent.kuikly.core.views.CanvasView
++import com.tencent.kuikly.core.views.FontStyle
++import com.tencent.kuikly.core.views.FontWeight
++import com.tencent.kuikly.core.views.TextAlign
++import com.tencent.kuikly.core.views.TextMetrics
+ import kotlin.math.PI
+ 
++/**
++ * Font state the Kuikly canvas text primitive draws with; [sizePx] is in pixels and is
++ * converted to the renderer's density-independent size on dispatch.
++ */
++internal data class KuiklyCanvasFont(
++    val sizePx: Float,
++    val weight: FontWeight,
++    val style: FontStyle,
++    val family: String
++)
++
+ internal class KuiklyCanvas : Canvas {
+ 
+     private fun CanvasContext.fillOrStroke(paint: Paint) {
+@@ -98,6 +113,8 @@ internal class KuiklyCanvas : Canvas {
+                 }
+                 strokeCap = StrokeCap.Butt
+                 pathEffect = null
++                textFont = null
++                textAlign = null
+             } else {
+                 context = null
+             }
+@@ -108,6 +125,8 @@ internal class KuiklyCanvas : Canvas {
+     private var densityValue: Float = 1f
+     private var strokeCap = StrokeCap.Butt
+     private var pathEffect: PathEffect? = null
++    private var textFont: KuiklyCanvasFont? = null
++    private var textAlign: TextAlign? = null
+ 
+     override fun save() {
+         context?.save()
+@@ -338,6 +357,60 @@ internal class KuiklyCanvas : Canvas {
+         }
+     }
+ 
++    /**
++     * Draws a single line of [text] with the renderer's text primitive. [origin] is the
++     * alphabetic baseline point in pixels; [align] decides which side of `origin.x` the run
++     * extends to, like `textAlign` on an HTML canvas. Filled with [paint] unless its style
++     * is [PaintingStyle.Stroke], in which case the outline is stroked.
++     */
++    internal fun drawText(
++        text: String,
++        origin: Offset,
++        font: KuiklyCanvasFont,
++        align: TextAlign,
++        paint: Paint
++    ) {
++        context?.apply {
++            applyFont(font)
++            applyTextAlign(align)
++            val x = origin.x / densityValue
++            val y = origin.y / densityValue
++            if (paint.style == PaintingStyle.Fill) {
++                fillStyle(paint.toKuiklyColor())
++                fillText(text, x, y)
++            } else {
++                strokeStyle(paint.toKuiklyColor())
++                lineWidth(paint.strokeWidth / densityValue)
++                strokeText(text, x, y)
++            }
++        }
++    }
++
++    /**
++     * Measures a single line of [text] in [font] through the renderer's text shadow.
++     * Returns null when the canvas is not bound to a view. Metrics are in density-independent
++     * units as reported by the renderer; callers scale them back to pixels.
++     */
++    internal fun measureText(text: String, font: KuiklyCanvasFont): TextMetrics? {
++        val ctx = context ?: return null
++        ctx.applyFont(font)
++        return ctx.measureText(text)
++    }
++
++    internal fun density(): Float = densityValue
++
++    private fun CanvasContext.applyFont(font: KuiklyCanvasFont) {
++        if (textFont == font) return
++        textFont = font
++        font(font.style, font.weight, font.sizePx / densityValue, font.family)
++    }
++
++    private fun CanvasContext.applyTextAlign(align: TextAlign) {
++        if (textAlign == align) return
++        textAlign = align
++        textAlign(align)
++    }
++
+     override fun enableZ() {
+         // TODO("Not yet implemented")
+     }
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawText.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawText.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..e02271c839d4893b9a191e01f447220934c9fdc1
+--- /dev/null
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawText.kt
+@@ -0,0 +1,183 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.graphics.drawscope
++
++import com.tencent.kuikly.compose.resources.toKuiklyFontFamily
++import com.tencent.kuikly.compose.ui.KuiklyCanvas
++import com.tencent.kuikly.compose.ui.KuiklyCanvasFont
++import com.tencent.kuikly.compose.ui.geometry.Offset
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.graphics.isSpecified
++import com.tencent.kuikly.compose.ui.graphics.KuiklyPaint
++import com.tencent.kuikly.compose.ui.graphics.Paint
++import com.tencent.kuikly.compose.ui.graphics.PaintingStyle
++import com.tencent.kuikly.compose.ui.text.TextStyle
++import com.tencent.kuikly.compose.ui.text.font.FontFamily
++import com.tencent.kuikly.compose.ui.text.font.FontListFontFamily
++import com.tencent.kuikly.compose.ui.text.font.FontStyle
++import com.tencent.kuikly.compose.ui.text.font.FontWeight
++import com.tencent.kuikly.compose.ui.text.font.GenericFontFamily
++import com.tencent.kuikly.compose.ui.text.style.TextAlign
++import com.tencent.kuikly.compose.ui.unit.isSpecified
++import com.tencent.kuikly.core.views.FontStyle as KuiklyFontStyle
++import com.tencent.kuikly.core.views.FontWeight as KuiklyFontWeight
++import com.tencent.kuikly.core.views.TextAlign as KuiklyTextAlign
++
++/**
++ * Font size used by [drawText] and [measureText] when [TextStyle.fontSize] is unspecified,
++ * in density-independent pixels. Matches the renderer canvas default.
++ */
++private const val DefaultCanvasFontSizeDp = 15f
++
++/**
++ * Measured extent of a single line of canvas text, in pixels.
++ *
++ * @param width advance width of the run
++ * @param ascent distance from the alphabetic baseline up to the top of the line box
++ * @param descent distance from the alphabetic baseline down to the bottom of the line box
++ */
++class CanvasTextMetrics(val width: Float, val ascent: Float, val descent: Float) {
++    /** Total line box height. */
++    val height: Float get() = ascent + descent
++
++    override fun equals(other: Any?): Boolean {
++        if (this === other) return true
++        if (other !is CanvasTextMetrics) return false
++        return width == other.width && ascent == other.ascent && descent == other.descent
++    }
++
++    override fun hashCode(): Int {
++        var result = width.hashCode()
++        result = 31 * result + ascent.hashCode()
++        result = 31 * result + descent.hashCode()
++        return result
++    }
++
++    override fun toString(): String =
++        "CanvasTextMetrics(width=$width, ascent=$ascent, descent=$descent)"
++}
++
++/**
++ * Draws a single line of [text] through the Kuikly canvas text primitive.
++ *
++ * This is the Kuikly counterpart of `drawText(TextMeasurer, ...)`: the renderer shapes and
++ * draws the text itself, so there is no `TextLayoutResult`. Semantics follow the HTML canvas
++ * `fillText`/`strokeText` model:
++ *
++ * - [origin] is the alphabetic baseline point in pixels, not the top-left corner. Use
++ *   [measureText] when the text has to be positioned by its box.
++ * - [TextStyle.textAlign] picks which side of `origin.x` the run extends to:
++ *   [TextAlign.Center] centers on it, [TextAlign.End]/[TextAlign.Right] end on it, anything
++ *   else starts on it. Right-to-left layout direction is not consulted.
++ * - [TextStyle.fontSize] is interpreted like the Kuikly `Text` composable: an `sp` value is
++ *   scaled by [DrawScope.density] (font scale is not applied); unspecified falls back to the
++ *   renderer default of 15dp.
++ * - Only [TextStyle.color], [TextStyle.fontSize], [TextStyle.fontWeight],
++ *   [TextStyle.fontStyle], [TextStyle.fontFamily] and [TextStyle.textAlign] are honored.
++ *   Line breaks are not laid out; split multi-line content into separate calls.
++ *
++ * @param text the line to draw
++ * @param origin baseline point, in pixels, relative to the current transform
++ * @param style typography and color of the run; an unspecified color draws black
++ * @param alpha opacity applied to the text color, 0f (transparent) to 1f (opaque)
++ * @param drawStyle [Fill] fills the glyphs, a [Stroke] outlines them with its width
++ */
++fun DrawScope.drawText(
++    text: String,
++    origin: Offset = Offset.Zero,
++    style: TextStyle = TextStyle.Default,
++    alpha: Float = 1f,
++    drawStyle: DrawStyle = Fill
++) {
++    if (text.isEmpty()) return
++    val canvas = drawContext.canvas as? KuiklyCanvas ?: return
++    val paint = textPaint(style.color, alpha, drawStyle)
++    canvas.drawText(text, origin, canvasFont(style), style.textAlign.toKuikly(), paint)
++}
++
++/**
++ * Measures a single line of [text] as [drawText] would draw it with [style], or null when
++ * called outside a draw pass (the Kuikly canvas is not bound to a native view).
++ */
++fun DrawScope.measureText(
++    text: String,
++    style: TextStyle = TextStyle.Default
++): CanvasTextMetrics? {
++    val canvas = drawContext.canvas as? KuiklyCanvas ?: return null
++    val metrics = canvas.measureText(text, canvasFont(style)) ?: return null
++    val densityValue = canvas.density()
++    return CanvasTextMetrics(
++        width = metrics.width * densityValue,
++        ascent = metrics.actualBoundingBoxAscent * densityValue,
++        descent = metrics.actualBoundingBoxDescent * densityValue
++    )
++}
++
++private fun DrawScope.canvasFont(style: TextStyle): KuiklyCanvasFont {
++    val fontSize = style.fontSize
++    val sizePx = when {
++        fontSize.isSpecified && fontSize.isSp -> fontSize.value * density
++        fontSize.isSpecified && fontSize.isEm -> DefaultCanvasFontSizeDp * density * fontSize.value
++        else -> DefaultCanvasFontSizeDp * density
++    }
++    return KuiklyCanvasFont(
++        sizePx = sizePx,
++        weight = style.fontWeight.toKuikly(),
++        style = if (style.fontStyle == FontStyle.Italic) KuiklyFontStyle.ITALIC else KuiklyFontStyle.NORMAL,
++        family = style.fontFamily.toKuiklyName()
++    )
++}
++
++private fun textPaint(color: Color, alpha: Float, drawStyle: DrawStyle): Paint =
++    KuiklyPaint().apply {
++        this.color = if (color.isSpecified) color else Color.Black
++        this.alpha = alpha
++        when (drawStyle) {
++            Fill -> style = PaintingStyle.Fill
++            is Stroke -> {
++                style = PaintingStyle.Stroke
++                strokeWidth = drawStyle.width
++                strokeCap = drawStyle.cap
++                strokeMiterLimit = drawStyle.miter
++            }
++        }
++    }
++
++// The renderer canvases accept the same numeric weights as the text component; snap the
++// continuous Compose weight to the nearest Kuikly step below it.
++private fun FontWeight?.toKuikly(): KuiklyFontWeight {
++    val weight = this?.weight ?: FontWeight.Normal.weight
++    return when {
++        weight >= FontWeight.W900.weight -> KuiklyFontWeight.BLACK
++        weight >= FontWeight.W800.weight -> KuiklyFontWeight.EXTRABOLD
++        weight >= FontWeight.W700.weight -> KuiklyFontWeight.BOLD
++        weight >= FontWeight.W600.weight -> KuiklyFontWeight.SEMIBOLD
++        weight >= FontWeight.W500.weight -> KuiklyFontWeight.MEDIUM
++        else -> KuiklyFontWeight.NORMAL
++    }
++}
++
++private fun FontFamily?.toKuiklyName(): String = when (this) {
++    is GenericFontFamily -> name
++    is FontListFontFamily -> fonts.toKuiklyFontFamily()
++    else -> ""
++}
++
++private fun TextAlign.toKuikly(): KuiklyTextAlign = when (this) {
++    TextAlign.Center -> KuiklyTextAlign.CENTER
++    TextAlign.End, TextAlign.Right -> KuiklyTextAlign.RIGHT
++    else -> KuiklyTextAlign.LEFT
++}
