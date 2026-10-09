@@ -24,10 +24,10 @@ Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..e5aaa69c8feaf04f8feba2ddba3edafb4b8e02f6
+index 0000000000000000000000000000000000000000..da1f711fb20f0ce8372b702186fd2529ded179fe
 --- /dev/null
 +++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,209 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -94,7 +94,7 @@ index 0000000000000000000000000000000000000000..e5aaa69c8feaf04f8feba2ddba3edafb
 +            assertEquals(listOf(6.0, 4.0), lineDash.single().intervals())
 +            assertEquals(
 +                listOf("beginPath", "moveTo", "lineTo", "strokeStyle", "lineWidth", "lineDash", "stroke"),
-+                fixture.commandNames().filterNot { it == "reset" }
++                fixture.commandNames()
 +            )
 +        }
 +    }
@@ -120,8 +120,11 @@ index 0000000000000000000000000000000000000000..e5aaa69c8feaf04f8feba2ddba3edafb
 +        withCanvasFixture { fixture ->
 +            val dashed = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f)))
 +            fixture.draw { drawRect(Color.Blue, size = Size(10f, 10f), style = dashed) }
++            assertEquals(1, fixture.commandsNamed("lineDash").size)
++            // The fixture records one draw pass at a time; the rebind resets the native canvas,
++            // so the same dash must go out again instead of being treated as already applied.
 +            fixture.draw { drawRect(Color.Blue, size = Size(10f, 10f), style = dashed) }
-+            assertEquals(2, fixture.commandsNamed("lineDash").size, "reset clears native dash state; resend after rebind")
++            assertEquals(1, fixture.commandsNamed("lineDash").size, "reset clears native dash state; resend after rebind")
 +        }
 +    }
 +
@@ -175,7 +178,9 @@ index 0000000000000000000000000000000000000000..e5aaa69c8feaf04f8feba2ddba3edafb
 +            canvas.view = null
 +        }
 +
-+        fun commandNames(): List<String> = commands.map { it.method }
++        /** Commands of the last draw pass without the bind-time `reset` and the save/restore pair DrawScope.draw adds. */
++        fun commandNames(): List<String> =
++            commands.map { it.method }.filterNot { it == "reset" || it == "save" || it == "restore" }
 +
 +        fun commandsNamed(method: String): List<RecordedCommand> = commands.filter { it.method == method }
 +    }

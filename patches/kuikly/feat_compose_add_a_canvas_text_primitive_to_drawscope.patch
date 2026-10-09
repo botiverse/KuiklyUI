@@ -25,7 +25,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-index e5aaa69c8feaf04f8feba2ddba3edafb4b8e02f6..67920a07b5b9f9d2ef725aea24faf9bdaf5a85e5 100644
+index da1f711fb20f0ce8372b702186fd2529ded179fe..31bbc75bf6d2128a0177f0ad8ad038210c6418f0 100644
 --- a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
 +++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
 @@ -19,11 +19,21 @@ import com.tencent.kuikly.compose.ui.geometry.Offset
@@ -58,7 +58,7 @@ index e5aaa69c8feaf04f8feba2ddba3edafb4b8e02f6..67920a07b5b9f9d2ef725aea24faf9bd
  import kotlin.test.assertNull
  import kotlin.test.assertTrue
  
-@@ -122,6 +133,113 @@ class KuiklyCanvasDashAndTextLoweringTest {
+@@ -125,6 +136,113 @@ class KuiklyCanvasDashAndTextLoweringTest {
          assertTrue(dashed.hashCode() != Stroke(width = 2f).hashCode())
      }
  
@@ -81,7 +81,7 @@ index e5aaa69c8feaf04f8feba2ddba3edafb4b8e02f6..67920a07b5b9f9d2ef725aea24faf9bd
 +            }
 +            assertEquals(
 +                listOf("font", "textAlign", "fillStyle", "fillText"),
-+                fixture.commandNames().filterNot { it == "reset" }
++                fixture.commandNames()
 +            )
 +            val font = fixture.commandsNamed("font").single().json()
 +            assertEquals("italic", font.optString("style"))
@@ -138,7 +138,7 @@ index e5aaa69c8feaf04f8feba2ddba3edafb4b8e02f6..67920a07b5b9f9d2ef725aea24faf9bd
 +            }
 +            assertEquals(
 +                listOf("font", "textAlign", "strokeStyle", "lineWidth", "strokeText"),
-+                fixture.commandNames().filterNot { it == "reset" }
++                fixture.commandNames()
 +            )
 +            assertEquals(1.5, fixture.commandsNamed("lineWidth").single().json().optDouble("width"))
 +        }
