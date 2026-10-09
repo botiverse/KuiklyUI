@@ -17,7 +17,7 @@ Only the dash effect is supported; phase is accepted for source
 compatibility and ignored because no renderer exposes it.
 
 Fork-Patch: compose-canvas-path-effect-dash
-Upstream-Status: pending
+Upstream-Status: submitted Tencent-TDS/KuiklyUI#1783
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>

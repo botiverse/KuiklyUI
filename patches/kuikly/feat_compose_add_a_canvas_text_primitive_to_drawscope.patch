@@ -19,7 +19,7 @@ KuiklyCanvas sends font/textAlign only when they change within a bind and
 converts pixels to the renderer's density-independent units.
 
 Fork-Patch: compose-canvas-draw-text
-Upstream-Status: pending
+Upstream-Status: submitted Tencent-TDS/KuiklyUI#1784
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
