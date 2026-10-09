@@ -86,7 +86,7 @@ index d42060b18cc260cd473e4dabbe279e6395868672..cba0252668c7b3a2eeb86a213e7793e7
              val currentPainter = current as? KuiklyPainter ?: return
              val reusedPainter = reused as? KuiklyPainter ?: return
 diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
-index e001579a7dbcfbe144c7aadf386df9e47d4683ec..0cac7c719578591470974d8dfe19d9e33a437396 100644
+index e001579a7dbcfbe144c7aadf386df9e47d4683ec..7fb67334cc16805cc4628976bf9f30da62db4186 100644
 --- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
 +++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
 @@ -17,6 +17,7 @@
@@ -97,7 +97,7 @@ index e001579a7dbcfbe144c7aadf386df9e47d4683ec..0cac7c719578591470974d8dfe19d9e3
  #include <sstream>
  #include <string_view>
  #include "libohos_render/api/src/KRAnyDataInternal.h"
-@@ -224,10 +225,30 @@ bool KRImageView::ResetProp(const std::string &prop_key) {
+@@ -224,10 +225,32 @@ bool KRImageView::ResetProp(const std::string &prop_key) {
      return didHanded;
  }
  
@@ -124,11 +124,13 @@ index e001579a7dbcfbe144c7aadf386df9e47d4683ec..0cac7c719578591470974d8dfe19d9e3
          FireOnImageCompleteEvent(event);
      } else if (event_type == NODE_IMAGE_ON_ERROR) {
 +        KR_LOG_ERROR << "image load error id=" << KRImageTraceId(image_src_)
++                     << " code=" << kuikly::util::GetImageLoadSuccessStatusCode(event)
++                     << " srcKind=" << (isFile(image_src_) ? "file" : (isNetwork(image_src_) ? "network" : "other"))
 +                     << " failureCb=" << (load_failure_callback_ ? 1 : 0);
          FireOnImageErrorEvent(event);
      }
  }
-@@ -247,10 +268,13 @@ void KRImageView::AdapterSetImageCallback(const void* context,
+@@ -247,10 +270,13 @@ void KRImageView::AdapterSetImageCallback(const void* context,
              }
  
              if (imageDescriptor) {
