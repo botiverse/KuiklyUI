@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Fri, 9 Oct 2026 03:55:13 +0000
+Subject: feat(image): trace image view load events and painter state
+ transitions
+
+KuiklyPainter reaches State.Success only when the native image view has
+fired both loadResolution and loadSuccess; until then the placeholder
+stays. On HarmonyOS 1.13.0 11300010 a 720x1280 remote PNG is downloaded,
+decoded and delivered by the cache pipeline (see the fetch trace) yet the
+preview never leaves the placeholder, while a 300x200 JPEG does, and nothing
+logged whether the ArkUI complete event arrived or which painter state the
+events found.
+
+OHOS KRImageView logs the adapter result kind (descriptor / newSrc /
+error), every NODE_IMAGE_ON_COMPLETE with its loading status, picture size
+and whether the success/resolution callbacks are registered, and
+NODE_IMAGE_ON_ERROR. KuiklyPainter logs loadResolution / loadSuccess /
+loadFailure with the state they found and every state transition. Ids are
+url-free hashes; the two sides use different hash functions, so correlate
+by time and src length.
+
+Upstream-Status: pending
+Fork-Patch: image-load-event-trace
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyPainter.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyPainter.kt
+index d42060b18cc260cd473e4dabbe279e6395868672..cba0252668c7b3a2eeb86a213e7793e7da920ec1 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyPainter.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyPainter.kt
+@@ -29,6 +29,7 @@ import com.tencent.kuikly.compose.ui.graphics.painter.ColorPainter
+ import com.tencent.kuikly.compose.ui.graphics.painter.Painter
+ import com.tencent.kuikly.compose.ui.unit.toIntSize
+ import com.tencent.kuikly.core.base.DeclarativeBaseView
++import com.tencent.kuikly.core.log.KLog
+ import com.tencent.kuikly.core.views.ImageView
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.asStateFlow
+@@ -81,12 +82,14 @@ internal class KuiklyPainter(
+         imageView.getViewEvent().apply {
+             loadResolution {
+                 resolution.value = Size(it.width.toFloat(), it.height.toFloat())
++                KLog.i(TAG, "loadResolution id=${traceId()} ${it.width}x${it.height} success=$success state=${_state.value::class.simpleName}")
+                 if (success) {
+                     updateState(State.Success(this@KuiklyPainter))
+                 }
+             }
+ 
+             loadSuccess {
++                KLog.i(TAG, "loadSuccess id=${traceId()} state=${_state.value::class.simpleName} resolution=${resolution.value}")
+                 if (_state.value !is State.Loading) {
+                     return@loadSuccess
+                 }
+@@ -97,6 +100,7 @@ internal class KuiklyPainter(
+             }
+ 
+             loadFailure {
++                KLog.e(TAG, "loadFailure id=${traceId()} srcMatches=${it.src == this@KuiklyPainter.src} state=${_state.value::class.simpleName}")
+                 if (it.src != this@KuiklyPainter.src) {
+                     return@loadFailure
+                 }
+@@ -120,10 +124,16 @@ internal class KuiklyPainter(
+     }
+ 
+     private fun updateState(state: State) {
++        KLog.i(TAG, "state id=${traceId()} ${_state.value::class.simpleName} -> ${state::class.simpleName}")
+         _state.value = state
+         onState?.invoke(state)
+     }
+ 
++    // Url-free correlation id matching the OHOS renderer's image trace lines
++    // (std::hash is platform-specific, so the two ids differ; correlate by
++    // time and the src length instead of equality).
++    private fun traceId(): String = "${(src?.hashCode() ?: 0).toUInt().toString(16)}/len=${src?.length ?: 0}"
++
+     private fun updateFromReuse(reusedPainter: KuiklyPainter) {
+         if (reusedPainter.src != src) return
+ 
+@@ -148,6 +158,8 @@ internal class KuiklyPainter(
+     }
+ 
+     companion object {
++        private const val TAG = "KuiklyPainter"
++
+         internal fun tryUpdateFromReuse(current: Painter?, reused: Painter?) {
+             val currentPainter = current as? KuiklyPainter ?: return
+             val reusedPainter = reused as? KuiklyPainter ?: return
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
+index e001579a7dbcfbe144c7aadf386df9e47d4683ec..7fb67334cc16805cc4628976bf9f30da62db4186 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/image/KRImageView.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include <deviceinfo.h>
+ #include <resourcemanager/ohresmgr.h>
++#include <functional>
+ #include <sstream>
+ #include <string_view>
+ #include "libohos_render/api/src/KRAnyDataInternal.h"
+@@ -224,10 +225,32 @@ bool KRImageView::ResetProp(const std::string &prop_key) {
+     return didHanded;
+ }
+ 
++// Short, url-free id so one image load can be followed across the adapter
++// callback, the ArkUI complete/error events and the Kotlin painter without
++// writing signed urls to hilog.
++static std::string KRImageTraceId(const std::string &src) {
++    std::ostringstream oss;
++    oss << std::hex << (std::hash<std::string>{}(src) & 0xffffffffu);
++    return oss.str();
++}
++
+ void KRImageView::OnEvent(ArkUI_NodeEvent *event, const ArkUI_NodeEventType &event_type) {
+     if (event_type == NODE_IMAGE_ON_COMPLETE) {
++        int32_t status = -1;
++        if (auto component_event = OH_ArkUI_NodeEvent_GetNodeComponentEvent(event)) {
++            status = component_event->data[0].i32;
++        }
++        auto size = kuikly::util::GetArkUINodeImagePicSize(event);
++        KR_LOG_INFO << "image load complete id=" << KRImageTraceId(image_src_) << " status=" << status
++                    << " pic=" << size.width << "x" << size.height
++                    << " successCb=" << (load_success_callback_ ? 1 : 0)
++                    << " resolutionCb=" << (load_resolution_callback_ ? 1 : 0);
+         FireOnImageCompleteEvent(event);
+     } else if (event_type == NODE_IMAGE_ON_ERROR) {
++        KR_LOG_ERROR << "image load error id=" << KRImageTraceId(image_src_)
++                     << " code=" << kuikly::util::GetImageLoadSuccessStatusCode(event)
++                     << " srcKind=" << (isFile(image_src_) ? "file" : (isNetwork(image_src_) ? "network" : "other"))
++                     << " failureCb=" << (load_failure_callback_ ? 1 : 0);
+         FireOnImageErrorEvent(event);
+     }
+ }
+@@ -247,10 +270,13 @@ void KRImageView::AdapterSetImageCallback(const void* context,
+             }
+ 
+             if (imageDescriptor) {
++                KR_LOG_INFO << "image adapter result id=" << KRImageTraceId(image_view->image_src_) << " kind=descriptor";
+                 kuikly::util::SetArkUIImageSrc(image_view->GetNode(), imageDescriptor);
+             } else if (new_src && new_src[0] != '\0') {
++                KR_LOG_INFO << "image adapter result id=" << KRImageTraceId(image_view->image_src_) << " kind=newSrc";
+                 image_view->LoadFromSrc(std::string(new_src));
+             } else {
++                KR_LOG_ERROR << "image adapter result id=" << KRImageTraceId(image_view->image_src_) << " kind=error";
+                 image_view->FireAdapterImageErrorEvent();
+             }
+         }
