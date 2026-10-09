@@ -41,7 +41,22 @@ import com.tencent.kuikly.core.base.RenderView
 import com.tencent.kuikly.core.views.CanvasContext
 import com.tencent.kuikly.core.views.CanvasLinearGradient
 import com.tencent.kuikly.core.views.CanvasView
+import com.tencent.kuikly.core.views.FontStyle
+import com.tencent.kuikly.core.views.FontWeight
+import com.tencent.kuikly.core.views.TextAlign
+import com.tencent.kuikly.core.views.TextMetrics
 import kotlin.math.PI
+
+/**
+ * Font state the Kuikly canvas text primitive draws with; [sizePx] is in pixels and is
+ * converted to the renderer's density-independent size on dispatch.
+ */
+internal data class KuiklyCanvasFont(
+    val sizePx: Float,
+    val weight: FontWeight,
+    val style: FontStyle,
+    val family: String
+)
 
 internal class KuiklyCanvas : Canvas {
 
@@ -101,6 +116,8 @@ internal class KuiklyCanvas : Canvas {
                 }
                 strokeCap = StrokeCap.Butt
                 lineDash = emptyList()
+                textFont = null
+                textAlign = null
             } else {
                 context = null
             }
@@ -110,13 +127,16 @@ internal class KuiklyCanvas : Canvas {
     private var context: CanvasContext? = null
     private var densityValue: Float = 1f
     /*
-     * Last line cap and dash pattern sent to the renderer, so unchanged state is not resent.
-     * `reset` on bind puts the renderer back to butt caps and no dash. Null means unknown:
-     * renderers disagree on whether `restore` rolls these back (the iOS, OHOS and web
-     * canvases do, Android keeps them), so after a restore the next stroke always resends.
+     * Last line cap, dash pattern, font and text alignment sent to the renderer, so unchanged
+     * state is not resent. `reset` on bind puts the renderer back to butt caps and no dash;
+     * font and alignment start unknown. Null means unknown: renderers disagree on whether
+     * `restore` rolls these back (the iOS, OHOS and web canvases do, Android keeps them), so
+     * after a restore the next draw always resends.
      */
     private var strokeCap: StrokeCap? = StrokeCap.Butt
     private var lineDash: List<Float>? = emptyList()
+    private var textFont: KuiklyCanvasFont? = null
+    private var textAlign: TextAlign? = null
 
     override fun save() {
         context?.save()
@@ -126,6 +146,8 @@ internal class KuiklyCanvas : Canvas {
         context?.restore()
         strokeCap = null
         lineDash = null
+        textFont = null
+        textAlign = null
     }
 
     override fun saveLayer(bounds: Rect, paint: Paint) {
@@ -340,6 +362,60 @@ internal class KuiklyCanvas : Canvas {
             // Draw a point at each provided coordinate
             PointMode.Points -> drawPoints(points, paint)
         }
+    }
+
+    /**
+     * Draws a single line of [text] with the renderer's text primitive. [origin] is the
+     * alphabetic baseline point in pixels; [align] decides which side of `origin.x` the run
+     * extends to, like `textAlign` on an HTML canvas. Filled with [paint] unless its style
+     * is [PaintingStyle.Stroke], in which case the outline is stroked.
+     */
+    internal fun drawText(
+        text: String,
+        origin: Offset,
+        font: KuiklyCanvasFont,
+        align: TextAlign,
+        paint: Paint
+    ) {
+        context?.apply {
+            applyFont(font)
+            applyTextAlign(align)
+            val x = origin.x / densityValue
+            val y = origin.y / densityValue
+            if (paint.style == PaintingStyle.Fill) {
+                fillStyle(paint.toKuiklyColor())
+                fillText(text, x, y)
+            } else {
+                strokeStyle(paint.toKuiklyColor())
+                lineWidth(paint.strokeWidth / densityValue)
+                strokeText(text, x, y)
+            }
+        }
+    }
+
+    /**
+     * Measures a single line of [text] in [font] through the renderer's text shadow.
+     * Returns null when the canvas is not bound to a view. Metrics are in density-independent
+     * units as reported by the renderer; callers scale them back to pixels.
+     */
+    internal fun measureText(text: String, font: KuiklyCanvasFont): TextMetrics? {
+        val ctx = context ?: return null
+        ctx.applyFont(font)
+        return ctx.measureText(text)
+    }
+
+    internal fun density(): Float = densityValue
+
+    private fun CanvasContext.applyFont(font: KuiklyCanvasFont) {
+        if (textFont == font) return
+        textFont = font
+        font(font.style, font.weight, font.sizePx / densityValue, font.family)
+    }
+
+    private fun CanvasContext.applyTextAlign(align: TextAlign) {
+        if (textAlign == align) return
+        textAlign = align
+        textAlign(align)
     }
 
     override fun enableZ() {

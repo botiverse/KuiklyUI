@@ -21,11 +21,20 @@ import com.tencent.kuikly.compose.ui.graphics.Color
 import com.tencent.kuikly.compose.ui.graphics.PathEffect
 import com.tencent.kuikly.compose.ui.graphics.StrokeCap
 import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasDrawScope
+import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasTextMetrics
 import com.tencent.kuikly.compose.ui.graphics.drawscope.DrawScope
 import com.tencent.kuikly.compose.ui.graphics.drawscope.Stroke
+import com.tencent.kuikly.compose.ui.graphics.drawscope.drawText
+import com.tencent.kuikly.compose.ui.graphics.drawscope.measureText
 import com.tencent.kuikly.compose.ui.graphics.drawscope.withTransform
+import com.tencent.kuikly.compose.ui.text.TextStyle
+import com.tencent.kuikly.compose.ui.text.font.FontFamily
+import com.tencent.kuikly.compose.ui.text.font.FontStyle
+import com.tencent.kuikly.compose.ui.text.font.FontWeight
+import com.tencent.kuikly.compose.ui.text.style.TextAlign
 import com.tencent.kuikly.compose.ui.unit.Density
 import com.tencent.kuikly.compose.ui.unit.LayoutDirection
+import com.tencent.kuikly.compose.ui.unit.sp
 import com.tencent.kuikly.core.base.ViewBuilder
 import com.tencent.kuikly.core.manager.BridgeManager
 import com.tencent.kuikly.core.manager.NativeMethod
@@ -37,6 +46,7 @@ import com.tencent.kuikly.core.views.CanvasView
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -128,6 +138,113 @@ class KuiklyCanvasDashAndTextLoweringTest {
     }
 
     @Test
+    fun drawTextLowersFontAlignColorAndBaselineOrigin() {
+        withCanvasFixture { fixture ->
+            fixture.draw {
+                drawText(
+                    text = "Node A",
+                    origin = Offset(40f, 60f),
+                    style = TextStyle(
+                        color = Color.Red,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontStyle = FontStyle.Italic,
+                        fontFamily = FontFamily.Monospace,
+                        textAlign = TextAlign.Center
+                    )
+                )
+            }
+            assertEquals(
+                listOf("font", "textAlign", "fillStyle", "fillText"),
+                fixture.commandNames()
+            )
+            val font = fixture.commandsNamed("font").single().json()
+            assertEquals("italic", font.optString("style"))
+            assertEquals("700", font.optString("weight"))
+            assertEquals(14.0, font.optDouble("size"))
+            assertEquals("monospace", font.optString("family"))
+            assertEquals("center", fixture.commandsNamed("textAlign").single().params)
+            val fillText = fixture.commandsNamed("fillText").single().json()
+            assertEquals("Node A", fillText.optString("text"))
+            assertEquals(20.0, fillText.optDouble("x"))
+            assertEquals(30.0, fillText.optDouble("y"))
+        }
+    }
+
+    @Test
+    fun drawTextDefaultsToRendererFontAndStartAlignment() {
+        withCanvasFixture { fixture ->
+            fixture.draw { drawText("x", Offset(2f, 4f)) }
+            val font = fixture.commandsNamed("font").single().json()
+            assertEquals("normal", font.optString("style"))
+            assertEquals("400", font.optString("weight"))
+            assertEquals(15.0, font.optDouble("size"))
+            assertTrue(!font.has("family"))
+            assertEquals("left", fixture.commandsNamed("textAlign").single().params)
+        }
+    }
+
+    @Test
+    fun drawTextReusesFontAndAlignAcrossRunsAndSkipsEmptyText() {
+        withCanvasFixture { fixture ->
+            val style = TextStyle(fontSize = 12.sp)
+            fixture.draw {
+                drawText("a", Offset(0f, 10f), style)
+                drawText("", Offset(0f, 20f), style)
+                drawText("b", Offset(0f, 30f), style)
+                drawText("c", Offset(0f, 40f), style.copy(fontSize = 16.sp))
+            }
+            assertEquals(2, fixture.commandsNamed("font").size)
+            assertEquals(1, fixture.commandsNamed("textAlign").size)
+            assertEquals(listOf("a", "b", "c"), fixture.commandsNamed("fillText").map { it.json().optString("text") })
+        }
+    }
+
+    @Test
+    fun strokedDrawTextUsesStrokeTextWithTheStrokeWidth() {
+        withCanvasFixture { fixture ->
+            fixture.draw {
+                drawText(
+                    "outline",
+                    Offset(0f, 0f),
+                    TextStyle(color = Color.Green),
+                    drawStyle = Stroke(width = 3f, cap = StrokeCap.Round)
+                )
+            }
+            assertEquals(
+                listOf("font", "textAlign", "strokeStyle", "lineWidth", "strokeText"),
+                fixture.commandNames()
+            )
+            assertEquals(1.5, fixture.commandsNamed("lineWidth").single().json().optDouble("width"))
+        }
+    }
+
+    @Test
+    fun measureTextScalesRendererMetricsBackToPixels() {
+        withCanvasFixture(measuredSize = "50|20") { fixture ->
+            var metrics: CanvasTextMetrics? = null
+            fixture.draw { metrics = measureText("hello", TextStyle(fontSize = 15.sp)) }
+            val measured = assertNotNull(metrics)
+            assertEquals(100f, measured.width)
+            assertEquals(40f, measured.height)
+            // Font size 15dp in a 20dp line box: the renderer splits the leading evenly.
+            assertEquals(35f, measured.ascent)
+            assertEquals(5f, measured.descent)
+            assertEquals(1, fixture.commandsNamed("font").size, "measure pushes the font state once")
+        }
+    }
+
+    @Test
+    fun measureTextOutsideADrawPassReturnsNull() {
+        val scope = CanvasDrawScope()
+        var metrics: CanvasTextMetrics? = CanvasTextMetrics(1f, 1f, 1f)
+        scope.draw(density, LayoutDirection.Ltr, KuiklyCanvas(), Size(10f, 10f)) {
+            metrics = measureText("hello")
+        }
+        assertNull(metrics)
+    }
+
+    @Test
     fun phaseOnlyChangeDoesNotResendLineDash() {
         withCanvasFixture { fixture ->
             fixture.draw {
@@ -157,6 +274,26 @@ class KuiklyCanvasDashAndTextLoweringTest {
             val beforeStroke = afterRestore.subList(0, stroke)
             assertEquals("round", beforeStroke.single { it.method == "lineCap" }.json().optString("style"))
             assertNull(beforeStroke.single { it.method == "lineDash" }.intervals())
+        }
+    }
+
+    @Test
+    fun fontAndAlignAreResentAfterRestore() {
+        withCanvasFixture { fixture ->
+            val inner = TextStyle(fontSize = 20.sp, textAlign = TextAlign.Center)
+            fixture.draw {
+                drawText("a", Offset(0f, 10f), TextStyle(fontSize = 12.sp))
+                withTransform({ translate(1f, 1f) }) {
+                    drawText("b", Offset(0f, 20f), inner)
+                }
+                // iOS, OHOS and web roll font and alignment back on restore; Android keeps
+                // them. The canvas cannot know which, so it must state both again.
+                drawText("c", Offset(0f, 30f), inner)
+            }
+            val afterRestore = fixture.commandsAfterFirst("restore")
+            assertEquals(listOf("font", "textAlign", "fillStyle", "fillText"), afterRestore.map { it.method }.take(4))
+            assertEquals(20.0, afterRestore.first { it.method == "font" }.json().optDouble("size"))
+            assertEquals("center", afterRestore.first { it.method == "textAlign" }.params)
         }
     }
 
