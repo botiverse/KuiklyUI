@@ -292,6 +292,16 @@ jobs:
         with:
           name: ohos-native-${{ env.EXPECTED_HEAD_SHA }}
           path: build/ohos-evidence
+      # The fork CI compiles ArkTS but cannot execute it, so renderer changes
+      # are smoke-tested on an emulator before a release tag. Export the
+      # debug HAR assembled above (it embeds libkuikly.so) so that replay can
+      # use CI-built bytes instead of a local native build.
+      - name: Upload the assembled OHOS renderer HAR for device replay
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohos-renderer-har-${{ env.EXPECTED_HEAD_SHA }}
+          path: src/core-render-ohos/build/default/outputs/default/*.har
+          if-no-files-found: error
 
   source-contracts:
     runs-on: ubuntu-latest
