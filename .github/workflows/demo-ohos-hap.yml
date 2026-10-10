@@ -12,10 +12,13 @@ on:
   workflow_dispatch:
     inputs:
       build_mode:
-        description: "hvigor buildMode (debug or release)"
+        description: "hvigor buildMode"
         required: false
         default: debug
-        type: string
+        type: choice
+        options:
+          - debug
+          - release
 
 permissions:
   contents: read
@@ -31,6 +34,10 @@ jobs:
       DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
       KUIKLY_KOTLIN_VERSION: 2.0.21-KBA-010
       KUIKLY_AGP_VERSION: 7.4.2
+      # Dispatch input reaches shell only through this variable, never by
+      # inline interpolation; the choice type already limits it, the check
+      # below makes that a hard gate inside the job as well.
+      BUILD_MODE: ${{ inputs.build_mode }}
     steps:
       - uses: actions/checkout@v4
       - name: Trust the mounted workspace inside the job container
@@ -38,6 +45,14 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global user.name "Kuikly CI"
           git config --global user.email "kuikly-ci@users.noreply.github.com"
+      - name: Validate the build mode input
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$BUILD_MODE" in
+            debug|release) echo "build_mode=$BUILD_MODE" ;;
+            *) echo "::error::build_mode must be debug or release" >&2; exit 1 ;;
+          esac
       - uses: ./.github/actions/sync
         id: sync
       - name: Link the demo Kotlin/Native shared library for ohosArm64
@@ -68,7 +83,7 @@ jobs:
             --mode module \
             -p module=entry@default \
             -p product=default \
-            -p buildMode=${{ inputs.build_mode }} \
+            -p "buildMode=$BUILD_MODE" \
             --analyze=normal \
             --parallel \
             --no-daemon
@@ -85,7 +100,7 @@ jobs:
           {
             echo "patches_sha=${{ github.sha }}"
             echo "source_tree=${{ steps.sync.outputs.tree }}"
-            echo "build_mode=${{ inputs.build_mode }}"
+            echo "build_mode=$BUILD_MODE"
           } > "$out/IDENTITY"
           cat "$out/SHA256SUMS" "$out/IDENTITY"
       - uses: actions/upload-artifact@v4
