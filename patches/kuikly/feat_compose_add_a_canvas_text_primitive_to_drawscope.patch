@@ -25,20 +25,19 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-index da1f711fb20f0ce8372b702186fd2529ded179fe..31bbc75bf6d2128a0177f0ad8ad038210c6418f0 100644
+index ae88cb68167ec732c7f9fc5bb07a3b3b3fe370e7..7e53b3b8fd9ab3b3ae33e5f1b4e57a4be90c8ea4 100644
 --- a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
 +++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-@@ -19,11 +19,21 @@ import com.tencent.kuikly.compose.ui.geometry.Offset
- import com.tencent.kuikly.compose.ui.geometry.Size
- import com.tencent.kuikly.compose.ui.graphics.Color
+@@ -21,11 +21,20 @@ import com.tencent.kuikly.compose.ui.graphics.Color
  import com.tencent.kuikly.compose.ui.graphics.PathEffect
-+import com.tencent.kuikly.compose.ui.graphics.StrokeCap
+ import com.tencent.kuikly.compose.ui.graphics.StrokeCap
  import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasDrawScope
 +import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasTextMetrics
  import com.tencent.kuikly.compose.ui.graphics.drawscope.DrawScope
  import com.tencent.kuikly.compose.ui.graphics.drawscope.Stroke
 +import com.tencent.kuikly.compose.ui.graphics.drawscope.drawText
 +import com.tencent.kuikly.compose.ui.graphics.drawscope.measureText
+ import com.tencent.kuikly.compose.ui.graphics.drawscope.withTransform
 +import com.tencent.kuikly.compose.ui.text.TextStyle
 +import com.tencent.kuikly.compose.ui.text.font.FontFamily
 +import com.tencent.kuikly.compose.ui.text.font.FontStyle
@@ -50,7 +49,7 @@ index da1f711fb20f0ce8372b702186fd2529ded179fe..31bbc75bf6d2128a0177f0ad8ad03821
  import com.tencent.kuikly.core.base.ViewBuilder
  import com.tencent.kuikly.core.manager.BridgeManager
  import com.tencent.kuikly.core.manager.NativeMethod
-@@ -35,6 +45,7 @@ import com.tencent.kuikly.core.views.CanvasView
+@@ -37,6 +46,7 @@ import com.tencent.kuikly.core.views.CanvasView
  import kotlin.test.Test
  import kotlin.test.assertEquals
  import kotlin.test.assertFailsWith
@@ -58,7 +57,7 @@ index da1f711fb20f0ce8372b702186fd2529ded179fe..31bbc75bf6d2128a0177f0ad8ad03821
  import kotlin.test.assertNull
  import kotlin.test.assertTrue
  
-@@ -125,6 +136,113 @@ class KuiklyCanvasDashAndTextLoweringTest {
+@@ -127,6 +137,113 @@ class KuiklyCanvasDashAndTextLoweringTest {
          assertTrue(dashed.hashCode() != Stroke(width = 2f).hashCode())
      }
  
@@ -169,11 +168,38 @@ index da1f711fb20f0ce8372b702186fd2529ded179fe..31bbc75bf6d2128a0177f0ad8ad03821
 +        assertNull(metrics)
 +    }
 +
+     @Test
+     fun phaseOnlyChangeDoesNotResendLineDash() {
+         withCanvasFixture { fixture ->
+@@ -160,6 +277,26 @@ class KuiklyCanvasDashAndTextLoweringTest {
+         }
+     }
+ 
++    @Test
++    fun fontAndAlignAreResentAfterRestore() {
++        withCanvasFixture { fixture ->
++            val inner = TextStyle(fontSize = 20.sp, textAlign = TextAlign.Center)
++            fixture.draw {
++                drawText("a", Offset(0f, 10f), TextStyle(fontSize = 12.sp))
++                withTransform({ translate(1f, 1f) }) {
++                    drawText("b", Offset(0f, 20f), inner)
++                }
++                // iOS, OHOS and web roll font and alignment back on restore; Android keeps
++                // them. The canvas cannot know which, so it must state both again.
++                drawText("c", Offset(0f, 30f), inner)
++            }
++            val afterRestore = fixture.commandsAfterFirst("restore")
++            assertEquals(listOf("font", "textAlign", "fillStyle", "fillText"), afterRestore.map { it.method }.take(4))
++            assertEquals(20.0, afterRestore.first { it.method == "font" }.json().optDouble("size"))
++            assertEquals("center", afterRestore.first { it.method == "textAlign" }.params)
++        }
++    }
++
      private class RecordedCommand(val method: String, val params: String?) {
          fun json(): JSONObject = JSONObject(params ?: "{}")
          fun intervals(): List<Double>? {
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
-index d2437986ba33c6768cef09ef51c362afe9bca27c..45f5baa48005f9f73212bf0ccc7ced69f68b7098 100644
+index e8302b31587ab52d9e2fc1af3edf79605ed20782..4d6dc713a336f967108832dc4abdaf7dfb0eba2f 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
 @@ -41,8 +41,23 @@ import com.tencent.kuikly.core.base.RenderView
@@ -200,25 +226,46 @@ index d2437986ba33c6768cef09ef51c362afe9bca27c..45f5baa48005f9f73212bf0ccc7ced69
  internal class KuiklyCanvas : Canvas {
  
      private fun CanvasContext.fillOrStroke(paint: Paint) {
-@@ -98,6 +113,8 @@ internal class KuiklyCanvas : Canvas {
+@@ -101,6 +116,8 @@ internal class KuiklyCanvas : Canvas {
                  }
                  strokeCap = StrokeCap.Butt
-                 pathEffect = null
+                 lineDash = emptyList()
 +                textFont = null
 +                textAlign = null
              } else {
                  context = null
              }
-@@ -108,6 +125,8 @@ internal class KuiklyCanvas : Canvas {
+@@ -110,13 +127,16 @@ internal class KuiklyCanvas : Canvas {
+     private var context: CanvasContext? = null
      private var densityValue: Float = 1f
-     private var strokeCap = StrokeCap.Butt
-     private var pathEffect: PathEffect? = null
+     /*
+-     * Last line cap and dash pattern sent to the renderer, so unchanged state is not resent.
+-     * `reset` on bind puts the renderer back to butt caps and no dash. Null means unknown:
+-     * renderers disagree on whether `restore` rolls these back (the iOS, OHOS and web
+-     * canvases do, Android keeps them), so after a restore the next stroke always resends.
++     * Last line cap, dash pattern, font and text alignment sent to the renderer, so unchanged
++     * state is not resent. `reset` on bind puts the renderer back to butt caps and no dash;
++     * font and alignment start unknown. Null means unknown: renderers disagree on whether
++     * `restore` rolls these back (the iOS, OHOS and web canvases do, Android keeps them), so
++     * after a restore the next draw always resends.
+      */
+     private var strokeCap: StrokeCap? = StrokeCap.Butt
+     private var lineDash: List<Float>? = emptyList()
 +    private var textFont: KuiklyCanvasFont? = null
 +    private var textAlign: TextAlign? = null
  
      override fun save() {
          context?.save()
-@@ -338,6 +357,60 @@ internal class KuiklyCanvas : Canvas {
+@@ -126,6 +146,8 @@ internal class KuiklyCanvas : Canvas {
+         context?.restore()
+         strokeCap = null
+         lineDash = null
++        textFont = null
++        textAlign = null
+     }
+ 
+     override fun saveLayer(bounds: Rect, paint: Paint) {
+@@ -342,6 +364,60 @@ internal class KuiklyCanvas : Canvas {
          }
      }
  

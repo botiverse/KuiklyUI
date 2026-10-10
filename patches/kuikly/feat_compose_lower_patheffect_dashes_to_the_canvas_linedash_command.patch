@@ -24,10 +24,10 @@ Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
 diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..da1f711fb20f0ce8372b702186fd2529ded179fe
+index 0000000000000000000000000000000000000000..ae88cb68167ec732c7f9fc5bb07a3b3b3fe370e7
 --- /dev/null
 +++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,248 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -49,9 +49,11 @@ index 0000000000000000000000000000000000000000..da1f711fb20f0ce8372b702186fd2529
 +import com.tencent.kuikly.compose.ui.geometry.Size
 +import com.tencent.kuikly.compose.ui.graphics.Color
 +import com.tencent.kuikly.compose.ui.graphics.PathEffect
++import com.tencent.kuikly.compose.ui.graphics.StrokeCap
 +import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasDrawScope
 +import com.tencent.kuikly.compose.ui.graphics.drawscope.DrawScope
 +import com.tencent.kuikly.compose.ui.graphics.drawscope.Stroke
++import com.tencent.kuikly.compose.ui.graphics.drawscope.withTransform
 +import com.tencent.kuikly.compose.ui.unit.Density
 +import com.tencent.kuikly.compose.ui.unit.LayoutDirection
 +import com.tencent.kuikly.core.base.ViewBuilder
@@ -155,6 +157,39 @@ index 0000000000000000000000000000000000000000..da1f711fb20f0ce8372b702186fd2529
 +        assertTrue(dashed.hashCode() != Stroke(width = 2f).hashCode())
 +    }
 +
++    @Test
++    fun phaseOnlyChangeDoesNotResendLineDash() {
++        withCanvasFixture { fixture ->
++            fixture.draw {
++                drawLine(Color.Red, Offset.Zero, Offset(10f, 0f), pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f)))
++                drawLine(Color.Red, Offset.Zero, Offset(10f, 0f), pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f), phase = 3f))
++            }
++            assertEquals(1, fixture.commandsNamed("lineDash").size, "phase is not lowered, so the command is identical")
++        }
++    }
++
++    @Test
++    fun capAndDashAreResentAfterRestore() {
++        withCanvasFixture { fixture ->
++            val dashed = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 4f)))
++            val solidRound = Stroke(width = 2f, cap = StrokeCap.Round)
++            fixture.draw {
++                drawRect(Color.Blue, size = Size(10f, 10f), style = dashed)
++                withTransform({ translate(1f, 1f) }) {
++                    drawRect(Color.Blue, size = Size(10f, 10f), style = solidRound)
++                }
++                // iOS, OHOS and web roll the dash and cap back on restore; Android keeps them.
++                // The canvas cannot know which, so it must state both again.
++                drawRect(Color.Blue, size = Size(10f, 10f), style = solidRound)
++            }
++            val afterRestore = fixture.commandsAfterFirst("restore")
++            val stroke = afterRestore.indexOfFirst { it.method == "stroke" }
++            val beforeStroke = afterRestore.subList(0, stroke)
++            assertEquals("round", beforeStroke.single { it.method == "lineCap" }.json().optString("style"))
++            assertNull(beforeStroke.single { it.method == "lineDash" }.intervals())
++        }
++    }
++
 +    private class RecordedCommand(val method: String, val params: String?) {
 +        fun json(): JSONObject = JSONObject(params ?: "{}")
 +        fun intervals(): List<Double>? {
@@ -183,6 +218,10 @@ index 0000000000000000000000000000000000000000..da1f711fb20f0ce8372b702186fd2529
 +            commands.map { it.method }.filterNot { it == "reset" || it == "save" || it == "restore" }
 +
 +        fun commandsNamed(method: String): List<RecordedCommand> = commands.filter { it.method == method }
++
++        /** Commands recorded after the first occurrence of [method] in the last draw pass. */
++        fun commandsAfterFirst(method: String): List<RecordedCommand> =
++            commands.drop(commands.indexOfFirst { it.method == method } + 1)
 +    }
 +
 +    private fun withCanvasFixture(
@@ -238,7 +277,7 @@ index 0000000000000000000000000000000000000000..da1f711fb20f0ce8372b702186fd2529
 +    }
 +}
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
-index db519f2d9e1a7586e72e3fd9238cb2f50b8fedc0..d2437986ba33c6768cef09ef51c362afe9bca27c 100644
+index db519f2d9e1a7586e72e3fd9238cb2f50b8fedc0..e8302b31587ab52d9e2fc1af3edf79605ed20782 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvas.kt
 @@ -20,12 +20,14 @@ import com.tencent.kuikly.compose.ui.geometry.Rect
@@ -256,47 +295,83 @@ index db519f2d9e1a7586e72e3fd9238cb2f50b8fedc0..d2437986ba33c6768cef09ef51c362af
  import com.tencent.kuikly.compose.ui.graphics.PointMode
  import com.tencent.kuikly.compose.ui.graphics.SolidColor
  import com.tencent.kuikly.compose.ui.graphics.StrokeCap
-@@ -67,10 +69,23 @@ internal class KuiklyCanvas : Canvas {
-                     StrokeCap.Square -> lineCapSquare()
-                 }
+@@ -59,18 +61,34 @@ internal class KuiklyCanvas : Canvas {
+                 strokeStyle(paint.toKuiklyColor())
              }
+             lineWidth(paint.strokeWidth / densityValue)
+-            if (strokeCap != paint.strokeCap) {
+-                strokeCap = paint.strokeCap
+-                when (paint.strokeCap) {
+-                    StrokeCap.Butt -> lineCapButt()
+-                    StrokeCap.Round -> lineCapRound()
+-                    StrokeCap.Square -> lineCapSquare()
+-                }
+-            }
++            applyStrokeCap(paint.strokeCap)
 +            applyPathEffect(paint.pathEffect)
              stroke()
          }
      }
  
++    private fun CanvasContext.applyStrokeCap(cap: StrokeCap) {
++        if (strokeCap == cap) return
++        strokeCap = cap
++        when (cap) {
++            StrokeCap.Butt -> lineCapButt()
++            StrokeCap.Round -> lineCapRound()
++            StrokeCap.Square -> lineCapSquare()
++        }
++    }
++
 +    /**
-+     * Lowers [PathEffect] to the renderer's `lineDash` state. The dash state is sticky on the
-+     * native canvas (it is not part of save/restore), so only send it when it changes; it is
-+     * cleared again by `reset` on every bind.
++     * Lowers [PathEffect] to the renderer's `lineDash` state. Only the lowered intervals are
++     * compared, so effects that differ in an ignored field (such as the phase) do not resend
++     * an identical command.
 +     */
 +    private fun CanvasContext.applyPathEffect(effect: PathEffect?) {
-+        if (pathEffect == effect) return
-+        pathEffect = effect
-+        val dash = effect as? DashPathEffect
-+        setLineDash(dash?.intervals?.map { it / densityValue } ?: emptyList())
++        val intervals = (effect as? DashPathEffect)?.intervals?.map { it / densityValue } ?: emptyList()
++        if (lineDash == intervals) return
++        lineDash = intervals
++        setLineDash(intervals)
 +    }
 +
      override var view: DeclarativeBaseView<*, *>? = null
          set(value) {
              if (value is CanvasView) {
-@@ -82,6 +97,7 @@ internal class KuiklyCanvas : Canvas {
+@@ -82,6 +100,7 @@ internal class KuiklyCanvas : Canvas {
                      value.renderView?.callMethod("reset", "")
                  }
                  strokeCap = StrokeCap.Butt
-+                pathEffect = null
++                lineDash = emptyList()
              } else {
                  context = null
              }
-@@ -91,6 +107,7 @@ internal class KuiklyCanvas : Canvas {
+@@ -90,7 +109,14 @@ internal class KuiklyCanvas : Canvas {
+ 
      private var context: CanvasContext? = null
      private var densityValue: Float = 1f
-     private var strokeCap = StrokeCap.Butt
-+    private var pathEffect: PathEffect? = null
+-    private var strokeCap = StrokeCap.Butt
++    /*
++     * Last line cap and dash pattern sent to the renderer, so unchanged state is not resent.
++     * `reset` on bind puts the renderer back to butt caps and no dash. Null means unknown:
++     * renderers disagree on whether `restore` rolls these back (the iOS, OHOS and web
++     * canvases do, Android keeps them), so after a restore the next stroke always resends.
++     */
++    private var strokeCap: StrokeCap? = StrokeCap.Butt
++    private var lineDash: List<Float>? = emptyList()
  
      override fun save() {
          context?.save()
-@@ -163,8 +180,19 @@ internal class KuiklyCanvas : Canvas {
+@@ -98,6 +124,8 @@ internal class KuiklyCanvas : Canvas {
+ 
+     override fun restore() {
+         context?.restore()
++        strokeCap = null
++        lineDash = null
+     }
+ 
+     override fun saveLayer(bounds: Rect, paint: Paint) {
+@@ -163,8 +191,12 @@ internal class KuiklyCanvas : Canvas {
              beginPath()
              moveTo(p1.x / densityValue, p1.y / densityValue)
              lineTo(p2.x / densityValue, p2.y / densityValue)
@@ -304,20 +379,13 @@ index db519f2d9e1a7586e72e3fd9238cb2f50b8fedc0..d2437986ba33c6768cef09ef51c362af
 +            // dash pattern carried by the paint like fillOrStroke does.
              strokeStyle(paint.toKuiklyColor())
              lineWidth(paint.strokeWidth / densityValue)
-+            if (strokeCap != paint.strokeCap) {
-+                strokeCap = paint.strokeCap
-+                when (paint.strokeCap) {
-+                    StrokeCap.Butt -> lineCapButt()
-+                    StrokeCap.Round -> lineCapRound()
-+                    StrokeCap.Square -> lineCapSquare()
-+                }
-+            }
++            applyStrokeCap(paint.strokeCap)
 +            applyPathEffect(paint.pathEffect)
              stroke()
          }
      }
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt
-index 85da21f1f6b24ce3fe217af2ccb722826e8531ae..5f9f65b2dfe287b18329e8cb9579a85a456fa42b 100644
+index 85da21f1f6b24ce3fe217af2ccb722826e8531ae..7ca76a519a30d54e1b8216660f2eb9f0de70f6c3 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/Paint.kt
 @@ -54,6 +54,7 @@ class KuiklyPaint : Paint {
@@ -328,7 +396,7 @@ index 85da21f1f6b24ce3fe217af2ccb722826e8531ae..5f9f65b2dfe287b18329e8cb9579a85a
  }
  
  interface Paint {
-@@ -121,4 +122,10 @@ interface Paint {
+@@ -121,4 +122,15 @@ interface Paint {
       * When this is null, the [color] is used instead.
       */
      var shader: Any?
@@ -336,8 +404,13 @@ index 85da21f1f6b24ce3fe217af2ccb722826e8531ae..5f9f65b2dfe287b18329e8cb9579a85a
 +    /**
 +     * Specifies the effect applied to the geometry of a stroked shape, for example a dash
 +     * pattern. Defaults to null, which draws a solid outline.
++     *
++     * The default implementation ignores the value so existing [Paint] implementations keep
++     * compiling; [KuiklyPaint] stores it.
 +     */
 +    var pathEffect: PathEffect?
++        get() = null
++        set(value) {}
  }
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt
 new file mode 100644
