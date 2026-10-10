@@ -96,6 +96,7 @@ internal class ComposeAllSample : ComposeContainer() {
             DemoItem("Image", "Image 组件示例", "ComposeImageDemo"),
             DemoItem("Text", "Text 组件示例", "TextDemo"),
             DemoItem("Canvas", "Canvas 组件示例", "CanvasDemo"),
+            DemoItem("CanvasState", "Canvas 状态在 save/restore 后的表现（虚线、线帽、字体、对齐）", "ComposeCanvasStateDemo"),
             DemoItem("Animation", "Compose常见动画API示例", "ComposeAnimateDemo1"),
             DemoItem("Gesture", "pointerInput内各种手势示例", "GestureTestDemo"),
             DemoItem("LazyColumn", "LazyColumn各种状态信息示例", "LazyColumnDemo3"),
