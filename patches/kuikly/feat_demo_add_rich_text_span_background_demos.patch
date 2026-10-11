@@ -1,0 +1,417 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Sun, 11 Oct 2026 17:41:42 +0000
+Subject: feat(demo): add rich text span background demos
+
+Two demo pages exercising the per-span backgroundColor renderer fix
+(feat_richtext_render_spanstyle_background_colors_on_all_platforms):
+RichTextSpanBackgroundDemo (Compose, listed in ComposeAllSample) and
+RichTextSpanBackgroundExamplePage (Kuikly DSL). Cases: single span, long
+span wrapping over several lines, view background overlaid by span
+backgrounds, adjacent spans of different sizes, span background with a
+span colour, and a view-background-only control. Each case states the
+expected rendering so Android, iOS and OHOS can be compared by eye. Mirrors
+the demo added to upstream PR Tencent-TDS/KuiklyUI#1774 on review request.
+
+Fork-Patch: demo-richtext-span-background
+Origin: Tencent-TDS/KuiklyUI#1774
+Upstream-Status: submitted Tencent-TDS/KuiklyUI#1774
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt
+index 0e15ca47a4c03cf12edb812e21123afb88fb1cc7..8bec4cff1afb67be37b7593b8ef2dad85c872f0a 100644
+--- a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt
++++ b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/ComposeAllSample.kt
+@@ -95,6 +95,7 @@ internal class ComposeAllSample : ComposeContainer() {
+             // 基础组件
+             DemoItem("Image", "Image 组件示例", "ComposeImageDemo"),
+             DemoItem("Text", "Text 组件示例", "TextDemo"),
++            DemoItem("RichTextSpanBackground", "AnnotatedString 的 span 背景色", "RichTextSpanBackgroundDemo"),
+             DemoItem("Canvas", "Canvas 组件示例", "CanvasDemo"),
+             DemoItem("CanvasState", "Canvas 状态在 save/restore 后的表现（虚线、线帽、字体、对齐）", "ComposeCanvasStateDemo"),
+             DemoItem("Animation", "Compose常见动画API示例", "ComposeAnimateDemo1"),
+diff --git a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/RichTextSpanBackgroundDemo.kt b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/RichTextSpanBackgroundDemo.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..c162d66d2717a779ed28f6b6a8e70ca546d21c02
+--- /dev/null
++++ b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/compose/RichTextSpanBackgroundDemo.kt
+@@ -0,0 +1,174 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.demo.pages.compose
++
++import androidx.compose.runtime.Composable
++import com.tencent.kuikly.compose.ComposeContainer
++import com.tencent.kuikly.compose.foundation.background
++import com.tencent.kuikly.compose.foundation.layout.Arrangement
++import com.tencent.kuikly.compose.foundation.layout.Column
++import com.tencent.kuikly.compose.foundation.layout.fillMaxSize
++import com.tencent.kuikly.compose.foundation.layout.fillMaxWidth
++import com.tencent.kuikly.compose.foundation.layout.padding
++import com.tencent.kuikly.compose.foundation.layout.width
++import com.tencent.kuikly.compose.foundation.lazy.LazyColumn
++import com.tencent.kuikly.compose.material3.Text
++import com.tencent.kuikly.compose.setContent
++import com.tencent.kuikly.compose.ui.Modifier
++import com.tencent.kuikly.compose.ui.graphics.Color
++import com.tencent.kuikly.compose.ui.text.SpanStyle
++import com.tencent.kuikly.compose.ui.text.buildAnnotatedString
++import com.tencent.kuikly.compose.ui.text.font.FontWeight
++import com.tencent.kuikly.compose.ui.text.withStyle
++import com.tencent.kuikly.compose.ui.unit.dp
++import com.tencent.kuikly.compose.ui.unit.sp
++import com.tencent.kuikly.core.annotations.Page
++
++/**
++ * Per-span background colour on an AnnotatedString (`SpanStyle(background = ...)`).
++ *
++ * Every case states what should be visible so the page can be compared across
++ * Android, iOS and OHOS by eye. Before the renderer fix the span background was
++ * silently dropped on all three platforms.
++ */
++@Page("RichTextSpanBackgroundDemo")
++class RichTextSpanBackgroundDemo : ComposeContainer() {
++    override fun willInit() {
++        super.willInit()
++        setContent {
++            ComposeNavigationBar("RichText span background") {
++                LazyColumn(
++                    modifier = Modifier.fillMaxSize().background(Color.White),
++                ) {
++                    item { SpanBackgroundCases() }
++                }
++            }
++        }
++    }
++}
++
++private val Highlight = Color(0xFFFFE08A)
++private val Mint = Color(0xFFB9F6CA)
++private val Sky = Color(0xFFBBDEFB)
++private val PanelBackground = Color(0xFFE0E0E0)
++
++@Composable
++private fun SpanBackgroundCases() {
++    Column(
++        modifier = Modifier.fillMaxWidth().padding(16.dp),
++        verticalArrangement = Arrangement.spacedBy(16.dp),
++    ) {
++        Case("1. Single span. Expected: only the middle word carries a yellow background.") {
++            Text(
++                buildAnnotatedString {
++                    append("plain ")
++                    withStyle(SpanStyle(background = Highlight)) { append("highlighted") }
++                    append(" plain")
++                },
++                fontSize = 18.sp,
++            )
++        }
++
++        Case(
++            "2. Long span wrapping over several lines. Expected: the yellow background follows " +
++                "the span's glyphs on every line it occupies and stops at the span end; the " +
++                "trailing plain text has no background.",
++        ) {
++            Text(
++                buildAnnotatedString {
++                    append("Before the span. ")
++                    withStyle(SpanStyle(background = Highlight)) {
++                        append(
++                            "This span is long enough to wrap onto at least two or three lines " +
++                                "at 18sp in a 260dp wide column, so the background must break " +
++                                "and continue on the next line exactly where the glyphs are.",
++                        )
++                    }
++                    append(" After the span, no background.")
++                },
++                fontSize = 18.sp,
++                modifier = Modifier.width(260.dp),
++            )
++        }
++
++        Case(
++            "3. Text background plus span background. Expected: the whole text box is grey; " +
++                "the two inner spans paint green and blue on top of the grey, only behind " +
++                "their own glyphs; grey stays visible around them and in the line gaps.",
++        ) {
++            Text(
++                buildAnnotatedString {
++                    append("grey box, ")
++                    withStyle(SpanStyle(background = Mint)) { append("green span") }
++                    append(", then ")
++                    withStyle(SpanStyle(background = Sky, fontWeight = FontWeight.Bold)) {
++                        append("bold blue span that also wraps to the next line")
++                    }
++                    append(", grey again.")
++                },
++                fontSize = 18.sp,
++                modifier = Modifier.width(260.dp).background(PanelBackground).padding(8.dp),
++            )
++        }
++
++        Case(
++            "4. Adjacent spans with different backgrounds and sizes. Expected: yellow, green " +
++                "and blue sit edge to edge with no gap and no overlap; the larger span's " +
++                "background is taller.",
++        ) {
++            Text(
++                buildAnnotatedString {
++                    withStyle(SpanStyle(background = Highlight)) { append("yellow") }
++                    withStyle(SpanStyle(background = Mint, fontSize = 26.sp)) { append("GREEN") }
++                    withStyle(SpanStyle(background = Sky)) { append("blue") }
++                },
++                fontSize = 18.sp,
++            )
++        }
++
++        Case(
++            "5. Span background together with a span colour. Expected: white text on a blue " +
++                "background for the span; the surrounding text stays black on white.",
++        ) {
++            Text(
++                buildAnnotatedString {
++                    append("before ")
++                    withStyle(SpanStyle(background = Color(0xFF1E88E5), color = Color.White)) {
++                        append(" inverted ")
++                    }
++                    append(" after")
++                },
++                fontSize = 18.sp,
++            )
++        }
++
++        Case("6. Control: view-level background only, no span background. Expected: unchanged, the whole box is yellow.") {
++            Text(
++                "plain text with a view background",
++                fontSize = 18.sp,
++                modifier = Modifier.background(Highlight),
++            )
++        }
++    }
++}
++
++@Composable
++private fun Case(expected: String, content: @Composable () -> Unit) {
++    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
++        Text(expected, fontSize = 12.sp, color = Color(0xFF616161))
++        content()
++    }
++}
+diff --git a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/demo/RichTextSpanBackgroundExamplePage.kt b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/demo/RichTextSpanBackgroundExamplePage.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f0c640eb853b4ec3f768e2fc0b9876366a9ad74
+--- /dev/null
++++ b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/demo/RichTextSpanBackgroundExamplePage.kt
+@@ -0,0 +1,181 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.demo.pages.demo
++
++import com.tencent.kuikly.core.annotations.Page
++import com.tencent.kuikly.core.base.Color
++import com.tencent.kuikly.core.base.ViewBuilder
++import com.tencent.kuikly.core.base.ViewContainer
++import com.tencent.kuikly.core.views.RichText
++import com.tencent.kuikly.core.views.Span
++import com.tencent.kuikly.core.views.Text
++import com.tencent.kuikly.core.views.View
++import com.tencent.kuikly.demo.pages.base.BasePager
++import com.tencent.kuikly.demo.pages.demo.base.NavBar
++
++/**
++ * Per-span `backgroundColor` on a Kuikly DSL RichText.
++ *
++ * Same cases as the Compose page `RichTextSpanBackgroundDemo`; each case
++ * states what should be visible so Android, iOS and OHOS can be compared by eye.
++ */
++@Page("RichTextSpanBackgroundExamplePage")
++internal class RichTextSpanBackgroundExamplePage : BasePager() {
++
++    private val highlight = Color(0xFFFFE08A)
++    private val mint = Color(0xFFB9F6CA)
++    private val sky = Color(0xFFBBDEFB)
++    private val panel = Color(0xFFE0E0E0)
++
++    override fun body(): ViewBuilder {
++        val ctx = this
++        return {
++            NavBar {
++                attr {
++                    title = "RichText span backgroundColor"
++                }
++            }
++            View {
++                attr {
++                    flex(1f)
++                    padding(all = 16f)
++                    backgroundColor(Color.WHITE)
++                }
++
++                caption("1. Single span. Expected: only the middle word carries a yellow background.")
++                RichText {
++                    attr { fontSize(18f) }
++                    Span { text("plain ") }
++                    Span {
++                        text("highlighted")
++                        backgroundColor(ctx.highlight)
++                    }
++                    Span { text(" plain") }
++                }
++
++                caption(
++                    "2. Long span wrapping over several lines. Expected: the yellow background " +
++                        "follows the span's glyphs on every line it occupies and stops at the " +
++                        "span end; the trailing plain text has no background."
++                )
++                RichText {
++                    attr {
++                        fontSize(18f)
++                        width(260f)
++                    }
++                    Span { text("Before the span. ") }
++                    Span {
++                        text(
++                            "This span is long enough to wrap onto at least two or three lines " +
++                                "at 18 in a 260 wide box, so the background must break and " +
++                                "continue on the next line exactly where the glyphs are."
++                        )
++                        backgroundColor(ctx.highlight)
++                    }
++                    Span { text(" After the span, no background.") }
++                }
++
++                caption(
++                    "3. RichText backgroundColor plus span backgroundColor. Expected: the whole " +
++                        "box is grey; the inner spans paint green and blue on top of the grey, " +
++                        "only behind their own glyphs; grey stays visible around them and in the " +
++                        "line gaps."
++                )
++                RichText {
++                    attr {
++                        fontSize(18f)
++                        width(260f)
++                        backgroundColor(ctx.panel)
++                    }
++                    Span { text("grey box, ") }
++                    Span {
++                        text("green span")
++                        backgroundColor(ctx.mint)
++                    }
++                    Span { text(", then ") }
++                    Span {
++                        text("bold blue span that also wraps to the next line")
++                        fontWeightBold()
++                        backgroundColor(ctx.sky)
++                    }
++                    Span { text(", grey again.") }
++                }
++
++                caption(
++                    "4. Adjacent spans with different backgrounds and sizes. Expected: yellow, " +
++                        "green and blue sit edge to edge with no gap and no overlap; the larger " +
++                        "span's background is taller."
++                )
++                RichText {
++                    attr { fontSize(18f) }
++                    Span {
++                        text("yellow")
++                        backgroundColor(ctx.highlight)
++                    }
++                    Span {
++                        text("GREEN")
++                        fontSize(26f)
++                        backgroundColor(ctx.mint)
++                    }
++                    Span {
++                        text("blue")
++                        backgroundColor(ctx.sky)
++                    }
++                }
++
++                caption(
++                    "5. Span background together with a span colour. Expected: white text on a " +
++                        "blue background for the span; the surrounding text stays black on white."
++                )
++                RichText {
++                    attr { fontSize(18f) }
++                    Span { text("before ") }
++                    Span {
++                        text(" inverted ")
++                        color(Color.WHITE)
++                        backgroundColor(Color(0xFF1E88E5))
++                    }
++                    Span { text(" after") }
++                }
++
++                caption(
++                    "6. Control: Text with a view-level backgroundColor and no spans. Expected: " +
++                        "unchanged, the whole box is yellow."
++                )
++                Text {
++                    attr {
++                        fontSize(18f)
++                        text("plain text with a view background")
++                        backgroundColor(ctx.highlight)
++                    }
++                }
++            }
++        }
++    }
++}
++
++/** Grey caption above each case describing the expected rendering. */
++private fun ViewContainer<*, *>.caption(expected: String) {
++    Text {
++        attr {
++            fontSize(12f)
++            color(Color(0xFF616161))
++            text(expected)
++            marginTop(16f)
++            marginBottom(6f)
++        }
++    }
++}
+diff --git a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/demo/catalog/ExampleIndexPage.kt b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/demo/catalog/ExampleIndexPage.kt
+index c6d56241a6ef98f8bff8088a76c67a9ce98a4c4a..4cb2a2009a00392738f514d799e9e7f4e88147c8 100644
+--- a/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/demo/catalog/ExampleIndexPage.kt
++++ b/demo/src/commonMain/kotlin/com/tencent/kuikly/demo/pages/demo/catalog/ExampleIndexPage.kt
+@@ -110,6 +110,13 @@ internal class ExampleIndexPage : BasePager() {
+             declarativeExampleUrl = generateJumpUrl("TextExamplePage")
+         })
+ 
++        itemList.add(ExampleItemData().apply {
++            avatarText = "SB"
++            titleText = "RichText Span Background"
++            subtitleText = "span 级 backgroundColor：跨行、叠加 view 背景、相邻 span"
++            declarativeExampleUrl = generateJumpUrl("RichTextSpanBackgroundExamplePage")
++        })
++
+         itemList.add(ExampleItemData().apply {
+             avatarText = "Sp"
+             titleText = "Span Selection"
