@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:15:21 +0000
+Subject: fix(drawer): wait for the current native scroll binding before
+ snapping
+
+DrawerInternalPagerState.animateScrollToPage wrote the snap offset through
+kuiklyInfo.scrollView, which can be null or a stale view while the drawer
+scroller is rebound. Add ScrollViewBindingGate to KuiklyScrollInfo, clear
+the binding when SubcomposeLayout disposes the bound view, and run the snap
+only against the view that is current at that moment.
+
+Fork-Patch: compose-drawer-scrollview-binding-gate
+Origin: 0e101b7a
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/DrawerInternalPagerState.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/DrawerInternalPagerState.kt
+index c11612401b12953daadcf7148e8085dc460aa048..2037dac9674c3a062ed469e76cdfbc016a57413c 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/DrawerInternalPagerState.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/drawer/DrawerInternalPagerState.kt
+@@ -479,15 +479,16 @@ abstract class DrawerInternalPagerState internal constructor(
+ 
+         val finalTargetOffset = targetOffset
+ 
+-        markSnapAnimationStarted(finalTargetOffset.toInt())
+-
+-        kuiklyInfo.run {
+-            val targetOffsetDp = if (isVertical()) {
+-                Offset(scrollView?.curOffsetX ?: 0f, max(0f, targetOffset / getDensity() - 0.01f))
+-            } else {
+-                Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView?.curOffsetY ?: 0f)
++        kuiklyInfo.withCurrentScrollViewBinding { scrollView ->
++            markSnapAnimationStarted(finalTargetOffset.toInt())
++            kuiklyInfo.run {
++                val targetOffsetDp = if (isVertical()) {
++                    Offset(scrollView.curOffsetX, max(0f, targetOffset / getDensity() - 0.01f))
++                } else {
++                    Offset(max(0f, targetOffset / getDensity() - 0.01f), scrollView.curOffsetY)
++                }
++                scrollView.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
+             }
+-            scrollView?.setContentOffset(targetOffsetDp.x, targetOffsetDp.y, true)
+         }
+     }
+ 
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+index b5f36b917c85775fbc6654e492d2861aea9f6756..6d8c4d63f7b5283f6cc9a3ea538a21b145933fc4 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+@@ -32,6 +32,30 @@ import com.tencent.kuikly.core.views.ScrollerView
+ import kotlin.math.roundToInt
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Job
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.filterNotNull
++import kotlinx.coroutines.flow.first
++
++internal class ScrollViewBindingGate<T : Any> {
++    private val binding = MutableStateFlow<T?>(null)
++
++    var current: T? = null
++        private set
++
++    fun update(value: T?) {
++        current = value
++        binding.value = value
++    }
++
++    suspend fun <R> withCurrentBinding(block: (T) -> R): R {
++        while (true) {
++            val candidate = binding.filterNotNull().first()
++            if (current === candidate) {
++                return block(candidate)
++            }
++        }
++    }
++}
+ 
+ /**
+  * Scroll information management class, responsible for handling scroll-related state and calculations
+@@ -43,6 +67,9 @@ class KuiklyScrollInfo {
+         private const val DEFAULT_DENSITY = 3f
+     }
+ 
++    private val scrollViewBinding =
++        ScrollViewBindingGate<ScrollerView<ScrollerAttr, ScrollerEvent>>()
++
+     /**
+      * Scroll offset that needs to be ignored
+      */
+@@ -54,11 +81,16 @@ class KuiklyScrollInfo {
+     var scrollView: ScrollerView<ScrollerAttr, ScrollerEvent>? = null
+         set(value) {
+             field = value
++            scrollViewBinding.update(value)
+             if (hasPullToRefresh && value != null) {
+                 updatePullToRefreshOnScrollView(value, true)
+             }
+         }
+ 
++    internal suspend fun <R> withCurrentScrollViewBinding(
++        block: (ScrollerView<ScrollerAttr, ScrollerEvent>) -> R
++    ): R = scrollViewBinding.withCurrentBinding(block)
++
+     /**
+      * Scroll orientation
+      */
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+index ca5cf993ec33883aac087596bcf2e53e1b36a658..677fa78108860b2dcf238738409a85a9147b0098 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.ComposeNode
+ import androidx.compose.runtime.ComposeNodeLifecycleCallback
+ import androidx.compose.runtime.CompositionContext
++import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.ReusableComposeNode
+ import androidx.compose.runtime.ReusableComposition
+@@ -411,6 +412,15 @@ fun SubcomposeLayout(
+         scrollViewRef?.listenScrollEvent()
+     }
+ 
++    DisposableEffect(scrollViewRef, scrollableState) {
++        val boundScrollView = scrollViewRef
++        onDispose {
++            if (scrollableState.kuiklyInfo.scrollView === boundScrollView) {
++                scrollableState.kuiklyInfo.scrollView = null
++            }
++        }
++    }
++
+     ReusableComposeNode<KNode<*>, KuiklyApplier>(
+         factory = {
+             val newView = ScrollerView<ScrollerAttr, ScrollerEvent>()
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ScrollViewBindingGateTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ScrollViewBindingGateTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..19117007d73b731f5fbd5c888a97675a048ad296
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ScrollViewBindingGateTest.kt
+@@ -0,0 +1,72 @@
++package com.tencent.kuikly.compose.gestures
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertSame
++import kotlinx.coroutines.CompletableDeferred
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.cancelAndJoin
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.test.runTest
++
++class ScrollViewBindingGateTest {
++    @Test
++    fun layoutReadyWithoutBindingDoesNotSubmitUntilCurrentHandleArrives() = runTest {
++        val gate = ScrollViewBindingGate<FakeHandle>()
++        val submitted = CompletableDeferred<FakeHandle>()
++        var calls = 0
++        val job = launch(start = CoroutineStart.UNDISPATCHED) {
++            gate.withCurrentBinding { handle ->
++                calls += 1
++                submitted.complete(handle)
++            }
++        }
++
++        assertEquals(0, calls)
++        val current = FakeHandle("current")
++        gate.update(current)
++
++        assertSame(current, submitted.await())
++        assertEquals(1, calls)
++        job.join()
++    }
++
++    @Test
++    fun cancellationBeforeBindingProducesZeroSubmission() = runTest {
++        val gate = ScrollViewBindingGate<FakeHandle>()
++        var calls = 0
++        val job = launch(start = CoroutineStart.UNDISPATCHED) {
++            gate.withCurrentBinding { calls += 1 }
++        }
++
++        job.cancelAndJoin()
++        gate.update(FakeHandle("late"))
++
++        assertEquals(0, calls)
++    }
++
++    @Test
++    fun clearedOldBindingCannotReceiveSuccessorSubmission() = runTest {
++        val gate = ScrollViewBindingGate<FakeHandle>()
++        val old = FakeHandle("old")
++        val current = FakeHandle("current")
++        gate.update(old)
++        gate.update(null)
++        gate.update(current)
++
++        var submitted: FakeHandle? = null
++        gate.withCurrentBinding {
++            submitted = it
++            it.calls += 1
++        }
++
++        assertSame(current, submitted)
++        assertEquals(0, old.calls)
++        assertEquals(1, current.calls)
++    }
++
++    private data class FakeHandle(
++        val name: String,
++        var calls: Int = 0
++    )
++}

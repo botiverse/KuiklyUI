@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:04:03 +0000
+Subject: fix(compose): refresh native frame on placement offset change
+
+When only a coordinator's placement offset moves (not the inner
+coordinator), the native view frame was not refreshed and stayed stale.
+Update the Kuikly view frame whenever the position changes.
+
+Fork-Patch: compose-refresh-native-frame-on-offset-change
+Origin: b6123101
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeCoordinator.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeCoordinator.kt
+index 5b8c7afcd052794a891cb1a8d902dfbf9d664872..28784f3e1bda061ea973e00fcd7b37a25af14054 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeCoordinator.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/NodeCoordinator.kt
+@@ -365,7 +365,8 @@ internal abstract class NodeCoordinator(
+ //        explicitLayer: GraphicsLayer?
+     ) {
+         updateLayerBlock(layerBlock)
+-        if (this.position != position) {
++        val positionChanged = this.position != position
++        if (positionChanged) {
+             this.position = position
+             layoutNode.layoutDelegate.measurePassDelegate
+                 .notifyChildrenUsingCoordinatesWhilePlacing()
+@@ -378,7 +379,7 @@ internal abstract class NodeCoordinator(
+             invalidateAlignmentLinesFromPositionChange()
+             layoutNode.owner?.onLayoutChange(layoutNode)
+         }
+-        if (this == layoutNode.innerCoordinator) {
++        if (this == layoutNode.innerCoordinator || positionChanged) {
+             layoutNode.updateKuiklyViewFrame(this)
+         }
+ 

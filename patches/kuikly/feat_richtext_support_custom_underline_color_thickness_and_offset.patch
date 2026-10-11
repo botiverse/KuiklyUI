@@ -1,0 +1,1172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:13:53 +0000
+Subject: feat(richtext): support custom underline color, thickness and offset
+
+Add textDecorationColor/Thickness/Offset to Compose SpanStyle and the core
+TextAttr/TextSpan API, and render them natively. Android marks the range with
+a breakable CharacterStyle and the drawer paints the underline after the
+glyphs with skip-ink gaps, so long decorated runs still wrap. iOS maps color
+and thickness onto NSUnderline attributes; OHOS sets decoration color and a
+thickness scale corrected for the engine's 1/18 base.
+
+Fork-Patch: richtext-custom-underline-style
+Origin: 3bd6a618 e58c787b 969ac425 f7eb31c8
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+index 821f4011629456f20f97d1a2c77cc23e80db17bd..882745ca8e4dc90d3d1ecf334062e2dcb325ed37 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+@@ -457,6 +457,15 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+ 
+     // Apply text decoration
+     spanStyle.textDecoration?.let { applyTextDecoration(it) }
++    if (spanStyle.textDecorationColor.isSpecified) {
++        setProp(TextConst.TEXT_DECORATION_COLOR, spanStyle.textDecorationColor.toKuiklyColor().toString())
++    }
++    if (spanStyle.textDecorationThickness.isSpecified) {
++        setProp(TextConst.TEXT_DECORATION_THICKNESS, scaleToDensity(density, spanStyle.textDecorationThickness.value))
++    }
++    if (spanStyle.textDecorationOffset.isSpecified) {
++        setProp(TextConst.TEXT_DECORATION_OFFSET, scaleToDensity(density, spanStyle.textDecorationOffset.value))
++    }
+ 
+     // Apply letter spacing
+     if (spanStyle.letterSpacing.isSpecified) {
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt
+index e1b009dd539612fae23ea6fed2a837acda8270fc..b32a70bf5da84559a284aa69c76c8dc36578751d 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/text/SpanStyle.kt
+@@ -75,6 +75,9 @@ private val DefaultColor = Color.Black
+  * @param background The background color for the text.
+  * @param textDecoration The decorations to paint on the text (e.g., an underline).
+  * @param shadow The shadow effect applied on the text.
++ * @param textDecorationColor The color used for text decorations such as underlines.
++ * @param textDecorationThickness The thickness used for text decorations such as underlines.
++ * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
+  * @param platformStyle Platform specific [SpanStyle] parameters.
+  * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke around
+  * the edges.
+@@ -100,6 +103,9 @@ class SpanStyle internal constructor(
+     val background: Color = Color.Unspecified,  // kuikly暂时不支持
+     val textDecoration: TextDecoration? = null,
+     val shadow: Shadow? = null,
++    val textDecorationColor: Color = Color.Unspecified,
++    val textDecorationThickness: TextUnit = TextUnit.Unspecified,
++    val textDecorationOffset: TextUnit = TextUnit.Unspecified,
+ //    val platformStyle: PlatformSpanStyle? = null,
+ //    val drawStyle: DrawStyle? = null
+ ) {
+@@ -131,6 +137,9 @@ class SpanStyle internal constructor(
+      * @param background The background color for the text.
+      * @param textDecoration The decorations to paint on the text (e.g., an underline).
+      * @param shadow The shadow effect applied on the text.
++     * @param textDecorationColor The color used for text decorations such as underlines.
++     * @param textDecorationThickness The thickness used for text decorations such as underlines.
++     * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
+      * @param platformStyle Platform specific [SpanStyle] parameters.
+      * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke
+      * around the edges.
+@@ -154,6 +163,9 @@ class SpanStyle internal constructor(
+         background: Color = Color.Unspecified,
+         textDecoration: TextDecoration? = null,
+         shadow: Shadow? = null,
++        textDecorationColor: Color = Color.Unspecified,
++        textDecorationThickness: TextUnit = TextUnit.Unspecified,
++        textDecorationOffset: TextUnit = TextUnit.Unspecified,
+ //        platformStyle: PlatformSpanStyle? = null,
+ //        drawStyle: DrawStyle? = null
+     ) : this(
+@@ -171,6 +183,9 @@ class SpanStyle internal constructor(
+         background = background,
+         textDecoration = textDecoration,
+         shadow = shadow,
++        textDecorationColor = textDecorationColor,
++        textDecorationThickness = textDecorationThickness,
++        textDecorationOffset = textDecorationOffset,
+ //        platformStyle = platformStyle,
+ //        drawStyle = drawStyle
+     )
+@@ -206,6 +221,9 @@ class SpanStyle internal constructor(
+      * @param background The background color for the text.
+      * @param textDecoration The decorations to paint on the text (e.g., an underline).
+      * @param shadow The shadow effect applied on the text.
++     * @param textDecorationColor The color used for text decorations such as underlines.
++     * @param textDecorationThickness The thickness used for text decorations such as underlines.
++     * @param textDecorationOffset The baseline offset used for text decorations such as underlines.
+      * @param platformStyle Platform specific [SpanStyle] parameters.
+      * @param drawStyle Drawing style of text, whether fill in the text while drawing or stroke
+      * around the edges.
+@@ -230,6 +248,9 @@ class SpanStyle internal constructor(
+         background: Color = Color.Unspecified,
+         textDecoration: TextDecoration? = null,
+         shadow: Shadow? = null,
++        textDecorationColor: Color = Color.Unspecified,
++        textDecorationThickness: TextUnit = TextUnit.Unspecified,
++        textDecorationOffset: TextUnit = TextUnit.Unspecified,
+ //        platformStyle: PlatformSpanStyle? = null,
+ //        drawStyle: DrawStyle? = null
+     ) : this(
+@@ -247,6 +268,9 @@ class SpanStyle internal constructor(
+         background = background,
+         textDecoration = textDecoration,
+         shadow = shadow,
++        textDecorationColor = textDecorationColor,
++        textDecorationThickness = textDecorationThickness,
++        textDecorationOffset = textDecorationOffset,
+ //        platformStyle = platformStyle,
+ //        drawStyle = drawStyle
+     )
+@@ -296,6 +320,9 @@ class SpanStyle internal constructor(
+             background = other.background,
+             textDecoration = other.textDecoration,
+             shadow = other.shadow,
++            textDecorationColor = other.textDecorationColor,
++            textDecorationThickness = other.textDecorationThickness,
++            textDecorationOffset = other.textDecorationOffset,
+ //            platformStyle = other.platformStyle,
+ //            drawStyle = other.drawStyle
+         )
+@@ -322,6 +349,9 @@ class SpanStyle internal constructor(
+         background: Color = this.background,
+         textDecoration: TextDecoration? = this.textDecoration,
+         shadow: Shadow? = this.shadow,
++        textDecorationColor: Color = this.textDecorationColor,
++        textDecorationThickness: TextUnit = this.textDecorationThickness,
++        textDecorationOffset: TextUnit = this.textDecorationOffset,
+ //        platformStyle: PlatformSpanStyle? = this.platformStyle,
+ //        drawStyle: DrawStyle? = this.drawStyle
+     ): SpanStyle {
+@@ -344,6 +374,9 @@ class SpanStyle internal constructor(
+             background = background,
+             textDecoration = textDecoration,
+             shadow = shadow,
++            textDecorationColor = textDecorationColor,
++            textDecorationThickness = textDecorationThickness,
++            textDecorationOffset = textDecorationOffset,
+ //            platformStyle = platformStyle,
+ //            drawStyle = drawStyle
+         )
+@@ -365,6 +398,9 @@ class SpanStyle internal constructor(
+         background: Color = this.background,
+         textDecoration: TextDecoration? = this.textDecoration,
+         shadow: Shadow? = this.shadow,
++        textDecorationColor: Color = this.textDecorationColor,
++        textDecorationThickness: TextUnit = this.textDecorationThickness,
++        textDecorationOffset: TextUnit = this.textDecorationOffset,
+ //        platformStyle: PlatformSpanStyle? = this.platformStyle,
+ //        drawStyle: DrawStyle? = this.drawStyle
+     ): SpanStyle {
+@@ -383,6 +419,9 @@ class SpanStyle internal constructor(
+             background = background,
+             textDecoration = textDecoration,
+             shadow = shadow,
++            textDecorationColor = textDecorationColor,
++            textDecorationThickness = textDecorationThickness,
++            textDecorationOffset = textDecorationOffset,
+ //            platformStyle = platformStyle,
+ //            drawStyle = drawStyle
+         )
+@@ -415,6 +454,9 @@ class SpanStyle internal constructor(
+     internal fun hasSameNonLayoutAttributes(other: SpanStyle): Boolean {
+         if (textForegroundStyle != other.textForegroundStyle) return false
+         if (textDecoration != other.textDecoration) return false
++        if (textDecorationColor != other.textDecorationColor) return false
++        if (textDecorationThickness != other.textDecorationThickness) return false
++        if (textDecorationOffset != other.textDecorationOffset) return false
+         if (shadow != other.shadow) return false
+ //        if (drawStyle != other.drawStyle) return false
+         return true
+@@ -436,6 +478,9 @@ class SpanStyle internal constructor(
+ //        result = 31 * result + (localeList?.hashCode() ?: 0)
+         result = 31 * result + background.hashCode()
+         result = 31 * result + (textDecoration?.hashCode() ?: 0)
++        result = 31 * result + textDecorationColor.hashCode()
++        result = 31 * result + textDecorationThickness.hashCode()
++        result = 31 * result + textDecorationOffset.hashCode()
+         result = 31 * result + (shadow?.hashCode() ?: 0)
+ //        result = 31 * result + (platformStyle?.hashCode() ?: 0)
+ //        result = 31 * result + (drawStyle?.hashCode() ?: 0)
+@@ -478,6 +523,9 @@ class SpanStyle internal constructor(
+ //            append("localeList=$localeList, ")
+             append("background=$background, ")
+             append("textDecoration=$textDecoration, ")
++            append("textDecorationColor=$textDecorationColor, ")
++            append("textDecorationThickness=$textDecorationThickness, ")
++            append("textDecorationOffset=$textDecorationOffset, ")
+             append("shadow=$shadow, ")
+ //            append("platformStyle=$platformStyle, ")
+ //            append("drawStyle=$drawStyle")
+@@ -569,6 +617,21 @@ fun lerp(start: SpanStyle, stop: SpanStyle, fraction: Float): SpanStyle {
+             stop.textDecoration,
+             fraction
+         ),
++        textDecorationColor = lerp(
++            start.textDecorationColor,
++            stop.textDecorationColor,
++            fraction
++        ),
++        textDecorationThickness = lerpTextUnitInheritable(
++            start.textDecorationThickness,
++            stop.textDecorationThickness,
++            fraction
++        ),
++        textDecorationOffset = lerpTextUnitInheritable(
++            start.textDecorationOffset,
++            stop.textDecorationOffset,
++            fraction
++        ),
+         shadow = lerp(
+             start.shadow ?: Shadow(),
+             stop.shadow ?: Shadow(),
+@@ -614,6 +677,9 @@ internal fun resolveSpanStyleDefaults(style: SpanStyle) = SpanStyle(
+ //    localeList = style.localeList ?: LocaleList.current,
+     background = style.background.takeOrElse { DefaultBackgroundColor },
+     textDecoration = style.textDecoration ?: TextDecoration.None,
++    textDecorationColor = style.textDecorationColor,
++    textDecorationThickness = style.textDecorationThickness,
++    textDecorationOffset = style.textDecorationOffset,
+     shadow = style.shadow ?: Shadow.None,
+ //    platformStyle = style.platformStyle,
+ //    drawStyle = style.drawStyle ?: Fill
+@@ -636,6 +702,9 @@ internal fun SpanStyle.fastMerge(
+     background: Color,
+     textDecoration: TextDecoration?,
+     shadow: Shadow?,
++    textDecorationColor: Color = Color.Unspecified,
++    textDecorationThickness: TextUnit = TextUnit.Unspecified,
++    textDecorationOffset: TextUnit = TextUnit.Unspecified,
+ //    platformStyle: PlatformSpanStyle?,
+ //    drawStyle: DrawStyle?
+ ): SpanStyle {
+@@ -661,6 +730,9 @@ internal fun SpanStyle.fastMerge(
+         fontFamily != null && fontFamily !== this.fontFamily ||
+         letterSpacing.isSpecified && letterSpacing != this.letterSpacing ||
+         textDecoration != null && textDecoration != this.textDecoration ||
++        textDecorationColor.isSpecified && textDecorationColor != this.textDecorationColor ||
++        textDecorationThickness.isSpecified && textDecorationThickness != this.textDecorationThickness ||
++        textDecorationOffset.isSpecified && textDecorationOffset != this.textDecorationOffset ||
+         // then compare the remaining params, for potential non-Text merges
+         brush != textForegroundStyle.brush ||
+         brush != null && alpha != this.textForegroundStyle.alpha ||
+@@ -704,6 +776,17 @@ internal fun SpanStyle.fastMerge(
+ //        localeList = localeList ?: this.localeList,
+         background = background.takeOrElse { this.background },
+         textDecoration = textDecoration ?: this.textDecoration,
++        textDecorationColor = textDecorationColor.takeOrElse { this.textDecorationColor },
++        textDecorationThickness = if (!textDecorationThickness.isUnspecified) {
++            textDecorationThickness
++        } else {
++            this.textDecorationThickness
++        },
++        textDecorationOffset = if (!textDecorationOffset.isUnspecified) {
++            textDecorationOffset
++        } else {
++            this.textDecorationOffset
++        },
+         shadow = shadow ?: this.shadow,
+ //        platformStyle = mergePlatformStyle(platformStyle),
+ //        drawStyle = drawStyle ?: this.drawStyle
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+index 82f693ebee4b773f293967cc1585e89757d297ac..6886ecb90824e6752bf0ec1db261ee789cd4491d 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+@@ -51,6 +51,7 @@ import com.tencent.kuikly.core.render.android.css.ktx.toColor
+ import com.tencent.kuikly.core.render.android.css.ktx.toPxF
+ import com.tencent.kuikly.core.render.android.css.ktx.toPxI
+ import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
++import com.tencent.kuikly.core.views.TextConst
+ import org.json.JSONObject
+ import kotlin.math.ceil
+ import kotlin.math.floor
+@@ -201,6 +202,18 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+         if (spanProps.textDecoration.isNotEmpty()) {
+             if (spanProps.textDecoration == KRTextProps.TEXT_DECORATION_LINE_THROUGH) {
+                 textSpans.add(StrikethroughSpan())
++            } else if (
++                spanProps.textDecorationColor != null ||
++                spanProps.textDecorationThickness != null ||
++                spanProps.textDecorationOffset != null
++            ) {
++                textSpans.add(
++                    createKRCustomUnderlineSpan(
++                        color = spanProps.textDecorationColor,
++                        thickness = spanProps.textDecorationThickness,
++                        offset = spanProps.textDecorationOffset
++                    )
++                )
+             } else {
+                 textSpans.add(UnderlineSpan())
+             }
+@@ -254,6 +267,9 @@ class TextSpanProps(
+     val fontStyle: Int
+     val letterSpacing: Float
+     val textDecoration: String
++    val textDecorationColor: Int?
++    val textDecorationThickness: Float?
++    val textDecorationOffset: Float?
+     val lineHeight: Float
+     val backgroundImage: String
+     val backgroundColor: Int
+@@ -297,6 +313,20 @@ class TextSpanProps(
+             defaultProps.letterSpacing
+         }
+         textDecoration = spanValue.optString(KRTextProps.PROP_KEY_TEXT_DECORATION, defaultProps.textDecoration)
++        textDecorationColor =
++            spanValue.optString(TextConst.TEXT_DECORATION_COLOR)
++                .takeIf { it.isNotEmpty() }
++                ?.toColor()
++        textDecorationThickness =
++            spanValue.optDouble(TextConst.TEXT_DECORATION_THICKNESS, 0.0)
++                .toFloat()
++                .takeIf { it > 0f }
++                ?.let { kuiklyContext.toPxF(it) }
++        textDecorationOffset =
++            spanValue.optDouble(TextConst.TEXT_DECORATION_OFFSET, 0.0)
++                .toFloat()
++                .takeIf { it != 0f }
++                ?.let { kuiklyContext.toPxF(it) }
+         lineHeight = if (spanValue.has(KRTextProps.PROP_KEY_LINE_HEIGHT)) {
+             kuiklyContext.toPxF(spanValue.optDouble(KRTextProps.PROP_KEY_LINE_HEIGHT).toFloat())
+         } else {
+@@ -341,6 +371,41 @@ data class SpanTextRange(val index: Int, val start: Int, val end: Int) {
+     }
+ }
+ 
++/**
++ * Uses a marker [CharacterStyle] whenever the caller customizes underline color, thickness, and/or
++ * offset.
++ * [KRRichTextViewDrawer] overlays those marked ranges in an isolated layer and punches gaps from
++ * the resolved glyph ink geometry, matching CSS `text-decoration-skip-ink: auto` while preserving
++ * existing text/background drawing. The marker remains breakable; the previous all-purpose
++ * [ReplacementSpan] made the complete decorated range one atomic layout run and could push a long
++ * URL outside its available width.
++ *
++ * Android does not expose a public underline-offset field on [TextPaint], so the drawer applies the
++ * requested offset directly without turning the decorated range into an atomic replacement.
++ */
++internal fun createKRCustomUnderlineSpan(
++    color: Int?,
++    thickness: Float?,
++    offset: Float?,
++): Any = KRSkipInkCustomUnderlineSpan(color = color, thickness = thickness, offset = offset)
++
++internal class KRSkipInkCustomUnderlineSpan(
++    internal val color: Int?,
++    internal val thickness: Float?,
++    internal val offset: Float?,
++) : CharacterStyle(), UpdateAppearance {
++
++    override fun updateDrawState(textPaint: TextPaint) {
++        // The view drawer owns this decoration. Keep Android TextLine's post-glyph underline paths
++        // disabled so there is one SSOT and glyph ink can cover the stroke.
++        textPaint.isUnderlineText = false
++        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
++            textPaint.underlineColor = 0
++            textPaint.underlineThickness = 0f
++        }
++    }
++}
++
+ /**
+  * 字重span
+  * @param fontWeight 字重
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt
+index c07de8ccc86e83592d55adab13452f1e85e6fbdd..c787c43b16e6d38b099b2a8c3e1e742e2c50f812 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextViewDrawer.kt
+@@ -16,11 +16,16 @@
+ package com.tencent.kuikly.core.render.android.expand.component.text
+ 
+ import android.graphics.Canvas
++import android.graphics.Paint
+ import android.graphics.Path
++import android.graphics.PorterDuff
++import android.graphics.PorterDuffXfermode
+ import android.graphics.RectF
+ import android.os.Build
+ import android.text.Layout
+ import android.text.Spanned
++import android.text.TextPaint
++import android.text.style.CharacterStyle
+ import android.text.style.ReplacementSpan
+ import com.tencent.kuikly.core.render.android.expand.component.KRTextProps
+ import com.tencent.kuikly.core.render.android.expand.component.SelectionEdge
+@@ -28,6 +33,8 @@ import com.tencent.kuikly.core.render.android.expand.component.SelectionType
+ import java.lang.ref.WeakReference
+ import java.text.BreakIterator
+ import java.util.Locale
++import kotlin.math.max
++import kotlin.math.min
+ 
+ private const val INVALID_OFFSET = -1
+ 
+@@ -44,6 +51,18 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+     private var selectionStart = -1
+     private var selectionEnd = -1
+     internal val hasSelection: Boolean get() = 0 <= selectionStart && selectionStart < selectionEnd
++    private val customUnderlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.STROKE
++    }
++    private val customUnderlineClearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.FILL_AND_STROKE
++        strokeCap = Paint.Cap.ROUND
++        strokeJoin = Paint.Join.ROUND
++        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
++    }
++    private val customUnderlineSelectionPath = Path()
++    private val customUnderlineGlyphPath = Path()
++    private val customUnderlineGlyphBounds = RectF()
+ 
+     private val wordIterator by lazy(LazyThreadSafetyMode.NONE) {
+         WordIterator(textLayout.text, 0, textLayout.text.length, Locale.getDefault())
+@@ -68,8 +87,152 @@ class KRRichTextViewDrawer(val textLayout: Layout) {
+      */
+     fun draw(canvas: Canvas) {
+         textLayout.draw(canvas)
++        drawCustomUnderlines(canvas)
++    }
++
++    private fun drawCustomUnderlines(canvas: Canvas) {
++        val spanned = textLayout.text as? Spanned ?: return
++        val spans = spanned.getSpans(0, spanned.length, KRSkipInkCustomUnderlineSpan::class.java)
++        if (spans.isEmpty()) return
++
++        spans.forEach { span ->
++            val start = spanned.getSpanStart(span)
++            val end = spanned.getSpanEnd(span)
++            if (start < 0 || end <= start) return@forEach
++
++            val layer = canvas.saveLayer(
++                0f,
++                0f,
++                textLayout.width.toFloat(),
++                textLayout.height.toFloat(),
++                null,
++            )
++            val startLine = textLayout.getLineForOffset(start)
++            val endLine = textLayout.getLineForOffset((end - 1).coerceAtLeast(start))
++            for (line in startLine..endLine) {
++                val segmentStart = max(start, textLayout.getLineStart(line))
++                val segmentEnd = min(end, textLayout.getLineVisibleEnd(line))
++                if (segmentEnd <= segmentStart) continue
++
++                customUnderlineSelectionPath.reset()
++                textLayout.getSelectionPath(segmentStart, segmentEnd, customUnderlineSelectionPath)
++                if (customUnderlineSelectionPath.isEmpty) continue
++                val clipped = canvas.save()
++                val lineLeft = min(textLayout.getLineLeft(line), textLayout.getLineRight(line))
++                val lineRight = max(textLayout.getLineLeft(line), textLayout.getLineRight(line))
++                canvas.clipRect(
++                    lineLeft,
++                    textLayout.getLineTop(line).toFloat(),
++                    lineRight,
++                    textLayout.getLineBottom(line).toFloat(),
++                )
++                canvas.clipPath(customUnderlineSelectionPath)
++                val resolvedPaint = resolveTextPaint(spanned, segmentStart, span)
++                customUnderlinePaint.color = span.color ?: resolvedPaint.color
++                customUnderlinePaint.strokeWidth =
++                    span.thickness ?: defaultUnderlineThickness(resolvedPaint)
++                val underlineY =
++                    textLayout.getLineBaseline(line).toFloat() +
++                        (span.offset ?: underlinePosition(resolvedPaint))
++                canvas.drawLine(
++                    0f,
++                    underlineY,
++                    textLayout.width.toFloat(),
++                    underlineY,
++                    customUnderlinePaint,
++                )
++                clearGlyphInkGaps(
++                    canvas = canvas,
++                    spanned = spanned,
++                    start = segmentStart,
++                    end = segmentEnd,
++                    line = line,
++                    underlineY = underlineY,
++                    thickness = customUnderlinePaint.strokeWidth,
++                    marker = span,
++                )
++                canvas.restoreToCount(clipped)
++            }
++            canvas.restoreToCount(layer)
++        }
++    }
++
++    private fun resolveTextPaint(
++        spanned: Spanned,
++        offset: Int,
++        marker: KRSkipInkCustomUnderlineSpan,
++    ): TextPaint = TextPaint(textLayout.paint).also { resolved ->
++        val queryEnd = (offset + 1).coerceAtMost(spanned.length)
++        spanned.getSpans(offset, queryEnd, CharacterStyle::class.java).forEach { style ->
++            if (style !== marker) style.updateDrawState(resolved)
++        }
++    }
++
++    private fun clearGlyphInkGaps(
++        canvas: Canvas,
++        spanned: Spanned,
++        start: Int,
++        end: Int,
++        line: Int,
++        underlineY: Float,
++        thickness: Float,
++        marker: KRSkipInkCustomUnderlineSpan,
++    ) {
++        var offset = start
++        val halfThickness = thickness / 2f
++        // Clear the actual glyph outline plus a restrained halo. A full glyph-bounds rectangle
++        // makes descenders erase the underline across their complete advance; no halo makes the
++        // skip nearly invisible at production scale. One underline thickness keeps the gap
++        // legible while remaining shaped by the glyph rather than by its bounding box.
++        customUnderlineClearPaint.strokeWidth = max(1f, thickness)
++        while (offset < end) {
++            val codePoint = Character.codePointAt(spanned, offset)
++            val next = (offset + Character.charCount(codePoint)).coerceAtMost(end)
++            val glyph = spanned.subSequence(offset, next).toString()
++            val resolvedPaint = resolveTextPaint(spanned, offset, marker)
++            val advance = resolvedPaint.measureText(glyph)
++            val caretX = textLayout.getPrimaryHorizontal(offset)
++            val glyphX = if (textLayout.isRtlCharAt(offset)) caretX - advance else caretX
++            customUnderlineGlyphPath.reset()
++            resolvedPaint.getTextPath(
++                glyph,
++                0,
++                glyph.length,
++                glyphX,
++                textLayout.getLineBaseline(line).toFloat(),
++                customUnderlineGlyphPath,
++            )
++            if (!customUnderlineGlyphPath.isEmpty) {
++                customUnderlineGlyphPath.computeBounds(customUnderlineGlyphBounds, true)
++                val bandTop = underlineY - halfThickness
++                val bandBottom = underlineY + halfThickness
++                if (
++                    customUnderlineGlyphBounds.bottom >= bandTop &&
++                    customUnderlineGlyphBounds.top <= bandBottom
++                ) {
++                    canvas.drawPath(customUnderlineGlyphPath, customUnderlineClearPaint)
++                }
++            }
++            offset = next
++        }
+     }
+ 
++    private fun defaultUnderlineThickness(paint: Paint): Float =
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++            paint.underlineThickness.takeIf { it > 0f }
++                ?: (paint.textSize / 18f).coerceAtLeast(1f)
++        } else {
++            (paint.textSize / 18f).coerceAtLeast(1f)
++        }
++
++    private fun underlinePosition(paint: Paint): Float =
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++            paint.underlinePosition.takeIf { it > 0f }
++                ?: (paint.textSize / 9f).coerceAtLeast(1f)
++        } else {
++            (paint.textSize / 9f).coerceAtLeast(1f)
++        }
++
+     internal fun setSelectionByCoordinate(
+         x: Float,
+         y: Float,
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRCustomUnderlineSpanTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRCustomUnderlineSpanTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..c958df5083bfe981a50df009614c888b783f20f0
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/expand/component/text/KRCustomUnderlineSpanTest.kt
+@@ -0,0 +1,380 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ */
++
++package com.tencent.kuikly.core.render.android.expand.component.text
++
++import android.graphics.Bitmap
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.Path
++import android.graphics.Region
++import android.text.Layout
++import android.text.Spannable
++import android.text.SpannableString
++import android.text.StaticLayout
++import android.text.TextPaint
++import android.text.style.BackgroundColorSpan
++import android.text.style.ForegroundColorSpan
++import android.text.style.ReplacementSpan
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.annotation.Config
++import org.robolectric.annotation.GraphicsMode
++
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [34])
++@GraphicsMode(GraphicsMode.Mode.NATIVE)
++class KRCustomUnderlineSpanTest {
++
++    @Test
++    fun colorAndThicknessUseOneCustomUnderlineMechanism() {
++        val span = createKRCustomUnderlineSpan(
++            color = Color.BLUE,
++            thickness = 4f,
++            offset = null,
++        )
++
++        assertTrue(span is KRSkipInkCustomUnderlineSpan)
++        assertFalse(span is ReplacementSpan)
++        val marker = span as KRSkipInkCustomUnderlineSpan
++        val paint = testPaint().apply {
++            isUnderlineText = true
++            underlineColor = Color.RED
++            underlineThickness = 1f
++        }
++        marker.updateDrawState(paint)
++
++        assertFalse(paint.isUnderlineText)
++        assertEquals(0, paint.underlineColor)
++        assertEquals(0f, paint.underlineThickness)
++        assertTrue(renderBluePixelCount(marker) > 0)
++    }
++
++    @Test
++    fun colorOnlyUsesNonZeroPlatformDefaultThicknessAndActuallyDraws() {
++        val span = createKRCustomUnderlineSpan(
++            color = Color.BLUE,
++            thickness = null,
++            offset = null,
++        ) as KRSkipInkCustomUnderlineSpan
++        assertTrue(renderBluePixelCount(span) > 0)
++    }
++
++    @Test
++    fun customUnderlineRemainsBreakableAcrossRealStaticLayoutLines() {
++        val text = "a long decorated link label that must wrap across multiple lines"
++        val span = createKRCustomUnderlineSpan(
++            color = Color.BLUE,
++            thickness = 2f,
++            offset = null,
++        )
++        val spannable = SpannableString(text).apply {
++            setSpan(span, 0, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++        }
++
++        val layout = buildLayout(spannable, width = 120)
++
++        assertTrue(layout.lineCount > 1)
++        assertEquals(
++            0,
++            spannable.getSpans(0, spannable.length, ReplacementSpan::class.java).size,
++        )
++        assertEquals(
++            1,
++            spannable.getSpans(0, spannable.length, KRSkipInkCustomUnderlineSpan::class.java).size,
++        )
++        val bitmap = render(layout)
++        repeat(layout.lineCount) { line ->
++            val bluePixels =
++                (layout.getLineTop(line) until layout.getLineBottom(line)).sumOf { y ->
++                    (0 until bitmap.width).count { x -> bitmap.getPixel(x, y) == Color.BLUE }
++                }
++            assertTrue("line $line must contain a custom underline segment", bluePixels > 0)
++        }
++    }
++
++    @Test
++    fun resolvedCurrentColorAndGlyphOutlineProduceNarrowSkipInkGap() {
++        val span = createKRCustomUnderlineSpan(
++            color = null,
++            thickness = 4f,
++            offset = 2f,
++        ) as KRSkipInkCustomUnderlineSpan
++        val value = "aqa"
++        val text = styledText(span, value, foregroundColor = Color.BLUE)
++        val layout = buildLayout(text, width = 240)
++        val bitmap = render(layout)
++        val underlineRows = underlineBandRows(layout, line = 0, thickness = 4f, offset = 2f)
++        val glyphLeft = layout.getPrimaryHorizontal(1).toInt()
++        val glyphRight = layout.getPrimaryHorizontal(2).toInt()
++        val transparentGapPixels =
++            underlineRows.sumOf { y ->
++                (glyphLeft until glyphRight).count { x ->
++                    bitmap.getPixel(x, y) == Color.TRANSPARENT
++                }
++            }
++        val blueBeforeGap =
++            underlineRows.sumOf { y ->
++                (0 until glyphLeft).count { x -> bitmap.getPixel(x, y) == Color.BLUE }
++            }
++        val blueAfterGap =
++            underlineRows.sumOf { y ->
++                (glyphRight until bitmap.width).count { x -> bitmap.getPixel(x, y) == Color.BLUE }
++            }
++        val bluePixels = countPixels(bitmap, Color.BLUE)
++        val blackPixels =
++            countPixels(bitmap, Color.BLACK)
++
++        assertTrue(bluePixels > 2)
++        assertTrue("currentColor underline must exist before the q gap", blueBeforeGap > 0)
++        assertTrue("currentColor underline must exist after the q gap", blueAfterGap > 0)
++        assertTrue("same-color glyphs must leave a visible background skip gap", transparentGapPixels > 0)
++        assertEquals("null decoration color must inherit resolved link blue", 0, blackPixels)
++
++        val centerRow = layout.getLineBaseline(0) + 2
++        val centerRowGapWidth =
++            (glyphLeft until glyphRight).count { x ->
++                bitmap.getPixel(x, centerRow) == Color.TRANSPARENT
++            }
++        assertTrue("q descender must interrupt the center underline row", centerRowGapWidth > 0)
++        assertTrue("q skip halo must remain visible at production scale", centerRowGapWidth >= 2)
++        assertTrue(
++            "skip-ink must clear only the q outline, not its full advance",
++            centerRowGapWidth < glyphRight - glyphLeft,
++        )
++    }
++
++    @Test
++    fun softWrapLineEndGlyphUsesSameLinePositionForSkipGap() {
++        val span = createKRCustomUnderlineSpan(
++            color = null,
++            thickness = 4f,
++            offset = null,
++        ) as KRSkipInkCustomUnderlineSpan
++        val value = "aaaaagx"
++        val width = testPaint().measureText("aaaaag").toInt() + 1
++        val text = styledText(span, value, foregroundColor = Color.BLUE)
++        val layout = buildLayout(text, width = width)
++        val bitmap = render(layout)
++
++        assertEquals(6, layout.getLineVisibleEnd(0))
++        assertEquals('g', value[layout.getLineVisibleEnd(0) - 1])
++        val glyphLeft = layout.getPrimaryHorizontal(5).toInt()
++        val glyphRight = (glyphLeft + testPaint().measureText("g")).toInt()
++        val gapPixels =
++            underlineBandRows(layout, line = 0, thickness = 4f).sumOf { y ->
++                (glyphLeft until glyphRight).count { x ->
++                    bitmap.getPixel(x, y) == Color.TRANSPARENT
++                }
++            }
++        val trailingBlue =
++            underlineBandRows(layout, line = 0, thickness = 4f).sumOf { y ->
++                (layout.getLineRight(0).toInt() until bitmap.width).count { x ->
++                    bitmap.getPixel(x, y) == Color.BLUE
++                }
++            }
++
++        assertTrue("soft-wrap line-end g must punch a gap at its real x", gapPixels > 0)
++        assertEquals("soft-wrap line must not underline unused trailing width", 0, trailingBlue)
++    }
++
++    @Test
++    fun backgroundColorSpanDoesNotCoverOverlayUnderline() {
++        val span = createKRCustomUnderlineSpan(
++            color = null,
++            thickness = 4f,
++            offset = null,
++        ) as KRSkipInkCustomUnderlineSpan
++        val bitmap =
++            render(
++                span = span,
++                value = "link",
++                foregroundColor = Color.BLUE,
++                backgroundColor = Color.YELLOW,
++            )
++
++        assertTrue(countPixels(bitmap, Color.BLUE) > 0)
++    }
++
++    @Test
++    fun hardNewlineDoesNotUnderlineTrailingBlankArea() {
++        val span = createKRCustomUnderlineSpan(
++            color = Color.BLUE,
++            thickness = 4f,
++            offset = null,
++        ) as KRSkipInkCustomUnderlineSpan
++        val value = "abc\nx"
++        val text = styledText(span, value)
++        val layout = buildLayout(text, width = 240)
++        val bitmap = render(layout)
++        val actualEnd = testPaint().measureText("abc").toInt()
++        val trailingBlue =
++            underlineBandRows(layout, line = 0, thickness = 4f).sumOf { y ->
++                (actualEnd until bitmap.width).count { x -> bitmap.getPixel(x, y) == Color.BLUE }
++            }
++
++        assertEquals(0, trailingBlue)
++    }
++
++    @Test
++    fun mixedBidiUnderlineNeverEscapesLayoutSelectionGeometry() {
++        val value = "אב12cdEF"
++        val start = 1
++        val end = 7
++        val span = createKRCustomUnderlineSpan(
++            color = Color.BLUE,
++            thickness = 4f,
++            offset = null,
++        ) as KRSkipInkCustomUnderlineSpan
++        val text = SpannableString(value).apply {
++            setSpan(span, start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++        }
++        val layout = buildLayout(text, width = 240)
++        val bitmap = render(layout)
++        val selectionPath = Path().also { layout.getSelectionPath(start, end, it) }
++        val selectionRegion = Region().apply {
++            setPath(selectionPath, Region(0, 0, bitmap.width, bitmap.height))
++        }
++        var bluePixels = 0
++
++        for (y in 0 until bitmap.height) {
++            for (x in 0 until bitmap.width) {
++                if (bitmap.getPixel(x, y) == Color.BLUE) {
++                    bluePixels++
++                    assertTrue("blue pixel escaped bidi selection at $x,$y", selectionRegion.contains(x, y))
++                }
++            }
++        }
++        assertTrue("mixed bidi range must draw at least one underline pixel", bluePixels > 0)
++    }
++
++    @Test
++    @Config(sdk = [28])
++    fun api21To28DrawsExactCustomUnderlineWithoutNonSdkPaintFields() {
++        val span = createKRCustomUnderlineSpan(
++            color = Color.BLUE,
++            thickness = 4f,
++            offset = null,
++        ) as KRSkipInkCustomUnderlineSpan
++
++        assertTrue(renderBluePixelCount(span) > 0)
++    }
++
++    @Test
++    fun explicitOffsetUsesWrapSafeDrawerPath() {
++        val span = createKRCustomUnderlineSpan(
++            color = Color.BLUE,
++            thickness = 2f,
++            offset = 3f,
++        )
++
++        assertTrue(span is KRSkipInkCustomUnderlineSpan)
++        assertFalse(span is ReplacementSpan)
++        val marker = span as KRSkipInkCustomUnderlineSpan
++        assertEquals(3f, marker.offset)
++
++        val text = styledText(marker, "a long link that wraps over several rows")
++        val layout = buildLayout(text, width = 120)
++        val bitmap = render(layout)
++        assertTrue(layout.lineCount > 1)
++        repeat(layout.lineCount) { line ->
++            val underlineRows = underlineBandRows(layout, line, thickness = 2f, offset = 3f)
++            val bluePixels =
++                underlineRows.sumOf { y ->
++                    (0 until bitmap.width).count { x -> bitmap.getPixel(x, y) == Color.BLUE }
++                }
++            assertTrue("explicit-offset underline must remain on wrapped line $line", bluePixels > 0)
++        }
++    }
++
++    private fun renderBluePixelCount(span: KRSkipInkCustomUnderlineSpan): Int {
++        val bitmap = render(span, "Underline")
++        var bluePixels = 0
++        for (y in 0 until bitmap.height) {
++            for (x in 0 until bitmap.width) {
++                if (bitmap.getPixel(x, y) == Color.BLUE) bluePixels++
++            }
++        }
++        return bluePixels
++    }
++
++    private fun render(
++        span: KRSkipInkCustomUnderlineSpan,
++        value: String,
++        foregroundColor: Int? = null,
++        backgroundColor: Int? = null,
++    ): Bitmap {
++        val text = styledText(span, value, foregroundColor, backgroundColor)
++        val layout = buildLayout(text, width = 240)
++        return render(layout)
++    }
++
++    private fun styledText(
++        span: KRSkipInkCustomUnderlineSpan,
++        value: String,
++        foregroundColor: Int? = null,
++        backgroundColor: Int? = null,
++    ): SpannableString =
++        SpannableString(value).apply {
++            setSpan(span, 0, length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
++            if (foregroundColor != null) {
++                setSpan(
++                    ForegroundColorSpan(foregroundColor),
++                    0,
++                    length,
++                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++                )
++            }
++            if (backgroundColor != null) {
++                setSpan(
++                    BackgroundColorSpan(backgroundColor),
++                    0,
++                    length,
++                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
++                )
++            }
++        }
++
++    private fun render(layout: StaticLayout): Bitmap {
++        val bitmap = Bitmap.createBitmap(layout.width, maxOf(96, layout.height), Bitmap.Config.ARGB_8888)
++        KRRichTextViewDrawer(layout).draw(Canvas(bitmap))
++        return bitmap
++    }
++
++    private fun underlineBandRows(
++        layout: StaticLayout,
++        line: Int,
++        thickness: Float,
++        offset: Float = testPaint().underlinePosition,
++    ): IntRange {
++        val center = layout.getLineBaseline(line) + offset
++        return (center - thickness / 2f).toInt()..(center + thickness / 2f).toInt()
++    }
++
++    private fun countPixels(bitmap: Bitmap, color: Int): Int =
++        (0 until bitmap.height).sumOf { y ->
++            (0 until bitmap.width).count { x -> bitmap.getPixel(x, y) == color }
++        }
++
++    private fun buildLayout(text: CharSequence, width: Int): StaticLayout =
++        StaticLayout.Builder
++            .obtain(text, 0, text.length, testPaint(), width)
++            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
++            .setIncludePad(false)
++            .build()
++
++    private fun testPaint(): TextPaint =
++        TextPaint().apply {
++            color = Color.BLACK
++            textSize = 40f
++            isAntiAlias = false
++        }
++}
+diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.h b/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
+index 3cf3757f8add61b03e8b0d29d0043a05d4b5d9bb..49416f1ad487564826fad0f544d0fc1908967ac3 100644
+--- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
++++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
+@@ -52,6 +52,9 @@ extern NSString *const KuiklyIndexAttributeName;
+ @property (nonatomic, copy) NSString *cssGradient;
+ @property (nonatomic, assign) CGFloat letterSpacing;
+ @property (nonatomic, assign) KRTextDecorationLineType textDecoration;
++@property (nonatomic, strong) UIColor *textDecorationColor;
++@property (nonatomic, strong) NSNumber *textDecorationThickness;
++@property (nonatomic, strong) NSNumber *textDecorationOffset;
+ @property (nonatomic, assign) NSTextAlignment textAlign;
+ @property (nonatomic, strong) NSNumber *lineSpacing;
+ @property (nonatomic, strong) NSNumber *lineHeight;
+diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
+index 8f338753d0bc40196e8a7f10612ab31df4a1103f..4203d6fd4d4b5d68999f5660286409c0771e5c96 100644
+--- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
++++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
+@@ -331,6 +331,9 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+ 
+         CGFloat letterSpacing = [KRConvertUtil CGFloat:propStyle[@"letterSpacing"]];
+         KRTextDecorationLineType textDecoration = [KRConvertUtil KRTextDecorationLineType:propStyle[@"textDecoration"]];
++        UIColor *textDecorationColor = [UIView css_color:propStyle[@"textDecorationColor"]];
++        NSNumber *textDecorationThickness = propStyle[@"textDecorationThickness"] ? @([KRConvertUtil CGFloat:propStyle[@"textDecorationThickness"]]) : nil;
++        NSNumber *textDecorationOffset = propStyle[@"textDecorationOffset"] ? @([KRConvertUtil CGFloat:propStyle[@"textDecorationOffset"]]) : nil;
+         NSTextAlignment textAlign = [KRConvertUtil NSTextAlignment:propStyle[@"textAlign"]];
+         NSNumber *lineHeight = nil;
+         NSNumber *lineSpacing = nil;
+@@ -380,6 +383,9 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+         spanAttrs.cssGradient = cssGricent;
+         spanAttrs.letterSpacing = letterSpacing;
+         spanAttrs.textDecoration = textDecoration;
++        spanAttrs.textDecorationColor = textDecorationColor;
++        spanAttrs.textDecorationThickness = textDecorationThickness;
++        spanAttrs.textDecorationOffset = textDecorationOffset;
+         spanAttrs.textAlign = textAlign;
+         spanAttrs.lineSpacing = lineSpacing;
+         spanAttrs.lineHeight = lineHeight;
+@@ -456,7 +462,11 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+     }
+ 
+     if (attrs.textDecoration == KRTextDecorationLineTypeUnderline) {
+-        [attributedString addAttribute:NSUnderlineStyleAttributeName value:@(NSUnderlineStyleSingle) range:range];
++        NSUnderlineStyle underlineStyle = attrs.textDecorationThickness ? NSUnderlineStyleThick : NSUnderlineStyleSingle;
++        [attributedString addAttribute:NSUnderlineStyleAttributeName value:@(underlineStyle) range:range];
++        if (attrs.textDecorationColor) {
++            [attributedString addAttribute:NSUnderlineColorAttributeName value:attrs.textDecorationColor range:range];
++        }
+     }
+     if (attrs.textDecoration == KRTextDecorationLineTypeStrikethrough) {
+         [attributedString addAttribute:NSStrikethroughStyleAttributeName value:@(NSUnderlineStyleSingle) range:range];
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRParagraph.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRParagraph.cpp
+index 96666cb17c715e61753338724f766a1883d9f166..728fd02b9773f4bb358daacc220eb12031bebda0 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRParagraph.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRParagraph.cpp
+@@ -269,6 +269,9 @@ void KRParagraph::AddSpanToStyledString(const KRRenderValue::Map &spanMap, ArkUI
+     auto lineSpacing = GetKTValue("lineSpacing", spanMap, props_)->toFloat() / (fontSize / dpi); // 行间距比例
+     auto textAlign = kuikly::util::ConvertToTextAlign(GetKTValue("textAlign", spanMap, props_)->toString());
+     auto textDecoration = kuikly::util::ConvertToTextDecoration(GetKTValue("textDecoration", spanMap, props_)->toString());
++    auto textDecorationColorStr = GetKTValue("textDecorationColor", spanMap, props_)->toString();
++    auto textDecorationColor = textDecorationColorStr.length() ? kuikly::util::ConvertToHexColor(textDecorationColorStr) : color;
++    auto textDecorationThickness = GetKTValue("textDecorationThickness", spanMap, props_)->toFloat();
+     auto fontStyle = kuikly::util::ConvertToFontStyle(GetKTValue("fontStyle", spanMap, props_)->toString());
+     auto letterSpacing = GetKTValue("letterSpacing", spanMap, props_)->toDouble();
+     auto textShadowStr = GetKTValue("textShadow", spanMap, props_)->toString();
+@@ -320,6 +323,15 @@ void KRParagraph::AddSpanToStyledString(const KRRenderValue::Map &spanMap, ArkUI
+     OH_Drawing_SetTextStyleFontWeight(txtStyle, fontWeight);
+     OH_Drawing_SetTextStyleBaseLine(txtStyle, TEXT_BASELINE_ALPHABETIC);
+     OH_Drawing_SetTextStyleDecoration(txtStyle, textDecoration);
++    if (textDecoration != TEXT_DECORATION_NONE) {
++        if (textDecorationColorStr.length()) {
++            OH_Drawing_SetTextStyleDecorationColor(txtStyle, textDecorationColor);
++        }
++        if (textDecorationThickness > 0 && fontSize > 0) {
++            OH_Drawing_SetTextStyleDecorationThicknessScale(
++                txtStyle, kuikly::util::ConvertToTextDecorationThicknessScale(textDecorationThickness * dpi, fontSize));
++        }
++    }
+     OH_Drawing_SetTextStyleFontStyle(txtStyle, fontStyle);
+     if (letterSpacing > 0) {
+         OH_Drawing_SetTextStyleLetterSpacing(txtStyle, letterSpacing * dpi);
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
+index 428457735e3581c5245330546fa4e4213b4da89d..2523b3bde97b31b991a2ab7c18f1f13b7c0cd59f 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
+@@ -455,6 +455,9 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+         auto lineSpacing = GetKRValue("lineSpacing", spanMap, props_)->toFloat() / (fontSize / dpi);  // 行间距比例
+         auto textAlign = kuikly::util::ConvertToTextAlign(GetKRValue("textAlign", spanMap, props_)->toString());
+         auto textDecoration = kuikly::util::ConvertToTextDecoration(GetKRValue("textDecoration", spanMap, props_)->toString());
++        auto textDecorationColorStr = GetKRValue("textDecorationColor", spanMap, props_)->toString();
++        auto textDecorationColor = textDecorationColorStr.length() ? kuikly::util::ConvertToHexColor(textDecorationColorStr) : color;
++        auto textDecorationThickness = GetKRValue("textDecorationThickness", spanMap, props_)->toFloat();
+         auto fontStyle = kuikly::util::ConvertToFontStyle(GetKRValue("fontStyle", spanMap, props_)->toString());
+         auto letterSpacing = GetKRValue("letterSpacing", spanMap, props_)->toDouble();
+         auto textShadowStr = GetKRValue("textShadow", spanMap, props_)->toString();
+@@ -539,6 +542,15 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+         OH_Drawing_SetTextStyleFontWeight(txtStyle, fontWeight);
+         OH_Drawing_SetTextStyleBaseLine(txtStyle, TEXT_BASELINE_ALPHABETIC);
+         OH_Drawing_SetTextStyleDecoration(txtStyle, textDecoration);
++        if (textDecoration != TEXT_DECORATION_NONE) {
++            if (textDecorationColorStr.length()) {
++                OH_Drawing_SetTextStyleDecorationColor(txtStyle, textDecorationColor);
++            }
++            if (textDecorationThickness > 0 && fontSize > 0) {
++                OH_Drawing_SetTextStyleDecorationThicknessScale(
++                    txtStyle, kuikly::util::ConvertToTextDecorationThicknessScale(textDecorationThickness * dpi, fontSize));
++            }
++        }
+         OH_Drawing_SetTextStyleFontStyle(txtStyle, fontStyle);
+         if (letterSpacing > 0) {
+             OH_Drawing_SetTextStyleLetterSpacing(txtStyle, letterSpacing * dpi);
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp b/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp
+index edd022c8245798e0b94a7207f32ceefb1d92e65b..54836258fc033904f2d3cff96eb69adda001076d 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.cpp
+@@ -130,6 +130,18 @@ OH_Drawing_TextDecoration ConvertToTextDecoration(const std::string &textDecorat
+     return TEXT_DECORATION_NONE;
+ }
+ 
++double ConvertToTextDecorationThicknessScale(double thicknessPx, double fontSizePx) {
++    // OH_Drawing_SetTextStyleDecorationThicknessScale takes a MULTIPLIER, not
++    // an absolute width. The OHOS text engine paints a decoration line as
++    //   strokePx = fontSizePx * UNDER_LINE_THICKNESS_RATIO * scale
++    // with UNDER_LINE_THICKNESS_RATIO = 1/18 (skparagraph Decorations under
++    // OHOS_SUPPORT; identical on 5.0.x-Release and m133). The scale must
++    // divide out that base; dividing by fontSize alone renders thickness/18,
++    // which collapses any sane design value to a sub-pixel hairline.
++    constexpr double kEngineUnderlineThicknessRatio = 1.0 / 18.0;
++    return thicknessPx / (fontSizePx * kEngineUnderlineThicknessRatio);
++}
++
+ OH_Drawing_EllipsisModal ConvertToTextBreakMode(const std::string &breakeMode) {
+     if (breakeMode == "middle") {
+         return ELLIPSIS_MODAL_MIDDLE;
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.h b/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.h
+index eae428db7df28b4ee9178eb7880d179186e80b9c..07cd1c302f5f16fad30c6d9d4ce7025f302a5c94 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.h
++++ b/core-render-ohos/src/main/cpp/libohos_render/utils/KRConvertUtil.h
+@@ -42,6 +42,8 @@ OH_Drawing_TextAlign ConvertToTextAlign(const std::string &textAlign);
+ 
+ OH_Drawing_TextDecoration ConvertToTextDecoration(const std::string &textDecoration);
+ 
++double ConvertToTextDecorationThicknessScale(double thicknessPx, double fontSizePx);
++
+ OH_Drawing_EllipsisModal ConvertToTextBreakMode(const std::string &breakeMode);
+ 
+ OH_Drawing_FontStyle ConvertToFontStyle(const std::string &fontStyle);
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
+index dbe633fc73fa7eadd0b71abcaf1bbcfe1e7054bd..86dbe968c09c05a030eaf32375657a53a42ce981 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/RichTextView.kt
+@@ -437,6 +437,21 @@ open class TextSpan : TextAttr(), ISpan {
+     private var clickHandlerFn: ((ClickParams) -> Unit)? = null
+     private var longPressHandlerFn: ((LongPressParams) -> Unit)? = null
+ 
++    override fun textDecorationColor(color: Color): TextSpan {
++        TextConst.TEXT_DECORATION_COLOR with color.toString()
++        return this
++    }
++
++    override fun textDecorationThickness(thickness: Float): TextSpan {
++        TextConst.TEXT_DECORATION_THICKNESS with thickness
++        return this
++    }
++
++    override fun textDecorationOffset(offset: Float): TextSpan {
++        TextConst.TEXT_DECORATION_OFFSET with offset
++        return this
++    }
++
+     fun click(handler: (ClickParams) -> Unit) {
+         clickHandlerFn = handler
+     }
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt
+index 7d71026d1a792c568be6c4b58eca4bd01a65590a..d46718f681c731c96ccfffce3ddb107144d3323f 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/TextView.kt
+@@ -390,6 +390,21 @@ open class TextAttr : Attr() {
+         return this
+     }
+ 
++    open fun textDecorationColor(color: Color): TextAttr {
++        TextConst.TEXT_DECORATION_COLOR with color.toString()
++        return this
++    }
++
++    open fun textDecorationThickness(thickness: Float): TextAttr {
++        TextConst.TEXT_DECORATION_THICKNESS with thickness
++        return this
++    }
++
++    open fun textDecorationOffset(offset: Float): TextAttr {
++        TextConst.TEXT_DECORATION_OFFSET with offset
++        return this
++    }
++
+     open fun textAlignCenter(): TextAttr {
+         TextConst.TEXT_ALIGN with TextAlign.CENTER.value
+         return this
+@@ -538,6 +553,9 @@ object TextConst {
+     const val FONT_FAMILY = "fontFamily"
+     const val TEXT_OVERFLOW = "lineBreakMode"
+     const val TEXT_DECORATION = "textDecoration"
++    const val TEXT_DECORATION_COLOR = "textDecorationColor"
++    const val TEXT_DECORATION_THICKNESS = "textDecorationThickness"
++    const val TEXT_DECORATION_OFFSET = "textDecorationOffset"
+     const val TEXT_COLOR = "color"
+     const val TINT_COLOR = "tintColor"
+     const val LINES = "numberOfLines"

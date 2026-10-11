@@ -1,0 +1,109 @@
+name: Demo OHOS HAP
+
+# Builds the OHOS demo app (src/ohosApp) from the materialized patched source
+# so a tester can install it on an emulator and open a demo page by name.
+# Mirrors the upstream 2.0_ohos_demo_build.sh steps inside the pinned
+# HarmonyOS CI container that the other OHOS jobs already use: link the demo
+# Kotlin/Native shared library, copy it plus its header into the entry
+# module, then let hvigor assemble the entry HAP. The HAP is unsigned; the
+# tester signs it locally before install.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_mode:
+        description: "hvigor buildMode"
+        required: false
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+
+permissions:
+  contents: read
+
+jobs:
+  demo-ohos-hap:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/bytemain/harmony-next-pipeline-docker/harmonyos-ci-image:v6.1.1.280-android.1
+    timeout-minutes: 90
+    env:
+      OHOS_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk/default/openharmony
+      DEVECO_SDK_HOME: /opt/harmonyos-tools/command-line-tools/sdk
+      KUIKLY_KOTLIN_VERSION: 2.0.21-KBA-010
+      KUIKLY_AGP_VERSION: 7.4.2
+      # Dispatch input reaches shell only through this variable, never by
+      # inline interpolation; the choice type already limits it, the check
+      # below makes that a hard gate inside the job as well.
+      BUILD_MODE: ${{ inputs.build_mode }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trust the mounted workspace inside the job container
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "Kuikly CI"
+          git config --global user.email "kuikly-ci@users.noreply.github.com"
+      - name: Validate the build mode input
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$BUILD_MODE" in
+            debug|release) echo "build_mode=$BUILD_MODE" ;;
+            *) echo "::error::build_mode must be debug or release" >&2; exit 1 ;;
+          esac
+      - uses: ./.github/actions/sync
+        id: sync
+      - name: Link the demo Kotlin/Native shared library for ohosArm64
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same wrapper swap as upstream 2.0_ohos_demo_build.sh: the OHOS
+          # Kotlin plugin line needs Gradle 8.0.
+          cp gradle/wrapper/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.properties.bak
+          sed -i 's#distributionUrl=.*$#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.0-bin.zip#' gradle/wrapper/gradle-wrapper.properties
+          ./gradlew -c settings.2.0.ohos.gradle.kts :demo:linkSharedDebugSharedOhosArm64 --no-daemon --stacktrace
+          mv gradle/wrapper/gradle-wrapper.properties.bak gradle/wrapper/gradle-wrapper.properties
+          out=demo/build/bin/ohosArm64/sharedDebugShared
+          test -s "$out/libshared.so" || { echo "libshared.so not produced" >&2; exit 1; }
+          mkdir -p ohosApp/entry/libs/arm64-v8a ohosApp/entry/src/main/cpp/thirdparty/biz_entry
+          cp "$out/libshared.so" ohosApp/entry/libs/arm64-v8a/libshared.so
+          cp "$out/libshared_api.h" ohosApp/entry/src/main/cpp/thirdparty/biz_entry/libshared_api.h
+      - name: Assemble the entry HAP
+        working-directory: src/ohosApp
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$OHOS_SDK_HOME/native/build-tools/cmake/bin:$OHOS_SDK_HOME/native/llvm/bin:$PATH"
+          ohpm install --all
+          hvigorw --sync -p product=default --analyze=normal --parallel --no-daemon
+          hvigorw assembleHap \
+            --mode module \
+            -p module=entry@default \
+            -p product=default \
+            -p "buildMode=$BUILD_MODE" \
+            --analyze=normal \
+            --parallel \
+            --no-daemon
+      - name: Collect the HAP with its checksum and source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$GITHUB_WORKSPACE/build/demo-ohos-hap"
+          mkdir -p "$out"
+          hap="$(find src/ohosApp/entry/build -name '*.hap' | head -n1)"
+          test -n "$hap" || { echo "no .hap produced" >&2; exit 1; }
+          cp "$hap" "$out/"
+          (cd "$out" && sha256sum *.hap > SHA256SUMS)
+          {
+            echo "patches_sha=${{ github.sha }}"
+            echo "source_tree=${{ steps.sync.outputs.tree }}"
+            echo "build_mode=$BUILD_MODE"
+          } > "$out/IDENTITY"
+          cat "$out/SHA256SUMS" "$out/IDENTITY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: demo-ohos-hap-${{ github.sha }}
+          path: build/demo-ohos-hap

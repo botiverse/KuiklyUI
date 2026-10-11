@@ -1,0 +1,307 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:05:03 +0000
+Subject: fix(compose): preserve draw dispatch semantics
+
+DrawModifierNode's view-aware draw(view) called drawContent() directly, so
+nodes that override only ContentDrawScope.draw() (drawWithContent,
+LazyLayoutItemAnimator, ...) were skipped. Route draw(view) through draw(),
+whose default now draws the content, matching upstream Compose semantics.
+
+Fork-Patch: compose-preserve-draw-dispatch-semantics
+Origin: 155d8737
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/DrawModifierNode.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/DrawModifierNode.kt
+index de814536bcdd195057570c26eab243ac35a41954..6286cab3e0d57aa3106f8c5aa2d6ebe111dd6e13 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/DrawModifierNode.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/DrawModifierNode.kt
+@@ -32,10 +32,12 @@ import com.tencent.kuikly.core.base.DeclarativeBaseView
+  * @sample com.tencent.kuikly.compose.ui.samples.DrawModifierNodeSample
+  */
+ interface DrawModifierNode : DelegatableNode {
+-    fun ContentDrawScope.draw() { }
++    fun ContentDrawScope.draw() {
++        drawContent()
++    }
+     fun onMeasureResultChanged() {}
+     fun ContentDrawScope.draw(view: DeclarativeBaseView<*, *>?) {
+-        drawContent()
++        draw()
+     }
+ }
+ 
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/node/DrawModifierNodeViewDispatchTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/node/DrawModifierNodeViewDispatchTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b75f56ef2fd1b2c3874ef31a9b7f9d64b48732f0
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/ui/node/DrawModifierNodeViewDispatchTest.kt
+@@ -0,0 +1,97 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.ui.node
++
++import com.tencent.kuikly.compose.ui.Modifier
++import com.tencent.kuikly.compose.ui.graphics.drawscope.CanvasDrawScope
++import com.tencent.kuikly.compose.ui.graphics.drawscope.ContentDrawScope
++import com.tencent.kuikly.compose.ui.graphics.drawscope.DrawScope
++import com.tencent.kuikly.core.base.DeclarativeBaseView
++import com.tencent.kuikly.core.views.DivView
++import kotlin.test.Test
++import kotlin.test.assertEquals
++
++class DrawModifierNodeViewDispatchTest {
++
++    @Test
++    fun ordinaryOverrideHasEquivalentOrdinaryAndViewAwareDispatch() {
++        var ordinaryDraws = 0
++        val node =
++            object : Modifier.Node(), DrawModifierNode {
++                override fun ContentDrawScope.draw() {
++                    ordinaryDraws += 1
++                }
++            }
++
++        with(RecordingContentDrawScope()) {
++            with(node) {
++                draw()
++                draw(DivView())
++            }
++        }
++
++        assertEquals(2, ordinaryDraws)
++    }
++
++    @Test
++    fun bareNodePreservesContentInViewAwareDispatch() {
++        val node = object : Modifier.Node(), DrawModifierNode {}
++        val drawScope = RecordingContentDrawScope()
++
++        with(drawScope) {
++            with(node) {
++                draw(DivView())
++            }
++        }
++
++        assertEquals(1, drawScope.contentDraws)
++    }
++
++    @Test
++    fun explicitViewAwareOverrideStillTakesPrecedence() {
++        var ordinaryDraws = 0
++        var viewAwareDraws = 0
++        val node =
++            object : Modifier.Node(), DrawModifierNode {
++                override fun ContentDrawScope.draw() {
++                    ordinaryDraws += 1
++                }
++
++                override fun ContentDrawScope.draw(view: DeclarativeBaseView<*, *>?) {
++                    viewAwareDraws += 1
++                }
++            }
++
++        with(RecordingContentDrawScope()) {
++            with(node) {
++                draw(DivView())
++            }
++        }
++
++        assertEquals(0, ordinaryDraws)
++        assertEquals(1, viewAwareDraws)
++    }
++
++    private class RecordingContentDrawScope :
++        ContentDrawScope,
++        DrawScope by CanvasDrawScope() {
++        var contentDraws = 0
++
++        override fun drawContent() {
++            contentDraws += 1
++        }
++    }
++}
+diff --git a/tools/check-draw-modifier-view-dispatch.py b/tools/check-draw-modifier-view-dispatch.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..02714c6f874b26477baa0c536c19f802c7f0aeef
+--- /dev/null
++++ b/tools/check-draw-modifier-view-dispatch.py
+@@ -0,0 +1,164 @@
++#!/usr/bin/env python3
++"""Keep LayoutNodeDrawScope on the view-aware DrawModifierNode entry point."""
++
++from __future__ import annotations
++
++import argparse
++import re
++from pathlib import Path
++
++
++ROOT = Path(__file__).resolve().parents[1]
++SOURCE_PATH = ROOT / (
++    "compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/node/"
++    "LayoutNodeDrawScope.kt"
++)
++
++
++def mask_non_code(source: str) -> str:
++    masked = list(source)
++    index = 0
++    state = "code"
++    depth = 0
++    escaped = False
++    while index < len(source):
++        if state == "code":
++            if source.startswith("//", index):
++                state = "line-comment"
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith("/*", index):
++                state = "block-comment"
++                depth = 1
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith('"""', index):
++                state = "triple-string"
++                masked[index : index + 3] = "   "
++                index += 3
++                continue
++            if source[index] == '"':
++                state = "string"
++                escaped = False
++                masked[index] = " "
++            elif source[index] == "'":
++                state = "char"
++                escaped = False
++                masked[index] = " "
++        elif state == "line-comment":
++            if source[index] == "\n":
++                state = "code"
++            else:
++                masked[index] = " "
++        elif state == "block-comment":
++            if source.startswith("/*", index):
++                depth += 1
++                masked[index : index + 2] = "  "
++                index += 2
++                continue
++            if source.startswith("*/", index):
++                depth -= 1
++                masked[index : index + 2] = "  "
++                index += 2
++                if depth == 0:
++                    state = "code"
++                continue
++            if source[index] != "\n":
++                masked[index] = " "
++        elif state == "triple-string":
++            if source.startswith('"""', index):
++                masked[index : index + 3] = "   "
++                index += 3
++                state = "code"
++                continue
++            if source[index] != "\n":
++                masked[index] = " "
++        else:
++            if source[index] != "\n":
++                masked[index] = " "
++            if escaped:
++                escaped = False
++            elif source[index] == "\\":
++                escaped = True
++            elif state == "string" and source[index] == '"':
++                state = "code"
++            elif state == "char" and source[index] == "'":
++                state = "code"
++        index += 1
++    return "".join(masked)
++
++
++def matching_brace(source: str, opening: int) -> int:
++    depth = 0
++    for index in range(opening, len(source)):
++        if source[index] == "{":
++            depth += 1
++        elif source[index] == "}":
++            depth -= 1
++            if depth == 0:
++                return index
++    raise AssertionError("unterminated drawDirect block")
++
++
++def draw_direct_body(source: str) -> str:
++    clean = mask_non_code(source)
++    matches = list(re.finditer(r"\binternal\s+fun\s+drawDirect\s*\(", clean))
++    if len(matches) != 1:
++        raise AssertionError(f"expected one drawDirect function, found {len(matches)}")
++    opening = clean.find("{", matches[0].end())
++    if opening < 0:
++        raise AssertionError("drawDirect has no body")
++    return clean[opening : matching_brace(clean, opening) + 1]
++
++
++def check_source(source: str) -> None:
++    compact = re.sub(r"\s+", "", draw_direct_body(source))
++    view_dispatch = "with(drawNode){this@LayoutNodeDrawScope.draw(kView)}"
++    ordinary_dispatch = "with(drawNode){this@LayoutNodeDrawScope.draw()}"
++    if compact.count(view_dispatch) != 1:
++        raise AssertionError("drawDirect must invoke exactly one view-aware draw(kView)")
++    if ordinary_dispatch in compact:
++        raise AssertionError("drawDirect must not bypass view-aware dispatch with draw()")
++
++
++def self_test() -> None:
++    valid = """
++        internal fun drawDirect(kView: Any?) {
++            with(drawNode) {
++                this@LayoutNodeDrawScope.draw(kView)
++            }
++        }
++    """
++    check_source(valid)
++    for label, mutant in (
++        ("ordinary dispatch", valid.replace("draw(kView)", "draw()")),
++        ("removed dispatch", valid.replace("this@LayoutNodeDrawScope.draw(kView)", "Unit")),
++        (
++            "comment-only dispatch",
++            valid.replace(
++                "this@LayoutNodeDrawScope.draw(kView)",
++                "// this@LayoutNodeDrawScope.draw(kView)\nUnit",
++            ),
++        ),
++    ):
++        try:
++            check_source(mutant)
++        except AssertionError:
++            continue
++        raise AssertionError(f"self-test failed to reject {label}")
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--self-test", action="store_true")
++    args = parser.parse_args()
++    if args.self_test:
++        self_test()
++    check_source(SOURCE_PATH.read_text(encoding="utf-8"))
++    print("draw_modifier_view_dispatch=pass")
++
++
++if __name__ == "__main__":
++    main()

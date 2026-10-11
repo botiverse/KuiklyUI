@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:13:24 +0000
+Subject: feat(richtext): render SpanStyle background colors on all platforms
+
+Compose SpanStyle.background was dropped when lowering AnnotatedString to
+core RichText spans. Serialize it as the span backgroundColor prop and paint
+it natively: BackgroundColorSpan on Android, NSBackgroundColorAttributeName
+on iOS, and a text-style background brush on OHOS.
+
+Fork-Patch: richtext-span-background-color
+Origin: a63655b1 5405fa98
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+index c2c6f5d86eed8558ce5d100a99e8a4fc7b53c986..821f4011629456f20f97d1a2c77cc23e80db17bd 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/text/KuiklyTextExtension.kt
+@@ -438,6 +438,9 @@ internal fun TextSpan.applySpanStyle(spanStyle: SpanStyle, density: Density) {
+     applyShadow(spanStyle.shadow)
+ 
+     applyStyleColor(spanStyle)
++    if (spanStyle.background.isSpecified) {
++        setProp(Attr.StyleConst.BACKGROUND_COLOR, spanStyle.background.toKuiklyColor().toString())
++    }
+     if (spanStyle.brush is SolidColor) {
+         color((spanStyle.brush as SolidColor).value.toKuiklyColor())
+     } else if (spanStyle.brush is LinearGradient) {
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+index 9dc6da8ad0a23731346b33bfb5eec9a1658ea0a6..82f693ebee4b773f293967cc1585e89757d297ac 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/expand/component/text/KRRichTextBuilder.kt
+@@ -27,6 +27,7 @@ import android.text.Spannable
+ import android.text.SpannableStringBuilder
+ import android.text.TextPaint
+ import android.text.style.AbsoluteSizeSpan
++import android.text.style.BackgroundColorSpan
+ import android.text.style.CharacterStyle
+ import android.text.style.ForegroundColorSpan
+ import android.text.style.LeadingMarginSpan
+@@ -194,6 +195,9 @@ class KRRichTextBuilder(private val kuiklyContext: IKuiklyRenderContext?) {
+ 
+         // 修饰相关
+         textSpans.add(ForegroundColorSpan(spanProps.color))
++        if (spanProps.backgroundColor != Color.TRANSPARENT) {
++            textSpans.add(BackgroundColorSpan(spanProps.backgroundColor))
++        }
+         if (spanProps.textDecoration.isNotEmpty()) {
+             if (spanProps.textDecoration == KRTextProps.TEXT_DECORATION_LINE_THROUGH) {
+                 textSpans.add(StrikethroughSpan())
+@@ -252,6 +256,7 @@ class TextSpanProps(
+     val textDecoration: String
+     val lineHeight: Float
+     val backgroundImage: String
++    val backgroundColor: Int
+     var textShadow: BoxShadow? = null
+     var useDpFontSizeDim = false
+ 
+@@ -298,6 +303,11 @@ class TextSpanProps(
+             defaultProps.lineHeight
+         }
+         backgroundImage = spanValue.optString(KRTextProps.PROP_KEY_BACKGROUND_IMAGE, defaultProps.backgroundImage)
++        backgroundColor =
++            spanValue.optString(KRCssConst.BACKGROUND_COLOR)
++                .takeIf { it.isNotEmpty() }
++                ?.toColor()
++                ?: Color.TRANSPARENT
+         val textShadowStr = spanValue.optString(KRTextProps.PROP_KEY_TEXT_SHADOW, "")
+         textShadow = BoxShadow(textShadowStr, kuiklyContext)
+         useDpFontSizeDim = spanValue.optInt(KRTextProps.PROP_KEY_TEXT_USE_DP_FONT_SIZE_DIM) == 1
+diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.h b/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
+index a761ad64500b1d1871136ee89bbaa6307e484d8d..3cf3757f8add61b03e8b0d29d0043a05d4b5d9bb 100644
+--- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
++++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.h
+@@ -47,6 +47,7 @@ extern NSString *const KuiklyIndexAttributeName;
+ @property (nonatomic, assign) NSUInteger spanIndex;
+ @property (nonatomic, strong) UIFont *font;
+ @property (nonatomic, strong) UIColor *color;
++@property (nonatomic, strong) UIColor *backgroundColor;
+ @property (nonatomic, assign) BOOL hasGradient;
+ @property (nonatomic, copy) NSString *cssGradient;
+ @property (nonatomic, assign) CGFloat letterSpacing;
+diff --git a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
+index a177b5bdd58c40970dd746d9af5980a0a51bcdbb..8f338753d0bc40196e8a7f10612ab31df4a1103f 100644
+--- a/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
++++ b/core-render-ios/Extension/AdvancedComps/KRRichTextView.m
+@@ -322,6 +322,7 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+         // 批量解析与字体相关的属性
+         UIFont *font = [KRConvertUtil UIFont:propStyle];
+         UIColor * color = [UIView css_color:propStyle[@"color"]] ?: [UIColor blackColor];
++        UIColor *backgroundColor = [UIView css_color:span[@"backgroundColor"]];
+         NSString *cssGricent = propStyle[@"backgroundImage"];
+         BOOL hasGradient = NO;
+         if (cssGricent && [cssGricent hasPrefix:@"linear-gradient("]) {
+@@ -374,6 +375,7 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+         spanAttrs.spanIndex = spanIndex;
+         spanAttrs.font = font;
+         spanAttrs.color = color;
++        spanAttrs.backgroundColor = backgroundColor;
+         spanAttrs.hasGradient = hasGradient;
+         spanAttrs.cssGradient = cssGricent;
+         spanAttrs.letterSpacing = letterSpacing;
+@@ -449,6 +451,10 @@ NSString *const kGradientInfoKeyGlobalRange = @"globalRange";
+         [attributedString addAttribute:NSKernAttributeName value:@(attrs.letterSpacing) range:range];
+     }
+ 
++    if (attrs.backgroundColor) {
++        [attributedString addAttribute:NSBackgroundColorAttributeName value:attrs.backgroundColor range:range];
++    }
++
+     if (attrs.textDecoration == KRTextDecorationLineTypeUnderline) {
+         [attributedString addAttribute:NSUnderlineStyleAttributeName value:@(NSUnderlineStyleSingle) range:range];
+     }
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
+index 551952c8d9fbb4732b9659104bdcb71ab2d0df9f..428457735e3581c5245330546fa4e4213b4da89d 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/expand/components/richtext/KRRichTextShadow.cpp
+@@ -442,6 +442,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+         auto fontWeight = kuikly::util::ConvertFontWeight(GetKRValue("fontWeight", spanMap, props_)->toInt(), fontWeightScale);
+         // 解析基于Span的多个渐变色属性
+         auto colorStr = GetKRValue("color", spanMap, props_)->toString();
++        auto backgroundColorStr = GetKRValue("backgroundColor", spanMap, spanMap)->toString();
+         auto backgroundImage = GetKRValue("backgroundImage", spanMap, props_)->toString();
+         OH_Drawing_ShaderEffect *colorShaderEffect = nullptr;
+         auto linearGradient = std::make_shared<kuikly::util::KRLinearGradientParser>();
+@@ -449,6 +450,7 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+ 
+         auto fontFamily = GetKRValue("fontFamily", spanMap, props_)->toString();
+         auto color = colorStr.length() ? kuikly::util::ConvertToHexColor(colorStr) : 0xff000000;                    // 默认黑色
++        auto backgroundColor = backgroundColorStr.length() ? kuikly::util::ConvertToHexColor(backgroundColorStr) : 0x00000000;
+         auto lineHeight = GetKRValue("lineHeight", spanMap, props_)->toFloat() / (fontSize / dpi);    // 字体比例
+         auto lineSpacing = GetKRValue("lineSpacing", spanMap, props_)->toFloat() / (fontSize / dpi);  // 行间距比例
+         auto textAlign = kuikly::util::ConvertToTextAlign(GetKRValue("textAlign", spanMap, props_)->toString());
+@@ -465,8 +467,14 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+         OH_Drawing_TextStyle *txtStyle = OH_Drawing_CreateTextStyle();
+         OH_Drawing_Pen *textForegroundPen = nullptr;
+         OH_Drawing_Brush *textForegroundBrush = OH_Drawing_BrushCreate();
++        OH_Drawing_Brush *textBackgroundBrush = nullptr;
+         // 设置文字大小、字重等属性设置到文本样式对象中
+         OH_Drawing_SetTextStyleColor(txtStyle, color);
++        if (backgroundColorStr.length() && backgroundColor != 0x00000000) {
++            textBackgroundBrush = OH_Drawing_BrushCreate();
++            OH_Drawing_BrushSetColor(textBackgroundBrush, backgroundColor);
++            OH_Drawing_SetTextStyleBackgroundBrush(txtStyle, textBackgroundBrush);
++        }
+         if (textShadowStr.length()) {
+             auto textShadow = OH_Drawing_CreateTextShadow();
+             kuikly::util::SetTextShadow(textShadow, textShadowStr);
+@@ -650,6 +658,10 @@ OH_Drawing_Typography *KRRichTextShadow::BuildTextTypography(double constraint_w
+             textForegroundBrush = nullptr;
+         }
+         spanIndex++;
++        if (textBackgroundBrush) {
++            OH_Drawing_BrushDestroy(textBackgroundBrush);
++            textBackgroundBrush = nullptr;
++        }
+     }
+     // 根据handler对象生成文本排版布局typography
+     context_thread_typography_ = KRMakeTypographyHandle(OH_Drawing_CreateTypography(handler));

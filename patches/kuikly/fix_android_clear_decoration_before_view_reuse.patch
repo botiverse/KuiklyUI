@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:04:58 +0000
+Subject: fix(android): clear decoration before view reuse
+
+Resetting background/borderRadius/border only dropped the background and
+the decorator, leaving the rounded foreground border drawable, outline and
+clipToOutline on the pooled View. Clear every decoration surface through a
+single resetDecorationForReuse path so the next owner starts clean.
+
+Fork-Patch: android-clear-decoration-before-reuse
+Origin: b2a2eb03
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/decoration/KRViewDecoration.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/decoration/KRViewDecoration.kt
+index 9fafa17b633bcea7021a0c643c6948dd517bd317..83c547889b1add574a314deebd96f7227e34a40f 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/decoration/KRViewDecoration.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/decoration/KRViewDecoration.kt
+@@ -222,6 +222,24 @@ class KRViewDecoration(targetView: View) : IKRViewDecoration {
+         return isCustomClipPathMode
+     }
+ 
++    /**
++     * Clears every native drawable/clip surface owned by this decoration before the View enters
++     * the reuse pool. Radius is copied into the foreground border drawable, so dropping only the
++     * background and decorator metadata can leave rounded foreground state on the next owner.
++     */
++    internal fun resetForReuse() {
++        targetViewWeakRef.get()?.also { view ->
++            view.background = null
++            if (!isBeforeM) {
++                view.foreground = null
++            }
++            view.outlineProvider = null
++            view.clipToOutline = false
++            view.invalidate()
++        }
++        customForegroundDrawable = null
++    }
++
+     private fun clipPath(w: Int, h: Int, canvas: Canvas) {
+         if (!needClip) { // 没有设置圆角或路径的情况
+             return
+@@ -687,4 +705,4 @@ class BoxShadow(shadowValue: String, private val context: IKuiklyRenderContext?)
+         return shadowOffsetY == 0.0f && shadowOffsetX == 0.0f
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
+index efbb1a5ef3efafecc25edc372547a4ac81aac9b7..2cab09f90e1c984702685a77f8ff2f2f8b651cb7 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSViewExtension.kt
+@@ -302,7 +302,7 @@ fun View.resetCommonProp(propKey: String): Boolean {
+             return true
+         }
+         KRCssConst.BACKGROUND_COLOR -> {
+-            resetHRBackground()
++            resetDecorationForReuse()
+             return true
+         }
+         KRCssConst.TOUCH_ENABLE -> {
+@@ -314,19 +314,19 @@ fun View.resetCommonProp(propKey: String): Boolean {
+             return true
+         }
+         KRCssConst.BACKGROUND_IMAGE -> {
+-            resetHRBackground()
++            resetDecorationForReuse()
+             return true
+         }
+         KRCssConst.BOX_SHADOW -> {
+-            resetHRBackground()
++            resetDecorationForReuse()
+             return true
+         }
+         KRCssConst.BORDER_RADIUS -> {
+-            resetHRBackground()
++            resetDecorationForReuse()
+             return true
+         }
+         KRCssConst.BORDER -> {
+-            resetBorder()
++            resetDecorationForReuse()
+             return true
+         }
+         KRCssConst.CLICK -> {
+@@ -578,16 +578,13 @@ private var View.borderStyle: String?
+ /**
+  * 重置View的background
+  */
+-private fun View.resetHRBackground() {
++private fun View.resetDecorationForReuse() {
++    optViewDecorator()?.resetForReuse()
+     background = null
+-    destroyViewDecorator()
+-}
+-
+-private fun View.resetBorder() {
+-    destroyViewDecorator()
+     if (!isBeforeM) {
+         foreground = null
+     }
++    destroyViewDecorator()
+ }
+ 
+ /**
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSDecorationReuseTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSDecorationReuseTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..97a09e591d6b74cc4b232c95711fc8dd0081ff00
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/css/ktx/KRCSSDecorationReuseTest.kt
+@@ -0,0 +1,75 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.css.ktx
++
++import android.view.View
++import com.tencent.kuikly.core.render.android.const.KRCssConst
++import com.tencent.kuikly.core.render.android.css.drawable.KRCSSBackgroundDrawable
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertSame
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.robolectric.RobolectricTestRunner
++import org.robolectric.RuntimeEnvironment
++import org.robolectric.annotation.Config
++
++@RunWith(RobolectricTestRunner::class)
++@Config(sdk = [28])
++class KRCSSDecorationReuseTest {
++
++    @Test
++    fun radiusResetClearsForegroundClipAndAllowsSquareBorderOnSameViewRepeatedly() {
++        val view = View(RuntimeEnvironment.getApplication())
++
++        repeat(2) {
++            applyRoundedBackground(view)
++            val reusedIdentity = view
++
++            assertNotNull(view.background)
++            assertNotNull(view.foreground)
++            assertNotNull(view.outlineProvider)
++
++            assertEquals(true, view.resetCommonProp(KRCssConst.BORDER_RADIUS))
++
++            assertSame(reusedIdentity, view)
++            assertNull(view.background)
++            assertNull(view.foreground)
++            assertNull(view.optViewDecorator())
++
++            assertEquals(true, view.setCommonProp(KRCssConst.BORDER, SQUARE_BORDER))
++            val squareBorder = view.foreground as KRCSSBackgroundDrawable
++            assertEquals(KRCssConst.EMPTY_STRING, squareBorder.borderRadius)
++            assertEquals(SQUARE_BORDER, squareBorder.borderStyle)
++
++            assertEquals(true, view.resetCommonProp(KRCssConst.BORDER))
++            assertNull(view.foreground)
++            assertNull(view.optViewDecorator())
++        }
++    }
++
++    private fun applyRoundedBackground(view: View) {
++        assertEquals(true, view.setCommonProp(KRCssConst.BACKGROUND_COLOR, YELLOW))
++        assertEquals(true, view.setCommonProp(KRCssConst.BORDER_RADIUS, ROUNDED_RADIUS))
++    }
++
++    private companion object {
++        const val YELLOW = "4294967040"
++        const val ROUNDED_RADIUS = "10,10,10,10"
++        const val SQUARE_BORDER = "2 solid 4294901760"
++    }
++}

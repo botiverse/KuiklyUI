@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Materialize the patched source: check out upstream at the pinned commit into
+# <src-dir> (default: src/) and apply patches/kuikly/.patches in order.
+#
+# This branch is rooted on upstream (the pinned commit is an ancestor of HEAD),
+# so the pin is normally taken from this repository without touching the
+# network. If it is missing (shallow checkout), it is fetched from origin by
+# SHA, and only as a last resort from the upstream URL in patches/config.json.
+# Usage: script/sync [--force] [<src-dir>]
+source "$(dirname "$0")/lib.sh"
+force=0
+if [[ "${1:-}" == "--force" ]]; then force=1; shift; fi
+src="${1:-$ROOT/$(cfg src_dir)}"
+if [[ -d "$src/.git" ]]; then
+  if [[ -n "$(git -C "$src" status --porcelain)" ]] && (( ! force )); then
+    echo "error: $src has uncommitted changes; export them first or pass --force" >&2
+    exit 2
+  fi
+else
+  git init -q "$src"
+  git -C "$src" remote add upstream "$UPSTREAM_URL"
+fi
+if ! git -C "$src" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2>/dev/null; then
+  if ! git -C "$ROOT" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2>/dev/null \
+     && git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
+    git -C "$ROOT" fetch -q --depth=1 origin "$UPSTREAM_COMMIT" || true
+  fi
+  if git -C "$ROOT" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2>/dev/null; then
+    # Local transfer: expose the pin under a scratch ref and fetch it from this repo.
+    git -C "$ROOT" update-ref refs/sync/upstream-pin "$UPSTREAM_COMMIT"
+    git -C "$src" fetch -q "$ROOT" refs/sync/upstream-pin
+    git -C "$ROOT" update-ref -d refs/sync/upstream-pin
+  else
+    git -C "$src" fetch -q --depth=1 upstream "$UPSTREAM_COMMIT" || git -C "$src" fetch -q upstream "$UPSTREAM_REF"
+  fi
+fi
+git -C "$src" -c advice.detachedHead=false checkout -q -f "$UPSTREAM_COMMIT"
+git -C "$src" clean -fdxq
+git -C "$src" branch -q -f upstream-pin "$UPSTREAM_COMMIT"
+git -C "$src" checkout -q -B patched
+n=0
+while IFS= read -r p || [[ -n "$p" ]]; do
+  [[ -z "$p" || "$p" == \#* ]] && continue
+  n=$((n+1))
+  if ! git -C "$src" am -q --3way --keep-cr --committer-date-is-author-date "$PATCH_DIR/$p"; then
+    echo "error: $p does not apply; resolve in $src, 'git am --continue', then script/export-patches" >&2
+    exit 1
+  fi
+done < "$PATCH_DIR/.patches"
+echo "synced $src: upstream $(cfg ref) + $n patches, tree $(git -C "$src" rev-parse 'HEAD^{tree}')"

@@ -1,0 +1,999 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:10:06 +0000
+Subject: build(release): add raft release publication hooks
+
+Adds the producer-side hooks the immutable release pipeline needs: every
+published module applies gradle/raft-artifacts-publishing.gradle.kts, which
+stages publications into a caller-supplied file repository (no credentials)
+and stamps POMs with the source SHA. In publication mode mavenLocal and the
+upstream maven repos are skipped; the OHOS settings resolve KBA plugins and
+Raft-hosted predecessors, and -PkuiklyOhosOnly=true limits the OHOS build to
+ohosArm64 (upstream 2.28 runtimeLegacy/js/android source-set wiring moved
+inside that gate). Also locks Pods for --deployment installs.
+
+Fork-Patch: build-raft-release-publication-hooks
+Origin: 7b8541b2 fa499ac3 1a26a84f
+Upstream-Status: not-upstreamable
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/.gitignore b/.gitignore
+index 8722defa65e649707c9c9e30e0996fa4216857bf..8a20986cdee836794397ee726a1e814c36473369 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -14,6 +14,8 @@ local.properties
+ !demo/webpack.config.d/*.js
+ !h5App/webpack.config.d/*.js
+ node_modules
++/.bundle/
++/vendor/bundle/
+ Pods
+ Pods/*
+ Kotlin-js-store
+diff --git a/build.2.1.21.gradle.kts b/build.2.1.21.gradle.kts
+index 5cae90154ebff0323a54af79afdc50edd6129362..fe1547b726a81af6eda465aa094e1258981c790e 100644
+--- a/build.2.1.21.gradle.kts
++++ b/build.2.1.21.gradle.kts
+@@ -7,12 +7,14 @@ plugins {
+     id("com.google.devtools.ksp") version "2.1.21-2.0.1" apply false
+ }
+ 
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ buildscript {
+     repositories {
+         gradlePluginPortal()
+         google()
+         mavenCentral()
+-        mavenLocal()
+         maven {
+             url = uri("https://mirrors.tencent.com/repository/maven-tencent/")
+         }
+@@ -28,7 +30,9 @@ allprojects {
+     repositories {
+         google()
+         mavenCentral()
+-        mavenLocal()
++        if (!raftPublicationMode) {
++            mavenLocal()
++        }
+         maven {
+             url = uri("https://mirrors.tencent.com/repository/maven-tencent/")
+         }
+diff --git a/compose/build.2.0.ohos.gradle.kts b/compose/build.2.0.ohos.gradle.kts
+index ad8b16e28f5e893683142c536db9e96644149ff7..3cbd21a22af0a3d020cd81eb5b6db783650455bc 100644
+--- a/compose/build.2.0.ohos.gradle.kts
++++ b/compose/build.2.0.ohos.gradle.kts
+@@ -7,27 +7,37 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
++val kuiklyOhosOnly = providers.gradleProperty("kuiklyOhosOnly")
++    .map { it.equals("true", ignoreCase = true) }
++    .orElse(false)
++    .get()
+ 
+ kotlin {
+-    androidTarget {
+-        compilations.all {
+-            kotlinOptions {
+-                jvmTarget = "1.8"
+-                freeCompilerArgs += "-Xjvm-default=all"
+-                moduleName = "${project.group}.${project.name}"
++    if (!kuiklyOhosOnly) {
++        androidTarget {
++            compilations.all {
++                kotlinOptions {
++                    jvmTarget = "1.8"
++                    freeCompilerArgs += "-Xjvm-default=all"
++                    moduleName = "${project.group}.${project.name}"
++                }
+             }
++            publishLibraryVariants("release")
+         }
+-        publishLibraryVariants("release")
+-    }
+ 
+-    iosX64()
+-    iosArm64()
+-    iosSimulatorArm64()
++        iosX64()
++        iosArm64()
++        iosSimulatorArm64()
+ 
+-    js(IR) {
+-        browser()
++        js(IR) {
++            browser()
++        }
+     }
+ 
+     targets.all {
+@@ -80,17 +90,19 @@ kotlin {
+         }
+ 
+         // Android 特有源集中添加 ProfileInstaller 依赖
+-        val androidMain by getting {
+-            dependsOn(runtimeLegacyMain)
+-            dependencies {
+-                compileOnly(project(":core-render-android"))
+-                implementation("androidx.profileinstaller:profileinstaller:1.3.1")
+-                // 保留现有依赖...
++        if (!kuiklyOhosOnly) {
++            val androidMain by getting {
++                dependsOn(runtimeLegacyMain)
++                dependencies {
++                    compileOnly(project(":core-render-android"))
++                    implementation("androidx.profileinstaller:profileinstaller:1.3.1")
++                    // 保留现有依赖...
++                }
+             }
+-        }
+ 
+-        val jsMain by getting {
+-            dependsOn(runtimeLegacyMain)
++            val jsMain by getting {
++                dependsOn(runtimeLegacyMain)
++            }
+         }
+ 
+         // ohos is a Native target: wire it through nativeMain so it inherits both
+@@ -112,18 +124,20 @@ kotlin {
+ 
+ publishing {
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+ 
+         publications.withType<MavenPublication>().configureEach {
+diff --git a/compose/build.2.1.21.gradle.kts b/compose/build.2.1.21.gradle.kts
+index 43c42dbd66af54ec597f0ac6dfdceb60c1363981..7497543a901b413b315453b4ed892e1d2f3bba33 100644
+--- a/compose/build.2.1.21.gradle.kts
++++ b/compose/build.2.1.21.gradle.kts
+@@ -8,6 +8,10 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
+ 
+@@ -138,18 +142,20 @@ publishing {
+ //    }
+ 
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+ 
+         publications.withType<MavenPublication>().configureEach {
+diff --git a/core-annotations/build.2.0.ohos.gradle.kts b/core-annotations/build.2.0.ohos.gradle.kts
+index fce4c7136c9a1a8d55c5defbfb2b8f4755158543..ffc47888a696530bde28dd47b751fd3f53a1de89 100644
+--- a/core-annotations/build.2.0.ohos.gradle.kts
++++ b/core-annotations/build.2.0.ohos.gradle.kts
+@@ -6,23 +6,33 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
++val kuiklyOhosOnly = providers.gradleProperty("kuiklyOhosOnly")
++    .map { it.equals("true", ignoreCase = true) }
++    .orElse(false)
++    .get()
+ 
+ publishing {
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+     }
+ 
+@@ -48,29 +58,31 @@ kotlin {
+     }
+ 
+     ohosArm64()
+-    android {
+-        compilations.all {
+-            kotlinOptions {
+-                moduleName = "${project.group}.${project.name}"
++    if (!kuiklyOhosOnly) {
++        android {
++            compilations.all {
++                kotlinOptions {
++                    moduleName = "${project.group}.${project.name}"
++                }
+             }
+         }
+-    }
+ 
+-    iosArm64()
+-    iosX64()
+-    iosSimulatorArm64()
++        iosArm64()
++        iosX64()
++        iosSimulatorArm64()
+ 
+-    js(IR) {
+-        browser()
+-    }
++        js(IR) {
++            browser()
++        }
+ 
+-    cocoapods {
+-        summary = "Some description for the Shared Module"
+-        homepage = "Link to the Shared Module homepage"
+-        ios.deploymentTarget = "14.1"
++        cocoapods {
++            summary = "Some description for the Shared Module"
++            homepage = "Link to the Shared Module homepage"
++            ios.deploymentTarget = "14.1"
+ //        framework {
+ //            baseName = "core-annotations"
+ //        }
++        }
+     }
+ 
+     sourceSets {
+diff --git a/core-annotations/build.2.1.21.gradle.kts b/core-annotations/build.2.1.21.gradle.kts
+index 1f83382e52d32485914a3a19f914c6ebc605ab43..311227839059173c94dae70a6c0b54a3d9cf38b3 100644
+--- a/core-annotations/build.2.1.21.gradle.kts
++++ b/core-annotations/build.2.1.21.gradle.kts
+@@ -6,23 +6,29 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
+ 
+ publishing {
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+     }
+ 
+@@ -53,6 +59,8 @@ kotlin {
+                 moduleName = "${project.group}.${project.name}"
+             }
+         }
++        publishLibraryVariantsGroupedByFlavor = true
++        publishLibraryVariants("release")
+     }
+ 
+     js(IR) {
+diff --git a/core-ksp/build.2.0.ohos.gradle.kts b/core-ksp/build.2.0.ohos.gradle.kts
+index 202a3f8ee576b768cc6dcfd8e9da8332943c0d20..eed4fc53372ae737ea092e936aeacaefc6ff6ef9 100644
+--- a/core-ksp/build.2.0.ohos.gradle.kts
++++ b/core-ksp/build.2.0.ohos.gradle.kts
+@@ -4,23 +4,29 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
+ 
+ publishing {
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+     }
+ 
+diff --git a/core-ksp/build.2.1.21.gradle.kts b/core-ksp/build.2.1.21.gradle.kts
+index 202a3f8ee576b768cc6dcfd8e9da8332943c0d20..eed4fc53372ae737ea092e936aeacaefc6ff6ef9 100644
+--- a/core-ksp/build.2.1.21.gradle.kts
++++ b/core-ksp/build.2.1.21.gradle.kts
+@@ -4,23 +4,29 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
+ 
+ publishing {
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+     }
+ 
+diff --git a/core-render-android/build.2.1.21.gradle.kts b/core-render-android/build.2.1.21.gradle.kts
+index d4fae16da5e39db31abe9be17960e868791fa139..cff9c291ca8d271f4089620df0edd2a1578014e2 100644
+--- a/core-render-android/build.2.1.21.gradle.kts
++++ b/core-render-android/build.2.1.21.gradle.kts
+@@ -5,24 +5,30 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
+ 
+ afterEvaluate {
+     publishing {
+         repositories {
+-            val username = MavenConfig.getUsername(project)
+-            val password = MavenConfig.getPassword(project)
+-            if (username.isNotEmpty() && password.isNotEmpty()) {
+-                maven {
+-                    credentials {
+-                        setUsername(username)
+-                        setPassword(password)
++            if (!raftPublicationMode) {
++                val username = MavenConfig.getUsername(project)
++                val password = MavenConfig.getPassword(project)
++                if (username.isNotEmpty() && password.isNotEmpty()) {
++                    maven {
++                        credentials {
++                            setUsername(username)
++                            setPassword(password)
++                        }
++                        url = uri(MavenConfig.getRepoUrl(version as String))
+                     }
+-                    url = uri(MavenConfig.getRepoUrl(version as String))
++                } else {
++                    mavenLocal()
+                 }
+-            } else {
+-                mavenLocal()
+             }
+         }
+ 
+diff --git a/core/build.2.0.ohos.gradle.kts b/core/build.2.0.ohos.gradle.kts
+index 921e13ad5702e9de27f5b3a1090813548f683231..977bd2b96330854a8119d6b9a66994e3d9582174 100644
+--- a/core/build.2.0.ohos.gradle.kts
++++ b/core/build.2.0.ohos.gradle.kts
+@@ -9,23 +9,33 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
++val kuiklyOhosOnly = providers.gradleProperty("kuiklyOhosOnly")
++    .map { it.equals("true", ignoreCase = true) }
++    .orElse(false)
++    .get()
+ 
+ publishing {
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+ 
+         publications.withType<MavenPublication>().configureEach {
+@@ -37,13 +47,15 @@ publishing {
+ 
+ kotlin {
+ 
+-    androidTarget {
+-        publishLibraryVariantsGroupedByFlavor = true
+-        publishLibraryVariants("release")
+-        compilations.all {
+-            kotlinOptions {
+-                jvmTarget = "1.8"
+-                moduleName = "${project.group}.${project.name}"
++    if (!kuiklyOhosOnly) {
++        androidTarget {
++            publishLibraryVariantsGroupedByFlavor = true
++            publishLibraryVariants("release")
++            compilations.all {
++                kotlinOptions {
++                    jvmTarget = "1.8"
++                    moduleName = "${project.group}.${project.name}"
++                }
+             }
+         }
+     }
+@@ -68,46 +80,52 @@ kotlin {
+         }
+     }
+ 
+-    iosSimulatorArm64()
+-    iosX64()
+-    iosArm64()
++    if (!kuiklyOhosOnly) {
++        iosSimulatorArm64()
++        iosX64()
++        iosArm64()
+ 
+-    js(IR) {
+-        moduleName = "KuiklyCore-core"
+-        browser {
+-            webpackTask {
+-                outputFileName = "${moduleName}.js" // 最后输出的名字
+-            }
++        js(IR) {
++            moduleName = "KuiklyCore-core"
++            browser {
++                webpackTask {
++                    outputFileName = "${moduleName}.js" // 最后输出的名字
++                }
+ 
+-            commonWebpackConfig {
+-                output?.library = null // 不导出全局对象，只导出必要的入口函数
++                commonWebpackConfig {
++                    output?.library = null // 不导出全局对象，只导出必要的入口函数
++                }
+             }
++            binaries.executable() //将kotlin.js与kotlin代码打包成一份可直接运行的js文件
+         }
+-        binaries.executable() //将kotlin.js与kotlin代码打包成一份可直接运行的js文件
+     }
+ 
+     // sourceSets
+     sourceSets {
+         val commonMain by getting
+-        val appleMain by sourceSets.creating {
+-            dependsOn(commonMain)
+-        }
+-        val iosMain by sourceSets.creating {
+-            dependsOn(appleMain)
++        if (!kuiklyOhosOnly) {
++            val appleMain by sourceSets.creating {
++                dependsOn(commonMain)
++            }
++            val iosMain by sourceSets.creating {
++                dependsOn(appleMain)
++            }
+         }
+         val ohosArm64Main by sourceSets.getting {
+             dependsOn(commonMain)
+         }
+     }
+ 
+-    targets.withType<KotlinNativeTarget> {
+-        val appleMain by sourceSets.getting
+-        when {
+-            konanTarget.family.isAppleFamily -> {
+-                val main by compilations.getting
+-                main.defaultSourceSet.dependsOn(appleMain)
+-                val kuikly by main.cinterops.creating {
+-                    defFile(project.file("src/appleMain/iosInterop/cinterop/ios.def"))
++    if (!kuiklyOhosOnly) {
++        targets.withType<KotlinNativeTarget> {
++            val appleMain by sourceSets.getting
++            when {
++                konanTarget.family.isAppleFamily -> {
++                    val main by compilations.getting
++                    main.defaultSourceSet.dependsOn(appleMain)
++                    val kuikly by main.cinterops.creating {
++                        defFile(project.file("src/appleMain/iosInterop/cinterop/ios.def"))
++                    }
+                 }
+             }
+         }
+diff --git a/core/build.2.1.21.gradle.kts b/core/build.2.1.21.gradle.kts
+index f1cb8c457f50eebc0a57a29b9f14715963c26608..2efeb03329c61aa51410c162c4c425d0b115f334 100644
+--- a/core/build.2.1.21.gradle.kts
++++ b/core/build.2.1.21.gradle.kts
+@@ -9,23 +9,29 @@ plugins {
+     signing
+ }
+ 
++apply(from = rootProject.file("gradle/raft-artifacts-publishing.gradle.kts"))
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++
+ group = MavenConfig.GROUP
+ version = Version.getCoreVersion()
+ 
+ publishing {
+     repositories {
+-        val username = MavenConfig.getUsername(project)
+-        val password = MavenConfig.getPassword(project)
+-        if (username.isNotEmpty() && password.isNotEmpty()) {
+-            maven {
+-                credentials {
+-                    setUsername(username)
+-                    setPassword(password)
++        if (!raftPublicationMode) {
++            val username = MavenConfig.getUsername(project)
++            val password = MavenConfig.getPassword(project)
++            if (username.isNotEmpty() && password.isNotEmpty()) {
++                maven {
++                    credentials {
++                        setUsername(username)
++                        setPassword(password)
++                    }
++                    url = uri(MavenConfig.getRepoUrl(version as String))
+                 }
+-                url = uri(MavenConfig.getRepoUrl(version as String))
++            } else {
++                mavenLocal()
+             }
+-        } else {
+-            mavenLocal()
+         }
+ 
+         publications.withType<MavenPublication>().configureEach {
+diff --git a/gradle/raft-artifacts-publishing.gradle.kts b/gradle/raft-artifacts-publishing.gradle.kts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ccd20d10cb49b21a709eb3928a3067dfa049652
+--- /dev/null
++++ b/gradle/raft-artifacts-publishing.gradle.kts
+@@ -0,0 +1,133 @@
++import org.gradle.api.publish.PublishingExtension
++import org.gradle.api.publish.maven.MavenPublication
++import groovy.util.Node
++
++fun Node.raftDirectChildren(name: String): List<Node> =
++    children().filterIsInstance<Node>().filter {
++        it.name().toString().substringAfterLast('}') == name
++    }
++
++fun Node.raftUniqueText(name: String, coordinate: String): String {
++    val values = raftDirectChildren(name)
++    require(values.size == 1) {
++        "POM dependency $coordinate must have exactly one $name"
++    }
++    return values.single().text().toString().also { value ->
++        require(value.isNotBlank() && value.trim() == value) {
++            "POM dependency $coordinate has malformed $name"
++        }
++    }
++}
++
++fun raftPublicationPrimaryKindIndex(project: Project): Map<String, String> {
++    val entries = mutableListOf<Pair<String, String>>()
++    project.rootProject.allprojects.forEach { candidateProject ->
++        candidateProject.extensions.findByType(PublishingExtension::class.java)
++            ?.publications
++            ?.withType(MavenPublication::class.java)
++            ?.forEach { publication ->
++                val coordinate = "${publication.groupId}:${publication.artifactId}:${publication.version}"
++                val primaries = publication.artifacts.filter { artifact ->
++                    artifact.classifier.isNullOrEmpty()
++                }
++                require(primaries.size == 1) {
++                    "publication $coordinate must expose exactly one unclassified primary artifact"
++                }
++                entries += coordinate to primaries.single().extension
++            }
++    }
++    val duplicate = entries.groupBy({ it.first }, { it.second })
++        .entries.firstOrNull { (_, kinds) -> kinds.size != 1 }
++    require(duplicate == null) {
++        "publication primary-kind index must contain each coordinate exactly once: " +
++            "${duplicate?.key}: ${duplicate?.value}"
++    }
++    return entries.toMap()
++}
++
++fun Node.raftBindAarDependencyTypes(primaryKinds: Map<String, String>) {
++    val dependenciesContainers = raftDirectChildren("dependencies")
++    require(dependenciesContainers.size <= 1) { "POM contains duplicate dependencies containers" }
++    dependenciesContainers.singleOrNull()?.raftDirectChildren("dependency")?.forEach { dependency ->
++        val group = dependency.raftUniqueText("groupId", "unknown")
++        val artifact = dependency.raftUniqueText("artifactId", group)
++        val version = dependency.raftUniqueText("version", "$group:$artifact")
++        val coordinate = "$group:$artifact:$version"
++        val primaryKind = primaryKinds[coordinate] ?: return@forEach
++        val types = dependency.raftDirectChildren("type")
++        require(types.size <= 1) { "POM dependency $coordinate has duplicate type fields" }
++        if (primaryKind == "aar") {
++            if (types.isEmpty()) {
++                dependency.appendNode("type", "aar")
++            } else {
++                require(types.single().text().toString() == "aar") {
++                    "POM dependency $coordinate targets AAR but declares a different type"
++                }
++            }
++        } else {
++            require(types.none { it.text().toString() == "aar" }) {
++                "POM dependency $coordinate does not target AAR but declares type aar"
++            }
++        }
++    }
++}
++
++/*
++ * Publication boundary for the immutable Raft release-set lane.
++ *
++ * Gradle is deliberately only a producer: it writes into an empty, caller-
++ * supplied file repository.  No repository credential and no Raft URL are
++ * accepted here.  The release assembler validates every staged byte before a
++ * separate ordinary Maven writer uses the repository-scoped token. That
++ * writer reuses exact bytes, rejects conflicts, and writes the manifest last.
++ */
++val raftPublicationStagingDir = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR"))
++
++val publicationSourceSha = providers.gradleProperty("publicationSourceSha")
++    .orElse(providers.environmentVariable("PUBLICATION_SOURCE_SHA"))
++    .map { value ->
++        require(value.matches(Regex("[0-9a-f]{40}"))) {
++            "publicationSourceSha must be the exact 40-character lowercase commit SHA"
++        }
++        value
++    }
++
++extensions.configure<PublishingExtension> {
++    if (raftPublicationStagingDir.isPresent) {
++        repositories {
++            maven {
++                name = "raftPublicationStaging"
++                url = uri(file(raftPublicationStagingDir.get()).toURI())
++            }
++        }
++        publications.withType<MavenPublication>().configureEach {
++            pom {
++                properties.put("dev.raft.sourceSha", publicationSourceSha)
++                scm {
++                    connection.set("scm:git:https://github.com/botiverse/KuiklyUI.git")
++                    developerConnection.set("scm:git:ssh://git@github.com/botiverse/KuiklyUI.git")
++                    url.set("https://github.com/botiverse/KuiklyUI")
++                    tag.set(publicationSourceSha)
++                }
++            }
++        }
++    }
++}
++
++// Kotlin MPP installs publication-specific dependency rewrites during project
++// evaluation. Register this final producer normalization only after every
++// project has finished configuring so it sees the actual emitted POM graph.
++gradle.projectsEvaluated {
++    if (raftPublicationStagingDir.isPresent) {
++        project.extensions.configure<PublishingExtension> {
++            publications.withType<MavenPublication>().configureEach {
++                pom.withXml {
++                    asNode().raftBindAarDependencyTypes(
++                        raftPublicationPrimaryKindIndex(project)
++                    )
++                }
++            }
++        }
++    }
++}
+diff --git a/iosApp/Podfile b/iosApp/Podfile
+index 38d8aa721852920ec949ad859ad0599b031a7da8..d7198d9967de0d7f66ce366bb5bffdf516408d1c 100644
+--- a/iosApp/Podfile
++++ b/iosApp/Podfile
+@@ -1,5 +1,4 @@
+-
+-#use_frameworks!
++use_frameworks! :linkage => :static if ENV['KUIKLY_RELEASE_FRAMEWORK_BUILD'] == '1'
+ source 'https://cdn.cocoapods.org/'
+ 
+ target 'iosApp' do
+diff --git a/iosApp/Podfile.lock b/iosApp/Podfile.lock
+new file mode 100644
+index 0000000000000000000000000000000000000000..bcb4ee972ccd09e09102d17e9eb92dfe29d25f47
+--- /dev/null
++++ b/iosApp/Podfile.lock
+@@ -0,0 +1,42 @@
++PODS:
++  - demo (1.0)
++  - libpag (4.3.71)
++  - Masonry (1.1.0)
++  - OpenKuiklyIOSRender (2.0.0)
++  - SDWebImage (5.20.1):
++    - SDWebImage/Core (= 5.20.1)
++  - SDWebImage/Core (5.20.1)
++  - WMPlayer (5.0.0):
++    - Masonry
++
++DEPENDENCIES:
++  - demo (from `../demo`)
++  - libpag (~> 4.3.21)
++  - OpenKuiklyIOSRender (from `../`)
++  - SDWebImage (~> 5.20.1)
++  - WMPlayer (~> 5.0)
++
++SPEC REPOS:
++  trunk:
++    - libpag
++    - Masonry
++    - SDWebImage
++    - WMPlayer
++
++EXTERNAL SOURCES:
++  demo:
++    :path: "../demo"
++  OpenKuiklyIOSRender:
++    :path: "../"
++
++SPEC CHECKSUMS:
++  demo: a2fcae57f9749308dbb32a0aa6f442e8caa1dfc0
++  libpag: ef557e782d9b1b8c694d7031977ac524f1b99260
++  Masonry: 678fab65091a9290e40e2832a55e7ab731aad201
++  OpenKuiklyIOSRender: 0ea7064904d6b4e1fd4d0f3f63b3230dfc1584d0
++  SDWebImage: 33d0f23bddeb5d209ae959153883247be6703713
++  WMPlayer: a914f80ed5dca7cd9e3a94ec07a2b02eec8c15c0
++
++PODFILE CHECKSUM: abb3b00ad549604735ab9e9a3cb62b80435fe61f
++
++COCOAPODS: 1.16.2
+diff --git a/settings.2.0.ohos.gradle.kts b/settings.2.0.ohos.gradle.kts
+index 23ba02b132026490327d8a4e1b7a47a738ea8332..7e4b7e4a925ec9646f7d293a14f561241630eee3 100644
+--- a/settings.2.0.ohos.gradle.kts
++++ b/settings.2.0.ohos.gradle.kts
+@@ -1,4 +1,16 @@
+ pluginManagement {
++    resolutionStrategy {
++        eachPlugin {
++            if (requested.id.id == "org.jetbrains.kotlin.multiplatform") {
++                // The KBA-010 fork does not publish Gradle plugin marker modules.
++                // Bind the requested id to its canonical implementation module.
++                useModule("org.jetbrains.kotlin:kotlin-gradle-plugin:${requested.version}")
++            }
++            if (requested.id.id == "org.jetbrains.kotlin.plugin.compose") {
++                useModule("org.jetbrains.kotlin:compose-compiler-gradle-plugin:${requested.version}")
++            }
++        }
++    }
+     repositories {
+         google()
+         gradlePluginPortal()
+@@ -12,9 +24,42 @@ pluginManagement {
+     }
+ }
+ 
++val raftPublicationMode = providers.gradleProperty("raftPublicationStagingDir")
++    .orElse(providers.environmentVariable("RAFT_PUBLICATION_STAGING_DIR")).isPresent
++val raftRequirePublicPredecessors = providers.environmentVariable("RAFT_REQUIRE_PUBLIC_PREDECESSORS")
++    .map { it.equals("true", ignoreCase = true) }
++    .orElse(false)
++    .get()
++
+ dependencyResolutionManagement {
+     repositories {
+-        mavenLocal()
++        if (raftRequirePublicPredecessors) {
++            exclusiveContent {
++                forRepository {
++                    maven {
++                        name = "raftArtifactsRequiredPredecessors"
++                        url = uri("https://maven.artifacts.botiverse.dev")
++                    }
++                }
++                filter {
++                    includeModule("org.jetbrains.kotlin", "kotlin-stdlib")
++                    includeModule("org.jetbrains.kotlin", "kotlin-stdlib-common")
++                    includeGroupByRegex("com\\.tencent\\.kuikly-open\\.compose.*")
++                }
++            }
++        } else {
++            maven {
++                name = "raftArtifactsCandidatePredecessors"
++                url = uri("https://maven.artifacts.botiverse.dev")
++                content {
++                    includeGroupByRegex("org\\.jetbrains\\.kotlin.*")
++                    includeGroupByRegex("com\\.tencent\\.kuikly-open\\.compose.*")
++                }
++            }
++        }
++        if (!raftPublicationMode) {
++            mavenLocal()
++        }
+         google()
+         gradlePluginPortal()
+         mavenCentral()
+@@ -26,6 +71,10 @@ dependencyResolutionManagement {
+ 
+ val buildFileName = "build.2.0.ohos.gradle.kts"
+ rootProject.buildFileName = buildFileName
++val kuiklyOhosOnly = providers.gradleProperty("kuiklyOhosOnly")
++    .map { it.equals("true", ignoreCase = true) }
++    .orElse(false)
++    .get()
+ 
+ 
+ include(":core-annotations")
+@@ -37,17 +86,18 @@ project(":core-ksp").buildFileName = buildFileName
+ include(":core")
+ project(":core").buildFileName = buildFileName
+ 
+-include(":core-render-android")
+-project(":core-render-android").buildFileName = buildFileName
+-
+ include(":compose")
+ project(":compose").buildFileName = buildFileName
+ 
+-include(":core-wx")
+-project(":core-wx").buildFileName = buildFileName
++if (!kuiklyOhosOnly) {
++    include(":core-render-android")
++    project(":core-render-android").buildFileName = buildFileName
+ 
+-include(":demo")
+-project(":demo").buildFileName = buildFileName
++    include(":core-wx")
++    project(":core-wx").buildFileName = buildFileName
+ 
+-// include(":androidApp")
++    include(":demo")
++    project(":demo").buildFileName = buildFileName
++}
+ 
++// include(":androidApp")

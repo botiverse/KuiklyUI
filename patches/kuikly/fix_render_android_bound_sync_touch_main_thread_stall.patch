@@ -1,0 +1,792 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: BiSheng <raft-mobile-bisheng@mail.build>
+Date: Tue, 29 Sep 2026 06:08:00 +0000
+Subject: fix(render-android): bound sync-touch main-thread stall
+
+Synchronous touch dispatch blocked the main thread on the context thread and
+could ANR under load. Coalesce pending MOVE events (last wins) through a
+ReplaceableTaskRegistry, report whether each bounded sync dispatch completed
+in time, and let TouchSyncGuard downgrade the rest of a gesture to async
+after a timeout so one slow frame cannot stall the whole gesture.
+
+Fork-Patch: render-android-sync-touch-stall-guard
+Origin: d8e2588f
+Upstream-Status: pending
+Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
+
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+index 55ab48c9ebf967b94ae718d92f0ce7e47e6fc357..eef8e391446301d7f5da47b892cbc2682b92edf2 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+@@ -49,9 +49,17 @@ import com.tencent.kuikly.core.render.android.layer.IKuiklyRenderLayerInitCallba
+ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreContextScheduler
+ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreTask
+ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreUIScheduler
++import com.tencent.kuikly.core.render.android.scheduler.TouchSyncGuard
+ import com.tencent.tdf.module.TDFBaseModule
+ import org.json.JSONObject
+ 
++/**
++ * Per-dispatch timeout for synchronous touch events. Kept at the historical
++ * 1000ms for step one of the bounded-stall hardening; any tightening is a
++ * separate decision driven by production downgrade telemetry.
++ */
++private const val SYNC_TOUCH_TIMEOUT_MS = 1000L
++
+ class KuiklyRenderCore(
+     private var contextHandler: IKuiklyRenderContextHandler? = null
+ ) : IKuiklyRenderCore {
+@@ -70,6 +78,7 @@ class KuiklyRenderCore(
+      * KTV UI线程调度器
+      */
+     private var uiScheduler: KuiklyRenderCoreUIScheduler? = null
++    private val touchSyncGuard = TouchSyncGuard()
+ 
+     /**
+      * KTV调用Native方法的回调map
+@@ -182,6 +191,8 @@ class KuiklyRenderCore(
+             contextHandler?.destroy()
+             destroyCallKotlinTracer.end()
+         }
++        // Drop any pending coalesced move dispatches this page registered.
++        KuiklyRenderCoreContextScheduler.evictReplaceableTasksByPrefix("$instanceId:")
+         uiScheduler?.destroy()
+         destroyTracer.end()
+     }
+@@ -397,6 +408,13 @@ class KuiklyRenderCore(
+         )
+     }
+ 
++    private fun fireViewEventOnContext(tag: Int, eventNameArg: Any?, result: Any?) {
++        contextHandler?.call(
++            KuiklyRenderContextMethod.KuiklyRenderContextMethodFireViewEvent,
++            listOf(instanceId, tag, eventNameArg, result)
++        )
++    }
++
+     private fun setViewProp(method: KuiklyRenderNativeMethod, args: List<Any?>): Any? {
+         var propValue = args.fourthArg<Any>()
+         if (isEvent(args)) {
+@@ -409,20 +427,57 @@ class KuiklyRenderCore(
+                     if (shouldSync && uiScheduler?.isPerformingMainQueueTask == true) {
+                         shouldSync = false
+                     }
+-                    performOnContextQueue(sync = shouldSync) {
+-                        contextHandler?.call(
+-                            KuiklyRenderContextMethod.KuiklyRenderContextMethodFireViewEvent,
+-                            listOf(instanceId, tag, args.thirdArg(), result)
+-                        )
+-                        if (shouldSync) {
+-                            uiScheduler?.performSyncMainQueueTasksBlockIfNeed(true)
+-                            uiScheduler?.performOnMainQueueWithTask(sync = false) {
+-                                uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
++                    val eventName = args.thirdArg<Any?>() as? String ?: ""
++                    if (shouldSync) {
++                        // Bounded-stall guard: a gesture whose sync dispatches have
++                        // exhausted its wait budget delivers remaining MOVEs async.
++                        // POINTER_DOWN/UP (>=2 touches) must not reset the gesture.
++                        val pointerCount = ((result as? Map<*, *>)?.get("touches") as? List<*>)?.size ?: 1
++                        shouldSync = touchSyncGuard.shouldDispatchSync(instanceId, tag, eventName, pointerCount)
++                    }
++                    val moveCoalesceToken = if (eventName == TouchSyncGuard.TOUCH_MOVE && syncCall) {
++                        touchSyncGuard.coalesceToken(instanceId, tag)
++                    } else {
++                        null
++                    }
++                    when {
++                        shouldSync -> {
++                            val syncResult = KuiklyRenderCoreContextScheduler.runTaskSyncUnsafelyWithResult(
++                                replaceToken = moveCoalesceToken,
++                                timeout = SYNC_TOUCH_TIMEOUT_MS,
++                            ) {
++                                fireViewEventOnContext(tag, args.thirdArg(), result)
++                                uiScheduler?.performSyncMainQueueTasksBlockIfNeed(true)
++                                uiScheduler?.performOnMainQueueWithTask(sync = false) {
++                                    uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
++                                }
++                            }
++                            uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
++                            touchSyncGuard.onSyncDispatchCompleted(
++                                instanceId, tag, eventName,
++                                timedOut = !syncResult.completedInTime,
++                                waitMs = syncResult.waitMs,
++                            )?.also { degrade ->
++                                KuiklyRenderLog.e(
++                                    "KuiklyRenderCore",
++                                    "touch_sync_degraded instanceId=${degrade.instanceId} " +
++                                        "tag=${degrade.tag} trigger=${degrade.triggerEventName} " +
++                                        "accumulatedWaitMs=${degrade.accumulatedWaitMs}",
++                                )
++                            }
++                        }
++                        moveCoalesceToken != null -> {
++                            // Degraded (or main-queue-downgraded) sync MOVE: deliver
++                            // asynchronously, latest position wins.
++                            KuiklyRenderCoreContextScheduler.scheduleReplaceableTask(moveCoalesceToken) {
++                                fireViewEventOnContext(tag, args.thirdArg(), result)
++                            }
++                        }
++                        else -> {
++                            performOnContextQueue {
++                                fireViewEventOnContext(tag, args.thirdArg(), result)
+                             }
+                         }
+-                    }
+-                    if (shouldSync) {
+-                        uiScheduler?.performMainThreadTaskWaitToSyncBlockIfNeed()
+                     }
+                 }
+             }
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt
+index 792ceb1cde7e5be6be3009531e6157bd97cc84e8..eb69388ae72f0746b7c70c640f7db36713557255 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/KuiklyRenderCoreContextScheduler.kt
+@@ -94,6 +94,55 @@ object KuiklyRenderCoreContextScheduler : IKuiklyRenderCoreScheduler {
+         handler.runTaskSyncUnsafely(delayMs, timeout, task)
+     }
+ 
++    private val replaceableRegistry = ReplaceableTaskRegistry { handler.removeCallbacks(it) }
++
++    /**
++     * Runs [task] on the context queue and blocks the caller up to [timeout],
++     * reporting whether the task actually finished in time and how long the
++     * caller waited. When [replaceToken] is non-null the posted runnable is
++     * registered under that token: a later same-token dispatch (sync or
++     * [scheduleReplaceableTask]) evicts it, so a task that outlived its
++     * caller's timeout never executes as stale work once superseded.
++     */
++    fun runTaskSyncUnsafelyWithResult(
++        replaceToken: String? = null,
++        delayMs: Long = 0,
++        timeout: Long,
++        task: KuiklyRenderCoreTask,
++    ): KuiklyRenderSyncTaskResult {
++        require(timeout >= 0) { "timeout must be non-negative" }
++        if (Looper.myLooper() == handler.looper) {
++            task()
++            return KuiklyRenderSyncTaskResult(completedInTime = true, waitMs = 0)
++        }
++        val blocking = BlockingRunnable(task)
++        if (replaceToken != null) {
++            replaceableRegistry.registerRunnable(replaceToken, blocking)
++        }
++        val startNs = System.nanoTime()
++        val posted = handler.postDelayed(blocking, delayMs)
++        val completed = posted && blocking.waitCompletion(timeout)
++        val waitMs = (System.nanoTime() - startNs) / NS_PER_MS
++        if (completed && replaceToken != null) {
++            replaceableRegistry.unregisterIfCurrent(replaceToken, blocking)
++        }
++        return KuiklyRenderSyncTaskResult(completedInTime = completed, waitMs = waitMs)
++    }
++
++    /**
++     * Posts [task] under [replaceToken], replacing any pending (not yet
++     * started) task registered under the same token. Last-wins coalescing for
++     * high-frequency events such as touch MOVE.
++     */
++    fun scheduleReplaceableTask(replaceToken: String, delayMs: Long = 0, task: KuiklyRenderCoreTask) {
++        handler.postDelayed(replaceableRegistry.register(replaceToken) { task() }, delayMs)
++    }
++
++    /** Evicts every pending replaceable task whose token starts with [prefix]. */
++    fun evictReplaceableTasksByPrefix(prefix: String) {
++        replaceableRegistry.evictByPrefix(prefix)
++    }
++
+ }
+ 
+ private fun Handler.runTaskSyncUnsafely(delayMs: Long, timeout: Long, task: KuiklyRenderCoreTask): Boolean {
+@@ -107,6 +156,18 @@ private fun Handler.runTaskSyncUnsafely(delayMs: Long, timeout: Long, task: Kuik
+     return BlockingRunnable(task).postAndWait(this, delayMs, timeout)
+ }
+ 
++private const val NS_PER_MS = 1_000_000L
++
++/**
++ * Outcome of one bounded synchronous dispatch to the context queue.
++ */
++class KuiklyRenderSyncTaskResult(
++    /** false when the task did not finish within the timeout (it may still run later, unless superseded). */
++    val completedInTime: Boolean,
++    /** Wall-clock time the blocked caller waited, in milliseconds. */
++    val waitMs: Long,
++)
++
+ private class BlockingRunnable(private val mTask: KuiklyRenderCoreTask) : Runnable {
+ 
+     private val conditionVariable = ConditionVariable()
+@@ -119,6 +180,11 @@ private class BlockingRunnable(private val mTask: KuiklyRenderCoreTask) : Runnab
+         }
+     }
+ 
++    /** Returns true when the task finished before [timeout] elapsed. */
++    fun waitCompletion(timeout: Long): Boolean {
++        return conditionVariable.block(timeout)
++    }
++
+     fun postAndWait(handler: Handler, delayMs: Long, timeout: Long): Boolean {
+         if (!handler.postDelayed(this, delayMs)) {
+             return false
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/ReplaceableTaskRegistry.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/ReplaceableTaskRegistry.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..3576457f281416fe6832542dc391fa67f788d2f0
+--- /dev/null
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/ReplaceableTaskRegistry.kt
+@@ -0,0 +1,103 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.scheduler
++
++/**
++ * Token-keyed last-wins registry for posted runnables.
++ *
++ * Registering a new runnable under an already-used token evicts the pending
++ * previous one (via [removePosted], e.g. `Handler.removeCallbacks`) so stale
++ * work never executes. Used to coalesce touch-MOVE dispatches: only the
++ * latest position matters, so queued-but-unstarted moves are replaced rather
++ * than replayed after the context thread recovers.
++ *
++ * Pure Kotlin for unit-testability; thread-safe.
++ */
++internal class ReplaceableTaskRegistry(
++    private val removePosted: (Runnable) -> Unit,
++) {
++
++    private val lock = Any()
++    private val tasks = HashMap<String, Runnable>()
++
++    /**
++     * Registers [task] under [token], evicting any pending task with the same
++     * token. Returns the runnable to post; it unregisters itself before
++     * running (unless already superseded).
++     */
++    fun register(token: String, task: () -> Unit): Runnable {
++        val wrapped = TokenRunnable(token, task)
++        registerRunnable(token, wrapped)
++        return wrapped
++    }
++
++    private inner class TokenRunnable(
++        private val token: String,
++        private val task: () -> Unit,
++    ) : Runnable {
++        override fun run() {
++            synchronized(lock) {
++                if (tasks[token] === this) {
++                    tasks.remove(token)
++                }
++            }
++            task()
++        }
++    }
++
++    /**
++     * Registers an already-built [runnable] under [token], evicting any
++     * pending same-token runnable. Used for sync dispatches whose posted
++     * runnable must remain evictable after their waiter timed out.
++     */
++    fun registerRunnable(token: String, runnable: Runnable) {
++        synchronized(lock) {
++            tasks.put(token, runnable)?.also(removePosted)
++        }
++    }
++
++    /** Drops the registration for [token] if it still holds [runnable]. */
++    fun unregisterIfCurrent(token: String, runnable: Runnable) {
++        synchronized(lock) {
++            if (tasks[token] === runnable) {
++                tasks.remove(token)
++            }
++        }
++    }
++
++    /** Evicts the pending runnable for [token] without running it, if any. */
++    fun evict(token: String) {
++        synchronized(lock) {
++            tasks.remove(token)?.also(removePosted)
++        }
++    }
++
++    /** Evicts every pending runnable whose token starts with [prefix]. */
++    fun evictByPrefix(prefix: String) {
++        val evicted = mutableListOf<Runnable>()
++        synchronized(lock) {
++            val iterator = tasks.entries.iterator()
++            while (iterator.hasNext()) {
++                val entry = iterator.next()
++                if (entry.key.startsWith(prefix)) {
++                    evicted += entry.value
++                    iterator.remove()
++                }
++            }
++        }
++        evicted.forEach(removePosted)
++    }
++}
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/TouchSyncGuard.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/TouchSyncGuard.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c371faaa83ddd18c6a9218b96d40a8eb63bf990
+--- /dev/null
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/TouchSyncGuard.kt
+@@ -0,0 +1,166 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.scheduler
++
++/**
++ * Bounds the main-thread stall that synchronous touch events can cause.
++ *
++ * Kuikly Compose registers touchDown/Move/Up/Cancel as *sync* events so the
++ * context (frame) thread can synchronously report `consumed` and drive
++ * `preventTouch`/parent interception. Each sync dispatch blocks the main
++ * thread until the context thread answers; against a busy context thread, a
++ * MOVE stream therefore accumulates unbounded main-thread stalls (ANR).
++ *
++ * This guard keeps the healthy path unchanged and caps the worst case per
++ * gesture: it accumulates the main-thread wait of every sync touch dispatch
++ * (DOWN/MOVE) and, once the total exceeds [degradationBudgetMs], delivers the
++ * rest of that gesture asynchronously (MOVEs coalesced by
++ * [KuiklyRenderCoreContextScheduler.scheduleReplaceableTask]). The first
++ * finger's DOWN, the last finger's UP, and CANCEL always stay synchronous:
++ * they start/end the gesture and carry consumption semantics that must not be
++ * reordered. Secondary fingers' DOWN/UP stay synchronous while the gesture is
++ * healthy, but go async once it has degraded — a stuck context thread would
++ * otherwise stack another full timeout per finger change (a two-finger pinch
++ * could reach ~5s of main-thread wait). Per-gesture main-thread wait is
++ * thereby bounded to roughly one budget.
++ *
++ * Gesture lifecycle with multi-touch: only the *first* finger's DOWN
++ * (pointerCount == 1) starts a fresh gesture and only the *last* finger's UP
++ * (pointerCount == 1) or a CANCEL ends it. Additional fingers joining or
++ * leaving (POINTER_DOWN/POINTER_UP, surfaced as touchDown/touchUp with
++ * pointerCount >= 2) must not reset an in-progress gesture's budget or
++ * degradation.
++ *
++ * Semantics of a degraded gesture: `consumed`/`preventTouch` decisions may
++ * arrive late, so a parent container can scroll a few frames before a child
++ * drag engages. The next gesture self-heals; no state is corrupted. OHOS
++ * already runs moves asynchronously, so this mode has in-tree precedent.
++ *
++ * Threading: main-thread confined (touch callbacks and main-queue tasks both
++ * run on the main thread). Not synchronized on purpose.
++ */
++internal class TouchSyncGuard(
++    private val degradationBudgetMs: Long = DEFAULT_DEGRADATION_BUDGET_MS,
++) {
++
++    internal data class DegradeEvent(
++        val instanceId: String,
++        val tag: Int,
++        val triggerEventName: String,
++        val accumulatedWaitMs: Long,
++    )
++
++    private class GestureState(
++        var accumulatedWaitMs: Long,
++        var degraded: Boolean,
++    )
++
++    private val gestures = HashMap<String, GestureState>()
++
++    /** Token shared by all coalescing/replaceable dispatches of one view's moves. */
++    fun coalesceToken(instanceId: String, tag: Int): String = "$instanceId:$tag"
++
++    fun isManagedTouchEvent(eventName: String): Boolean =
++        eventName == TOUCH_DOWN || eventName == TOUCH_MOVE ||
++            eventName == TOUCH_UP || eventName == TOUCH_CANCEL
++
++    /**
++     * Decide whether [eventName] for (instanceId, tag) keeps the synchronous
++     * context-thread round-trip. Non-touch events are unmanaged (always sync).
++     * [pointerCount] is the number of active pointers carried by the event
++     * (ACTION_DOWN/UP carry 1; POINTER_DOWN/UP carry >= 2).
++     */
++    fun shouldDispatchSync(instanceId: String, tag: Int, eventName: String, pointerCount: Int = 1): Boolean {
++        if (!isManagedTouchEvent(eventName)) {
++            return true
++        }
++        val key = coalesceToken(instanceId, tag)
++        return when (eventName) {
++            TOUCH_DOWN -> {
++                if (pointerCount <= 1) {
++                    // First finger starts a fresh gesture: always synchronous.
++                    gestures.remove(key)
++                    true
++                } else {
++                    // A secondary finger joining an already-degraded gesture gains
++                    // nothing from blocking the main thread: go async (posted, never
++                    // coalesced). Healthy gestures keep the synchronous round-trip.
++                    gestures[key]?.degraded != true
++                }
++            }
++            TOUCH_MOVE -> gestures[key]?.degraded != true
++            TOUCH_UP -> {
++                if (pointerCount <= 1) {
++                    // Last finger ends the gesture: always synchronous.
++                    gestures.remove(key)
++                    true
++                } else {
++                    gestures[key]?.degraded != true
++                }
++            }
++            else -> { // TOUCH_CANCEL: always the whole gesture
++                gestures.remove(key)
++                true
++            }
++        }
++    }
++
++    /**
++     * Record the outcome of one synchronous touch dispatch. Only DOWN and
++     * MOVE accumulate budget and may degrade: UP/CANCEL end the gesture, so
++     * their stalls neither degrade nor get reported. Returns a [DegradeEvent]
++     * exactly once per degraded gesture (for tracing); null otherwise.
++     */
++    fun onSyncDispatchCompleted(
++        instanceId: String,
++        tag: Int,
++        eventName: String,
++        timedOut: Boolean,
++        waitMs: Long,
++    ): DegradeEvent? {
++        if (eventName != TOUCH_DOWN && eventName != TOUCH_MOVE) {
++            return null
++        }
++        if (waitMs <= 0L && !timedOut) {
++            return null
++        }
++        val key = coalesceToken(instanceId, tag)
++        val state = gestures.getOrPut(key) {
++            GestureState(accumulatedWaitMs = 0L, degraded = false)
++        }
++        state.accumulatedWaitMs += waitMs
++        if (state.degraded || state.accumulatedWaitMs < degradationBudgetMs) {
++            return null
++        }
++        state.degraded = true
++        return DegradeEvent(instanceId, tag, eventName, state.accumulatedWaitMs)
++    }
++
++    companion object {
++        const val TOUCH_DOWN = "touchDown"
++        const val TOUCH_MOVE = "touchMove"
++        const val TOUCH_UP = "touchUp"
++        const val TOUCH_CANCEL = "touchCancel"
++
++        /**
++         * Per-gesture main-thread wait budget. Matches the per-dispatch
++         * timeout (1000ms): a single full timeout degrades immediately, and
++         * repeated shorter stalls (e.g. 200ms per frame) degrade after a few
++         * dispatches instead of accumulating without bound.
++         */
++        const val DEFAULT_DEGRADATION_BUDGET_MS = 1000L
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/ReplaceableTaskRegistryTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/ReplaceableTaskRegistryTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b26ac0b689f60a91fc4c5c9914933a659038a244
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/ReplaceableTaskRegistryTest.kt
+@@ -0,0 +1,97 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.scheduler
++
++import org.junit.Assert.assertEquals
++import org.junit.Test
++
++class ReplaceableTaskRegistryTest {
++
++    private val removed = mutableListOf<Runnable>()
++    private val registry = ReplaceableTaskRegistry { removed += it }
++
++    @Test
++    fun `same token replaces pending task last wins`() {
++        val executed = mutableListOf<String>()
++        val stale = registry.register("move:1:100") { executed += "stale" }
++        val latest = registry.register("move:1:100") { executed += "latest" }
++
++        // The pending stale task was evicted (removeCallbacks called with it).
++        assertEquals(listOf(stale), removed)
++
++        // Whatever the handler still runs, only the latest task body executes:
++        // the evicted stale runnable must never be posted again, and even if a
++        // racy poster ran it, supersession is by token, not by run.
++        latest.run()
++        assertEquals(listOf("latest"), executed)
++    }
++
++    @Test
++    fun `different tokens coexist`() {
++        val executed = mutableListOf<String>()
++        registry.register("move:1:100") { executed += "a" }.run()
++        registry.register("move:1:200") { executed += "b" }.run()
++        assertEquals(listOf("a", "b"), executed)
++        assertEquals(emptyList<Runnable>(), removed)
++    }
++
++    @Test
++    fun `evict drops pending task without running it`() {
++        val executed = mutableListOf<String>()
++        val pending = registry.register("move:1:100") { executed += "x" }
++        registry.evict("move:1:100")
++        assertEquals(listOf(pending), removed)
++        assertEquals(emptyList<String>(), executed)
++    }
++
++    @Test
++    fun `evict by prefix clears page scoped tokens`() {
++        val a = registry.register("7:100") {}
++        val b = registry.register("7:200") {}
++        registry.register("8:100") {}
++
++        registry.evictByPrefix("7:")
++        assertEquals(setOf(a, b), removed.toSet())
++
++        // Instance 8's token survives and still runs.
++        var ran = false
++        registry.register("8:100") { ran = true }.run()
++        assertEquals(true, ran)
++    }
++
++    @Test
++    fun `unregisterIfCurrent only removes the same runnable`() {
++        val first = registry.register("move:1:100") {}
++        val second = registry.register("move:1:100") {}
++        registry.unregisterIfCurrent("move:1:100", first) // stale identity: no-op
++        registry.unregisterIfCurrent("move:1:100", second)
++        // After current removal, a new registration must not evict anything.
++        removed.clear()
++        registry.register("move:1:100") {}
++        assertEquals(emptyList<Runnable>(), removed)
++    }
++
++    @Test
++    fun `registerRunnable keeps built runnable evictable`() {
++        val executed = mutableListOf<String>()
++        val blockingLike = Runnable { executed += "sync" }
++        registry.registerRunnable("move:1:100", blockingLike)
++        // A later async dispatch supersedes the timed-out sync task.
++        registry.register("move:1:100") { executed += "async" }.run()
++        assertEquals(listOf(blockingLike), removed)
++        assertEquals(listOf("async"), executed)
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/TouchSyncGuardTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/TouchSyncGuardTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa1221349473277ccecd0b978b6f248cbbd43df8
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/TouchSyncGuardTest.kt
+@@ -0,0 +1,172 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.scheduler
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class TouchSyncGuardTest {
++
++    private val guard = TouchSyncGuard()
++
++    @Test
++    fun `healthy gesture keeps every event synchronous`() {
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++        guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = false, waitMs = 3)
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_UP))
++    }
++
++    @Test
++    fun `single full timeout degrades and reports once`() {
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN))
++
++        val degrade = guard.onSyncDispatchCompleted(
++            INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = true, waitMs = 1000,
++        )
++        assertEquals(TouchSyncGuard.TOUCH_MOVE, degrade?.triggerEventName)
++        assertEquals(1000L, degrade?.accumulatedWaitMs)
++
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++        assertNull(
++            guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = true, waitMs = 1000),
++        )
++
++        // Last finger UP ends the gesture; the next one is synchronous again.
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_UP, pointerCount = 1))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 1))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++    }
++
++    @Test
++    fun `repeated sub-timeout stalls degrade once the budget is spent`() {
++        // The 200ms-per-frame injection scenario: no single dispatch times out,
++        // but the accumulated wait crosses the budget after a few moves.
++        guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN)
++        repeat(3) {
++            assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++            assertNull(
++                guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = false, waitMs = 250),
++            )
++        }
++        // 3 x 250ms = 750ms < budget: still synchronous. The 4th dispatch
++        // crosses 1000ms and reports degradation.
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++        val degrade = guard.onSyncDispatchCompleted(
++            INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = false, waitMs = 250,
++        )
++        assertEquals(1000L, degrade?.accumulatedWaitMs)
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++    }
++
++    @Test
++    fun `second finger joining or leaving does not reset degradation`() {
++        guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 1)
++        guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = true, waitMs = 1000)
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++
++        // POINTER_DOWN (finger 2 joins): must NOT reset the degraded gesture,
++        // and must NOT block the main thread again — it goes async.
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 2))
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++
++        // POINTER_UP (finger 2 leaves): async too, and must NOT end the gesture.
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_UP, pointerCount = 2))
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++
++        // Only the last finger's UP ends it (synchronously).
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_UP, pointerCount = 1))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++    }
++
++    @Test
++    fun `healthy gesture keeps secondary finger events synchronous`() {
++        guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 1)
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 2))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_UP, pointerCount = 2))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++    }
++
++    @Test
++    fun `cancel always ends the gesture regardless of pointer count`() {
++        guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 1)
++        guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = true, waitMs = 1000)
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_CANCEL, pointerCount = 2))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++    }
++
++    @Test
++    fun `up and cancel timeouts never degrade nor report`() {
++        guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 1)
++        // UP dispatch clears the gesture; its timeout must not create a new
++        // degraded record (and therefore not emit a second log line).
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_UP, pointerCount = 1))
++        assertNull(
++            guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_UP, timedOut = true, waitMs = 1000),
++        )
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++        assertNull(
++            guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_CANCEL, timedOut = true, waitMs = 1000),
++        )
++    }
++
++    @Test
++    fun `down timeout degrades the gesture it starts`() {
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, pointerCount = 1))
++        val degrade = guard.onSyncDispatchCompleted(
++            INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN, timedOut = true, waitMs = 1000,
++        )
++        assertEquals(TouchSyncGuard.TOUCH_DOWN, degrade?.triggerEventName)
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++    }
++
++    @Test
++    fun `degradation is scoped per view`() {
++        guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_DOWN)
++        guard.onSyncDispatchCompleted(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE, timedOut = true, waitMs = 1000)
++
++        assertFalse(guard.shouldDispatchSync(INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++        assertTrue(guard.shouldDispatchSync(INSTANCE, OTHER_TAG, TouchSyncGuard.TOUCH_MOVE))
++        assertTrue(guard.shouldDispatchSync(OTHER_INSTANCE, TAG, TouchSyncGuard.TOUCH_MOVE))
++    }
++
++    @Test
++    fun `non touch sync events are never managed`() {
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, "willDragEnd"))
++        assertNull(
++            guard.onSyncDispatchCompleted(INSTANCE, TAG, "willDragEnd", timedOut = true, waitMs = 1000),
++        )
++        assertTrue(guard.shouldDispatchSync(INSTANCE, TAG, "willDragEnd"))
++    }
++
++    @Test
++    fun `coalesce token embeds instance and tag`() {
++        assertEquals("7:42", guard.coalesceToken("7", 42))
++    }
++
++    private companion object {
++        const val INSTANCE = "1"
++        const val OTHER_INSTANCE = "2"
++        const val TAG = 100
++        const val OTHER_TAG = 200
++    }
++}

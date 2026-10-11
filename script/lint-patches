@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Lint the patch queue: every queued patch carries the fork trailers.
+
+Checks, per patch listed in patches/kuikly/.patches:
+  - the commit message has `Signed-off-by: Name <email>` and `Fork-Patch: <slug>`;
+  - the subject is ASCII and in conventional form `<type>(<area>): <summary>`;
+and that the patch directory holds no unlisted *.patch files.
+Usage: script/lint-patches [<patch-dir>]
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SIGNED_OFF = re.compile(r"^Signed-off-by: [^<>\n]+ <[^<>@\s]+@[^<>\s]+>$")
+FORK_PATCH = re.compile(r"^Fork-Patch: [A-Za-z0-9._-]+$")
+SUBJECT = re.compile(r"^[a-z]+(\([A-Za-z0-9 ._/,+-]+\))?!?: \S")
+
+
+def message_lines(text: str) -> tuple[str, list[str]]:
+    lines = text.splitlines()
+    subject = ""
+    body: list[str] = []
+    in_message = False
+    for index, line in enumerate(lines):
+        if not in_message:
+            if line.startswith("Subject: "):
+                subject = line[len("Subject: "):]
+                # RFC 2822 folded subject continuation lines
+                for follow in lines[index + 1:]:
+                    if follow.startswith(" "):
+                        subject += follow
+                    else:
+                        break
+                in_message = True
+            continue
+        if line == "---" or line.startswith("diff --git "):
+            break
+        body.append(line)
+    return subject, body
+
+
+def main() -> int:
+    config = json.loads((ROOT / "patches/config.json").read_text(encoding="utf-8"))
+    patch_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / config["repos"][0]["patch_dir"]
+    queue = [
+        line for line in (patch_dir / ".patches").read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#")
+    ]
+    errors: list[str] = []
+    for name in queue:
+        path = patch_dir / name
+        if not path.is_file():
+            errors.append(f"{name}: listed in .patches but missing")
+            continue
+        subject, body = message_lines(path.read_text(encoding="utf-8", errors="replace"))
+        if not subject:
+            errors.append(f"{name}: no Subject header")
+        elif not subject.isascii() or not SUBJECT.match(subject):
+            errors.append(f"{name}: subject is not an English conventional subject: {subject!r}")
+        if not any(SIGNED_OFF.match(line) for line in body):
+            errors.append(f"{name}: missing 'Signed-off-by: Name <email>' trailer")
+        if not any(FORK_PATCH.match(line) for line in body):
+            errors.append(f"{name}: missing 'Fork-Patch: <slug>' trailer")
+    unlisted = sorted({p.name for p in patch_dir.glob("*.patch")} - set(queue))
+    errors.extend(f"{name}: *.patch file not listed in .patches" for name in unlisted)
+    for error in errors:
+        print(f"error: {error}", file=sys.stderr)
+    if errors:
+        return 1
+    print(f"OK: {len(queue)} patches carry Signed-off-by and Fork-Patch trailers")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

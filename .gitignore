@@ -62,3 +62,11 @@ ohos_build.log
 
 ## HarmonyOS dependency lock files (auto-generated, do not commit)
 **/oh-package-lock.json5
+
+# Raft fork: materialized patched source and local tooling state
+/src/
+__pycache__/
+# Bundler (CocoaPods pin) and CI evidence live outside src/
+/.bundle/
+/vendor/bundle/
+/build/
