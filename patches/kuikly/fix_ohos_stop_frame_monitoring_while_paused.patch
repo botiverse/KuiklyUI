@@ -1,0 +1,253 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: elixxli <elixxli@tencent.com>
+Date: Tue, 13 Oct 2026 11:21:30 +0800
+Subject: fix(ohos): stop frame monitoring while paused
+
+Partially backport upstream #1794: fix the OnPause guard so a pending
+callback cannot accumulate background time or request another frame.
+Leave the independent JSON statistics correction out of this patch.
+Ark adds a host fixture using the production monitor and NativeVSync stubs.
+The upstream fix was merged on 2026-10-13; this does not establish a cause
+or fix for the separately reported multi-second UI stall.
+
+(cherry picked from commit 394993f188384e4d9d6233afcc41497f415b0bcf)
+Fork-Patch: ohos-frame-monitor-pause
+Origin: 394993f188384e4d9d6233afcc41497f415b0bcf
+Upstream-Status: submitted https://github.com/Tencent-TDS/KuiklyUI/pull/1794
+Co-authored-by: Ark <slock-android+ark@agents.stamp.build>
+Signed-off-by: Ark <slock-android+ark@agents.stamp.build>
+
+diff --git a/core-render-ohos/src/main/cpp/libohos_render/performance/frame/KRFrameMonitor.cpp b/core-render-ohos/src/main/cpp/libohos_render/performance/frame/KRFrameMonitor.cpp
+index 548313962e350772ad1bb32f5609851298850718..ca7f269cc50ea481fb8b65a5be19b76a882fc901 100644
+--- a/core-render-ohos/src/main/cpp/libohos_render/performance/frame/KRFrameMonitor.cpp
++++ b/core-render-ohos/src/main/cpp/libohos_render/performance/frame/KRFrameMonitor.cpp
+@@ -69,7 +69,7 @@ void KRFrameMonitor::OnResume() {
+ }
+ 
+ void KRFrameMonitor::OnPause() {
+-    if (!is_started_ || is_resumed_) {
++    if (!is_started_ || !is_resumed_) {
+         KR_LOG_INFO_WITH_TAG(kTag) << "pause, isStarted: " << is_started_ << "isResumed: " << is_resumed_;
+         return;   
+     }
+diff --git a/core-render-ohos/src/test/cpp/frame_monitor_lifecycle_test.cpp b/core-render-ohos/src/test/cpp/frame_monitor_lifecycle_test.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3ce85c0eb45b78b871db0dbc7a7669611ab362c
+--- /dev/null
++++ b/core-render-ohos/src/test/cpp/frame_monitor_lifecycle_test.cpp
+@@ -0,0 +1,138 @@
++#include "libohos_render/performance/frame/KRFrameMonitor.h"
++#include "thirdparty/cJSON/cJSON.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++struct OH_NativeVSync {
++    OH_NativeVSync_FrameCallback callback = nullptr;
++    void *data = nullptr;
++};
++
++namespace {
++OH_NativeVSync *active_vsync = nullptr;
++int request_count = 0;
++int destroy_count = 0;
++bool fail_create = false;
++
++void Expect(bool condition, const char *message) {
++    if (!condition) {
++        std::fprintf(stderr, "FAIL: %s\n", message);
++        std::exit(1);
++    }
++}
++
++void DeliverFrame(long long timestamp) {
++    Expect(active_vsync && active_vsync->callback, "a requested callback must be pending");
++    const auto callback = active_vsync->callback;
++    void *data = active_vsync->data;
++    // RequestFrame is single-shot and replaces an earlier request in the same
++    // frame. Clear before delivery so production code can request its next tick.
++    active_vsync->callback = nullptr;
++    active_vsync->data = nullptr;
++    callback(timestamp, data);
++}
++
++long long TotalDuration(KRFrameMonitor &monitor) {
++    cJSON *json = cJSON_Parse(monitor.GetMonitorData().c_str());
++    Expect(json != nullptr, "production monitor data must be JSON");
++    cJSON *duration = cJSON_GetObjectItemCaseSensitive(json, "totalDuration");
++    Expect(cJSON_IsNumber(duration), "totalDuration must be numeric");
++    const auto result = static_cast<long long>(duration->valuedouble);
++    cJSON_Delete(json);
++    return result;
++}
++}  // namespace
++
++extern "C" OH_NativeVSync *OH_NativeVSync_Create(const char *name, unsigned int length) {
++    Expect(active_vsync == nullptr, "only one monitor is alive per scenario");
++    Expect(std::strlen(name) == length, "monitor supplies a valid VSync name");
++    if (!fail_create) {
++        active_vsync = new OH_NativeVSync;
++    }
++    return active_vsync;
++}
++
++extern "C" void OH_NativeVSync_Destroy(OH_NativeVSync *vsync) {
++    Expect(vsync && vsync == active_vsync, "destroy the owned VSync exactly once");
++    ++destroy_count;
++    delete vsync;
++    active_vsync = nullptr;
++}
++
++extern "C" int OH_NativeVSync_RequestFrame(OH_NativeVSync *vsync,
++                                           OH_NativeVSync_FrameCallback callback, void *data) {
++    Expect(vsync && vsync == active_vsync && callback, "request uses a live VSync and callback");
++    ++request_count;
++    vsync->callback = callback;
++    vsync->data = data;
++    return 0;
++}
++
++int main() {
++    {
++        KRFrameMonitor monitor;
++        monitor.OnPause();
++        monitor.OnResume();
++        Expect(request_count == 0, "pause/resume before first paint must not request frames");
++
++        monitor.OnFirstFramePaint();
++        monitor.OnFirstFramePaint();
++        monitor.OnResume();
++        Expect(request_count == 1, "first paint starts once; duplicate start/resume does not request");
++        DeliverFrame(1000000000LL);
++        Expect(TotalDuration(monitor) == 0, "first callback establishes the timing baseline");
++        DeliverFrame(1016000000LL);
++        Expect(TotalDuration(monitor) == 16, "active callbacks accumulate elapsed time");
++        const auto data_before_pause = monitor.GetMonitorData();
++        const int requests_before_pause = request_count;
++
++        monitor.OnPause();
++        monitor.OnPause();
++        DeliverFrame(7000000000LL);  // callback already queued before pause
++        Expect(request_count == requests_before_pause, "paused callback must not rearm NativeVSync");
++        Expect(active_vsync->callback == nullptr, "paused monitor drains the pending callback");
++        Expect(monitor.GetMonitorData() == data_before_pause, "paused callback must not change statistics");
++
++        monitor.OnResume();
++        monitor.OnResume();
++        Expect(request_count == requests_before_pause + 1, "resume must request exactly one fresh frame");
++        DeliverFrame(10000000000LL);
++        Expect(monitor.GetMonitorData() == data_before_pause, "resume baseline excludes the background gap");
++        DeliverFrame(10016000000LL);
++        Expect(TotalDuration(monitor) == 32, "measurement continues with foreground time after resume");
++
++        // A second transition verifies that pause is not a one-time stop.
++        const int requests_before_second_pause = request_count;
++        monitor.OnPause();
++        DeliverFrame(20000000000LL);
++        Expect(request_count == requests_before_second_pause, "second pause also stops rearming");
++        monitor.OnResume();
++        Expect(request_count == requests_before_second_pause + 1, "second resume rearms once");
++
++        const auto data_before_destroy = monitor.GetMonitorData();
++        const int requests_before_destroy = request_count;
++        monitor.OnDestroy();
++        monitor.OnDestroy();
++        monitor.OnResume();
++        DeliverFrame(30000000000LL);  // object still alive; no callback after C++ destruction
++        Expect(request_count == requests_before_destroy, "destroyed lifecycle must not request frames");
++        Expect(monitor.GetMonitorData() == data_before_destroy, "stopped callback must not change statistics");
++    }
++    Expect(destroy_count == 1 && active_vsync == nullptr, "destructor releases NativeVSync once");
++
++    // Keep the platform-create-failure path safe across the same lifecycle.
++    fail_create = true;
++    const int requests_before_failure = request_count;
++    {
++        KRFrameMonitor monitor;
++        monitor.OnFirstFramePaint();
++        monitor.OnPause();
++        monitor.OnResume();
++        monitor.OnDestroy();
++    }
++    Expect(request_count == requests_before_failure && destroy_count == 1,
++           "a missing NativeVSync must not be requested or destroyed");
++    std::puts("PASS: production KRFrameMonitor pause/resume lifecycle");
++}
+diff --git a/core-render-ohos/src/test/cpp/frame_monitor_stubs/libohos_render/utils/KRRenderLoger.h b/core-render-ohos/src/test/cpp/frame_monitor_stubs/libohos_render/utils/KRRenderLoger.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b167b069926abe141a4603d8a93185490cb43a00
+--- /dev/null
++++ b/core-render-ohos/src/test/cpp/frame_monitor_stubs/libohos_render/utils/KRRenderLoger.h
+@@ -0,0 +1,13 @@
++#ifndef KUIKLY_TEST_RENDER_LOGGER_H
++#define KUIKLY_TEST_RENDER_LOGGER_H
++
++// Only platform logging is replaced. The test links the production monitor,
++// frame data, base monitor and JSON implementation without copying their logic.
++struct FrameMonitorTestLog {
++    template <typename T> FrameMonitorTestLog &operator<<(const T &) {
++        return *this;
++    }
++};
++#define KR_LOG_INFO_WITH_TAG(tag) FrameMonitorTestLog()
++
++#endif
+diff --git a/core-render-ohos/src/test/cpp/frame_monitor_stubs/native_vsync/native_vsync.h b/core-render-ohos/src/test/cpp/frame_monitor_stubs/native_vsync/native_vsync.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0eb895e7f5c420d2bea8910dc1401f1baa021068
+--- /dev/null
++++ b/core-render-ohos/src/test/cpp/frame_monitor_stubs/native_vsync/native_vsync.h
+@@ -0,0 +1,15 @@
++#ifndef KUIKLY_TEST_NATIVE_VSYNC_H
++#define KUIKLY_TEST_NATIVE_VSYNC_H
++
++// Host substitute for the NativeVSync API used by KRFrameMonitor.
++// Signatures match native_vsync.h; the fixture controls callback delivery.
++extern "C" {
++struct OH_NativeVSync;
++typedef void (*OH_NativeVSync_FrameCallback)(long long timestamp, void *data);
++OH_NativeVSync *OH_NativeVSync_Create(const char *name, unsigned int length);
++void OH_NativeVSync_Destroy(OH_NativeVSync *nativeVsync);
++int OH_NativeVSync_RequestFrame(OH_NativeVSync *nativeVsync,
++                               OH_NativeVSync_FrameCallback callback, void *data);
++}
++
++#endif
+diff --git a/core-render-ohos/src/test/cpp/run_frame_monitor_lifecycle_test.sh b/core-render-ohos/src/test/cpp/run_frame_monitor_lifecycle_test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..02236929ce9d6b6027eb460de48f2ef49a4f8e4e
+--- /dev/null
++++ b/core-render-ohos/src/test/cpp/run_frame_monitor_lifecycle_test.sh
+@@ -0,0 +1,31 @@
++#!/usr/bin/env bash
++# CI host fixture: exercise production lifecycle/callback code with NativeVSync
++# delivery and platform logging replaced. No device, renderer build or SDK needed.
++set -euo pipefail
++
++script_dir="$(cd "$(dirname "$0")" && pwd)"
++cpp_root="$(cd "$script_dir/../../main/cpp" && pwd)"
++build_dir="$(mktemp -d)"
++trap 'rm -rf "$build_dir"' EXIT
++
++"${CC:-cc}" -std=c99 -c "$cpp_root/thirdparty/cJSON/cJSON.c" -o "$build_dir/cJSON.o"
++
++# Existing production units contain unused local/parameter warnings. Keep the
++# fixture itself strict, without expanding this lifecycle fix into cleanup.
++# The SDK logging include normally supplies strlen; the stub has no SDK headers.
++for unit in performance/KRMonitor performance/frame/KRFrameData performance/frame/KRFrameMonitor; do
++  "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror \
++    -Wno-unused-variable -Wno-unused-parameter -include cstring -include cstdint \
++    -I"$script_dir/frame_monitor_stubs" -I"$cpp_root" \
++    -c "$cpp_root/libohos_render/$unit.cpp" -o "$build_dir/$(basename "$unit").o"
++done
++
++"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror \
++  -include cstdint \
++  -I"$script_dir/frame_monitor_stubs" -I"$cpp_root" \
++  "$script_dir/frame_monitor_lifecycle_test.cpp" \
++  "$build_dir/KRFrameMonitor.o" "$build_dir/KRFrameData.o" \
++  "$build_dir/KRMonitor.o" "$build_dir/cJSON.o" \
++  -lm -o "$build_dir/frame_monitor_lifecycle_test"
++
++"$build_dir/frame_monitor_lifecycle_test"
