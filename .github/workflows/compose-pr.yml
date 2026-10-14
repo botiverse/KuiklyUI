@@ -209,6 +209,8 @@ jobs:
         run: src/tools/ios-renderer-tests/run-text-input-event-sequencer-test.sh
       - name: textarea blur raw text regression
         run: src/tools/ios-renderer-tests/run-textarea-blur-raw-text-test.sh
+      - name: text input composition barrier regression
+        run: src/tools/ios-renderer-tests/run-text-input-composition-barrier-test.sh
       - name: Run gradient rich-text optional dispatch fixture
         run: src/tools/ios-renderer-tests/run-gradient-rich-text-method-dispatch-test.sh
       - name: Run layout size report formatter fixture

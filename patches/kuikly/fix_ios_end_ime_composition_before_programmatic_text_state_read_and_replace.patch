@@ -1,0 +1,267 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: artin <artin@cat.ms>
+Date: Wed, 14 Oct 2026 23:36:05 +0800
+Subject: fix(ios): end IME composition before programmatic text state read and
+ replace
+
+A live marked-text session (e.g. a Korean syllable being composed) survived
+css_getTextInputState / css_setTextInputState / css_setText: the send path
+read the full text but never ended the composition, and the clear-after-send
+replaced the text with the input delegate detached, so the IME re-asserted
+its pending syllable into the emptied composer. unmarkText on entry commits
+the pending text in place and ends the session, mirroring the Android
+finishComposingText barrier before the send state read.
+
+Fork-Patch: ios-end-ime-composition-before-text-state-access
+Upstream-Status: pending
+Signed-off-by: artin <artin@cat.ms>
+
+diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
+index 949d01d711742b470b87d73c88e730aae1b424dd..f1a837b50d1921ba04673a802bd6b5446d302060 100644
+--- a/core-render-ios/Extension/Components/KRTextAreaView.m
++++ b/core-render-ios/Extension/Components/KRTextAreaView.m
+@@ -447,6 +447,16 @@ NSString *const KRFontContextParamKey = @"contextParam";
+     [self updateCursorIndex:index];
+ }
+ 
++// 程序化读取/替换文本前，先结束仍存活的 IME 组合会话（如果有）。
++// 不结束的话，组合会话会在文本被替换后继续存活，并把残留音节重新塞回输入框
++// （例如韩文输入到一半直接点发送，末尾音节留在输入框并成为下一条消息的首字）。
++// unmarkText 会把 marked text 原地转为普通文本并结束组合，内容不变。
++- (void)p_endMarkedTextCompositionIfNeeded {
++    if (self.markedTextRange) {
++        [self unmarkText];
++    }
++}
++
+ - (void)setCss_textInputState:(NSString *)css_textInputState {
+     if (!css_textInputState.length) return;
+     [self css_setTextInputState:@{KRC_PARAM_KEY: css_textInputState}];
+@@ -461,6 +471,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
+     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
+     if (!json) return;
+     [_textInputEventSequencer invalidatePendingMarkedText];
++    [self p_endMarkedTextCompositionIfNeeded];
+ 
+     NSString *requestedRawText = json[@"text"] ?: @"";
+     NSInteger requestedSelectionStart = json[@"selectionStart"] ? [json[@"selectionStart"] integerValue] : requestedRawText.length;
+@@ -556,6 +567,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
+ - (void)css_getTextInputState:(NSDictionary *)args {
+     KuiklyRenderCallback callback = args[KRC_CALLBACK_KEY];
+     if (callback) {
++        [self p_endMarkedTextCompositionIfNeeded];
+         callback([self p_currentTextInputStatePayload]);
+     }
+ }
+@@ -571,6 +583,7 @@ NSString *const KRFontContextParamKey = @"contextParam";
+ - (void)css_setText:(NSDictionary *)args {
+     NSString *text = args[KRC_PARAM_KEY];
+     [_textInputEventSequencer invalidatePendingMarkedText];
++    [self p_endMarkedTextCompositionIfNeeded];
+     self.text = text;
+     [self textViewDidChange:self];
+ }
+diff --git a/core-render-ios/Extension/Components/KRTextFieldView.m b/core-render-ios/Extension/Components/KRTextFieldView.m
+index 8f70c8af8192f38518f427e7f86702eff5179659..f6aeea2834e2b936ff8c15038634570af86ad635 100644
+--- a/core-render-ios/Extension/Components/KRTextFieldView.m
++++ b/core-render-ios/Extension/Components/KRTextFieldView.m
+@@ -336,8 +336,22 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+     _pendingFocusRequestId = nil;
+ }
+ 
++// 程序化读取/替换文本前，先结束仍存活的 IME 组合会话（如果有）。
++// 不结束的话，组合会话会在文本被替换后继续存活，并把残留音节重新塞回输入框
++// （例如韩文输入到一半直接点发送，末尾音节留在输入框并成为下一条消息的首字）。
++// unmarkText 会把 marked text 原地转为普通文本并结束组合，内容不变。
++// macOS host 的 KRUITextField 继承自 NSTextField，没有 unmarkText，仅在 iOS 编译。
++- (void)p_endMarkedTextCompositionIfNeeded {
++#if !TARGET_OS_OSX
++    if (self.markedTextRange) {
++        [self unmarkText];
++    }
++#endif
++}
++
+ - (void)css_setText:(NSDictionary *)args {
+     NSString *text = args[KRC_PARAM_KEY];
++    [self p_endMarkedTextCompositionIfNeeded];
+     self.text = text;
+     [self onTextFeildTextChanged:self];
+ }
+@@ -372,6 +386,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+     NSError *error = nil;
+     NSDictionary *json = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:&error];
+     if (!json) return;
++    [self p_endMarkedTextCompositionIfNeeded];
+ 
+     NSString *requestedRawText = json[@"text"] ?: @"";
+     NSInteger requestedSelectionStart = json[@"selectionStart"] ? [json[@"selectionStart"] integerValue] : requestedRawText.length;
+@@ -419,6 +434,7 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+ - (void)css_getTextInputState:(NSDictionary *)args {
+     KuiklyRenderCallback callback = args[KRC_CALLBACK_KEY];
+     if (callback) {
++        [self p_endMarkedTextCompositionIfNeeded];
+         callback([self p_currentTextInputStatePayload]);
+     }
+ }
+diff --git a/tools/ios-renderer-tests/KRTextInputCompositionBarrierTest.m b/tools/ios-renderer-tests/KRTextInputCompositionBarrierTest.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..2137c3763cb4a15283ffe6a89157b90bf515771b
+--- /dev/null
++++ b/tools/ios-renderer-tests/KRTextInputCompositionBarrierTest.m
+@@ -0,0 +1,109 @@
++// Regression: a live IME composition (marked text, e.g. Korean syllable being
++// composed) must be ended before the iOS render reads or replaces the text
++// state programmatically. Without the barrier the composition session survives
++// the clear-after-send and re-asserts its pending syllable into the emptied
++// composer, so the last Korean syllable stays in the input and becomes the
++// first character of the next message.
++#import <Foundation/Foundation.h>
++#import <AppKit/AppKit.h>
++#import "KRTextAreaView.h"
++#import "KRComponentDefine.h"
++
++@interface KRTextAreaView (CompositionBarrierTest)
++- (void)css_getTextInputState:(NSDictionary *)args;
++- (void)css_setTextInputState:(NSDictionary *)args;
++- (void)css_setText:(NSDictionary *)args;
++@end
++
++// Link-only stubs: the test paths never reach these classes (colour/font
++// conversion, rich-text shadow layout, bridge expand handler), so empty
++// implementations satisfy the linker without pulling their real dependency
++// closures (which do not build under the macOS host shim).
++@interface KRConvertUtil : NSObject
++@end
++@implementation KRConvertUtil
++@end
++@interface KRRichTextShadow : NSObject
++@end
++@implementation KRRichTextShadow
++@end
++@interface KuiklyRenderBridge : NSObject
++@end
++@implementation KuiklyRenderBridge
+++ (id)componentExpandHandler { return nil; }
++@end
++@interface KuiklyRenderThreadManager : NSObject
++@end
++@implementation KuiklyRenderThreadManager
++@end
++@interface KuiklyRenderView : NSObject
++@end
++@implementation KuiklyRenderView
++@end
++@interface TDFBaseModule : NSObject
++@end
++@implementation TDFBaseModule
++@end
++
++static int failures = 0;
++#define KRAssert(cond, msg) do { if (!(cond)) { \
++    NSLog(@"FAIL: %s", msg); failures++; } else { NSLog(@"PASS: %s", msg); } } while (0)
++
++static NSDictionary *KRReadState(KRTextAreaView *view) {
++    __block NSDictionary *payload = nil;
++    [view css_getTextInputState:@{KRC_CALLBACK_KEY: ^(id result) {
++        payload = result;
++    }}];
++    return payload;
++}
++
++static void KRMarkText(KRTextAreaView *view, NSString *marked, NSInteger location) {
++    [view setMarkedText:marked
++          selectedRange:NSMakeRange(location + (NSInteger)marked.length, 0)
++       replacementRange:NSMakeRange(NSNotFound, 0)];
++}
++
++int main(void) {
++    @autoreleasepool {
++        KRTextAreaView *view = [[KRTextAreaView alloc] initWithFrame:NSMakeRect(0, 0, 200, 100)];
++
++        // 1) Read barrier: getTextInputState with a live composition commits the
++        //    pending syllable into the payload and ends the composition.
++        view.text = @"가";
++        KRMarkText(view, @"나", 1);
++        KRAssert(view.markedTextRange != nil, "composition active before read");
++        NSDictionary *payload = KRReadState(view);
++        KRAssert(view.markedTextRange == nil, "read ends the composition (unmarkText)");
++        KRAssert([payload[@"text"] isEqualToString:@"가나"],
++                 "payload carries committed syllable");
++        KRAssert([payload[@"compositionStart"] integerValue] == -1,
++                 "payload composition range cleared");
++
++        // 2) Replace barrier: setTextInputState with a live composition must not
++        //    leave a residue that re-enters the cleared field (the send path).
++        view.text = @"가";
++        KRMarkText(view, @"나", 1);
++        KRAssert(view.markedTextRange != nil, "composition active before replace");
++        [view css_setTextInputState:@{KRC_PARAM_KEY: @"{\"text\":\"\",\"selectionStart\":0,\"selectionEnd\":0}"}];
++        KRAssert(view.markedTextRange == nil, "replace ends the composition");
++        KRAssert(view.text.length == 0, "cleared field stays empty (no syllable residue)");
++
++        // 3) setText barrier: same guarantee for the legacy setText entry point.
++        view.text = @"가";
++        KRMarkText(view, @"나", 1);
++        [view css_setText:@{KRC_PARAM_KEY: @""}];
++        KRAssert(view.markedTextRange == nil, "setText ends the composition");
++        KRAssert(view.text.length == 0, "setText leaves no residue");
++
++        // 4) No composition: read does not alter committed text or selection contract.
++        view.text = @"hello";
++        payload = KRReadState(view);
++        KRAssert([payload[@"text"] isEqualToString:@"hello"], "plain read unchanged");
++    }
++    if (failures > 0) {
++        NSLog(@"RESULT: FAIL (%d)", failures);
++        return 1;
++    }
++    NSLog(@"RESULT: PASS");
++    return 0;
++}
+diff --git a/tools/ios-renderer-tests/run-text-input-composition-barrier-test.sh b/tools/ios-renderer-tests/run-text-input-composition-barrier-test.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..19732f4f09fcafb5337defd7705fcbae112140d4
+--- /dev/null
++++ b/tools/ios-renderer-tests/run-text-input-composition-barrier-test.sh
+@@ -0,0 +1,40 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
++build_dir="${1:-$repo_root/build/ios-text-input-composition-barrier-test}"
++mkdir -p "$build_dir"
++
++xcrun clang \
++  -O2 \
++  -fobjc-arc \
++  -fblocks \
++  -fmodules \
++  -Werror \
++  -Wno-incomplete-implementation \
++  -Wno-protocol \
++  -Wno-unused-parameter \
++  -Wno-deprecated-declarations \
++  -DTARGET_OS_OSX=1 \
++  -framework AppKit \
++  -framework Foundation \
++  -framework QuartzCore \
++  -I "$repo_root/core-render-ios/include" \
++  -I "$repo_root/core-render-ios/MacSupport" \
++  -I "$repo_root/core-render-ios/Extension" \
++  -I "$repo_root/core-render-ios/Extension/Components" \
++  -I "$repo_root/core-render-ios/Extension/Modules" \
++  -I "$repo_root/core-render-ios/Extension/Category" \
++  -I "$repo_root/core-render-ios/Protocol" \
++  -I "$repo_root/core-render-ios/Utils" \
++  "$repo_root/core-render-ios/MacSupport/KRUIKit.m" \
++  "$repo_root/core-render-ios/Extension/Components/KRTextAreaView.m" \
++  "$repo_root/core-render-ios/Extension/Components/KRTextInputEventSequencer.m" \
++  "$repo_root/core-render-ios/Extension/Components/KRTextBlurEventPayload.m" \
++  "$repo_root/core-render-ios/Extension/Modules/KRLogModule.m" \
++  "$repo_root/core-render-ios/Extension/Modules/KRBaseModule.m" \
++  "$repo_root/core-render-ios/Extension/Category/NSObject+KR.m" \
++  "$repo_root/tools/ios-renderer-tests/KRTextInputCompositionBarrierTest.m" \
++  -o "$build_dir/KRTextInputCompositionBarrierTest"
++
++MallocScribble=1 "$build_dir/KRTextInputCompositionBarrierTest"
