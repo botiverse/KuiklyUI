@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: artin <artin@cat.ms>
+Date: Thu, 15 Oct 2026 02:32:53 +0800
+Subject: fix(ios): notify the keyboard when programmatic text replacement
+ changes content
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+css_setTextInputState on KRTextAreaView detaches inputDelegate while
+replacing text, and KRTextFieldView assigns the text property directly; in
+both paths UIKit never sends textWillChange/textDidChange for the mutation.
+Keyboards whose automaton keeps composing context as plain text (Korean
+2-Set commits each syllable unmarked, so markedTextRange is legitimately
+nil) then keep the stale syllable context and continue composing onto it:
+sending mid-syllable cleared the composer, but the next keystrokes resumed
+from the ghost context (가나 became 글가나). When the call actually replaced
+the text content, emit textWillChange/textDidChange after the delegate is
+restored so the keyboard resets against the new document; selection-only
+syncs stay silent to keep the original QuickType flicker suppression. The
+unmarkText barrier from the previous patch stays for marked-text IMEs
+(Chinese pinyin, Japanese).
+
+Fork-Patch: ios-notify-keyboard-on-programmatic-text-replacement
+Upstream-Status: pending
+Signed-off-by: artin <artin@cat.ms>
+
+diff --git a/core-render-ios/Extension/Components/KRTextAreaView.m b/core-render-ios/Extension/Components/KRTextAreaView.m
+index f1a837b50d1921ba04673a802bd6b5446d302060..c163581bc1340dfe559cfe178c9c06a566b1f869 100644
+--- a/core-render-ios/Extension/Components/KRTextAreaView.m
++++ b/core-render-ios/Extension/Components/KRTextAreaView.m
+@@ -540,6 +540,14 @@ NSString *const KRFontContextParamKey = @"contextParam";
+     // 这里是界限的终点
+ #if !TARGET_OS_OSX
+     self.inputDelegate = savedInputDelegate;
++    // 摘掉 delegate 期间若实际替换了文本内容，键盘完全不知道文档变了，
++    // IME（如韩文 2-Set）的自动机上下文会停在旧内容上，把残留音节拼进下一次输入。
++    // 装回 delegate 后补发一次变更通知，让键盘按新文档重置。
++    // 仅选区同步（textChanged == NO）维持静默，保留当初压 QuickType 闪烁的目的。
++    if (textChanged && savedInputDelegate) {
++        [savedInputDelegate textWillChange:self];
++        [savedInputDelegate textDidChange:self];
++    }
+ #endif
+     _ignoreTextDidChanged = NO;
+ 
+diff --git a/core-render-ios/Extension/Components/KRTextFieldView.m b/core-render-ios/Extension/Components/KRTextFieldView.m
+index f6aeea2834e2b936ff8c15038634570af86ad635..1b7f8d8047decf83e97e49a1933dd874663ddc2b 100644
+--- a/core-render-ios/Extension/Components/KRTextFieldView.m
++++ b/core-render-ios/Extension/Components/KRTextFieldView.m
+@@ -410,6 +410,8 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+     NSInteger selectionEnd = MAX(0, MIN(requestedSelectionEnd, (NSInteger)rawText.length));
+ 
+     // 设置文本。程序化同步时先压住中间态 textInputStateChange，等 selection 调整完再统一回传最终 state
++    NSString *currentRawText = self.text ?: @"";
++    BOOL textChanged = ![currentRawText isEqualToString:rawText];
+     _suppressTextInputStateChange = YES;
+     self.text = rawText;
+     [self onTextFeildTextChanged:self];
+@@ -429,6 +431,17 @@ NSString *const KRVFontContextParamKey = @"contextParam";
+     }
+ 
+     [self p_notifyTextInputStateChangeIfNeeded];
++
++    // 程序化替换文本内容时，UITextField.text 赋值不会通知键盘；
++    // IME（如韩文 2-Set）的自动机上下文会停在旧内容上，把残留音节拼进下一次输入。
++    // 内容确实变化时补发一次变更通知，让键盘按新文档重置；仅选区同步保持静默。
++    // macOS host 的 KRUITextField 继承自 NSTextField，没有 inputDelegate，仅在 iOS 编译。
++#if !TARGET_OS_OSX
++    if (textChanged && self.inputDelegate) {
++        [self.inputDelegate textWillChange:self];
++        [self.inputDelegate textDidChange:self];
++    }
++#endif
+ }
+ 
+ - (void)css_getTextInputState:(NSDictionary *)args {
