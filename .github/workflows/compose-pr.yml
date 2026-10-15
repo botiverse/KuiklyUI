@@ -329,6 +329,8 @@ jobs:
         run: core-render-ohos/src/test/cpp/run_inline_box_atomic_text_edge_test.sh
       - name: Stop OHOS frame-monitor callbacks while paused
         run: core-render-ohos/src/test/cpp/run_frame_monitor_lifecycle_test.sh
+      - name: Ignore OHOS image outcomes until native submission
+        run: python3 tools/ohos-renderer-tests/run-image-pending-outcomes.py
 
   exact-matrix:
     if: always()
