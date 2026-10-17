@@ -1,0 +1,265 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mahua <raft-mobile-mahua@mail.build>
+Date: Sat, 17 Oct 2026 19:49:50 +0800
+Subject: fix(compose): defer reverse lazy re-anchoring to scroll end during a
+ fling
+
+A reverse list re-anchored its native frame on every content size
+estimate change, replaying every placed child through the bridge per
+scroll event. Device QA on botiverse/mobile 1.14.0 (thread list,
+LazyColumn reverseLayout) measured 804px of blank rows for up to 3.3s
+at 30Hz during a fast fling; the app-level bottom-up flag off makes it
+vanish. Scroll-handler re-anchors now defer to scroll end while the
+reported native offset stays inside the anchored range; out-of-bounds
+reports still correct immediately, and rest-state behavior is unchanged.
+Runtime verification happens mobile-side after the next release set.
+
+Fork-Patch: compose-defer-reverse-reanchor-during-scroll
+Upstream-Status: pending
+Signed-off-by: Mahua <raft-mobile-mahua@mail.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+index dbfb6979494dd8d5bcefb28159f1da775fb5d2ec..31094bf323cfe8e8a2f98db723cbbd0a9ea66d65 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+@@ -561,8 +561,16 @@ class KuiklyScrollInfo {
+      * change of the native maximum and the native offset follows [composeOffset], so the items
+      * on screen stay put. With [force] the native offset is re-synced even if the size did not
+      * change (a reported offset outside the range was clamped).
+-     */
+-    internal fun reanchorReverseNativeOffset(force: Boolean = false) {
++     *
++     * [deferWhileScrolling] marks calls from the per-event scroll handler: a non-forced
++     * re-anchor whose reported native offset is still inside the anchored range is then
++     * deferred, keeping [reverseAnchoredContentSize] — and with it the placed children and
++     * the logical offset mapping — in the old frame, so nothing on screen moves. The pending
++     * frame change is applied once by the scroll-end handler. Without the deferral a fast
++     * fling re-anchors on every estimate growth, replaying every placed child through the
++     * bridge per scroll event and starving the render of newly composed rows.
++     */
++    internal fun reanchorReverseNativeOffset(force: Boolean = false, deferWhileScrolling: Boolean = false) {
+         if (!reverseLayout) return
+         val sv = scrollView ?: return
+         val move = ReverseScrollOffsetMapping.reanchor(
+@@ -571,6 +579,7 @@ class KuiklyScrollInfo {
+             viewportSize = viewportSize,
+             logicalOffset = composeOffset.toInt()
+         )
++        if (shouldDeferReverseReanchor(force, deferWhileScrolling, move.nativeDelta)) return
+         reverseAnchoredContentSize = currentContentSize
+         if (move.nativeDelta == 0 && !force) return
+         val issueMove = needsNativeMove(move.nativeOffset)
+@@ -583,6 +592,25 @@ class KuiklyScrollInfo {
+         sv.moveNativeContentOffset(if (issueMove) target else null, move.nativeDelta, this)
+     }
+ 
++    /**
++     * Whether this re-anchor call defers to scroll end. Only scroll-handler calls pass
++     * [deferWhileScrolling]; the gate on the anchored native range keeps an out-of-bounds
++     * reported offset (clamped on Android, overscroll or direction reversal on iOS) on the
++     * immediate path.
++     */
++    internal fun shouldDeferReverseReanchor(
++        force: Boolean,
++        deferWhileScrolling: Boolean,
++        nativeDelta: Int
++    ): Boolean =
++        deferWhileScrolling && ReverseScrollOffsetMapping.shouldDeferReanchor(
++            nativeDelta = nativeDelta,
++            force = force,
++            reportedNativeOffset = reportedNativeOffset(),
++            anchoredMaxNativeOffset = anchoredMaxNativeOffset,
++            epsilon = 0.5f * getDensity()
++        )
++
+     /**
+      * Reverse layout: apply a logical delta (top expansion, pull-back, programmatic scroll)
+      * as the mirrored native move from the Compose-owned offset.
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+index 6df0be7b6fede94faa4744e535f91f634ae3f7c3..e6c9cc26ec4c538475e5eb3a41a903cde1ab655b 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+@@ -117,6 +117,28 @@ internal object ReverseScrollOffsetMapping {
+         )
+     }
+ 
++    /**
++     * Whether a non-forced re-anchor of a reverse list may be deferred to the end of the
++     * active scroll stream instead of replaying every placed child per scroll event.
++     *
++     * Deferring keeps the placed children and the logical offset mapping in the frame
++     * anchored to the old content size, so nothing on screen moves; the scroll-end
++     * re-anchor then applies the accumulated content size change once. It is only valid
++     * while the reported native offset stays inside the anchored range: outside it the
++     * stale frame no longer describes the position (native already scrolled into the
++     * newly grown region, or an overscroll bounce), and the re-anchor must apply now.
++     */
++    fun shouldDeferReanchor(
++        nativeDelta: Int,
++        force: Boolean,
++        reportedNativeOffset: Float,
++        anchoredMaxNativeOffset: Int,
++        epsilon: Float,
++    ): Boolean =
++        !force && nativeDelta != 0 &&
++            reportedNativeOffset >= -epsilon &&
++            reportedNativeOffset <= anchoredMaxNativeOffset + epsilon
++
+     /**
+      * Whether a native offset move to [target] must be issued (and its echo guarded).
+      * A move to where native already is, or already heading, emits no scroll callback,
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+index 8834bfbb08690ff7e76dcbe04d3ab0d007062775..9805ce977ede2e98802909940b406e25ffdd2e23 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+@@ -318,6 +318,8 @@ fun SubcomposeLayout(
+                 if (offset != rawOffset) {
+                     kuiklyInfo.reanchorReverseNativeOffset(force = true)
+                 }
++                // Flush a reverse re-anchor deferred while the scroll stream was active.
++                kuiklyInfo.reanchorReverseNativeOffset()
+ 
+                 // 仅触摸滑动结束会回调，api调用和bounce回弹都不会触发
+                 // / back是回滑,forward是前滑
+@@ -411,11 +413,17 @@ fun SubcomposeLayout(
+                 }
+                 // 判断是否滑出边界
+                 if (logicalOffset < 0 && scrollableState.isAtTop()) {
+-                    kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
++                    kuiklyInfo.reanchorReverseNativeOffset(
++                        force = nativeOffsetOutOfBounds,
++                        deferWhileScrolling = true,
++                    )
+                     return@scroll
+                 } else if (toButtomDelta != null && delta > toButtomDelta) {
+                     if (toButtomDelta.toInt() <= 0) {
+-                        kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
++                        kuiklyInfo.reanchorReverseNativeOffset(
++                            force = nativeOffsetOutOfBounds,
++                            deferWhileScrolling = true,
++                        )
+                         scrollableState.tryExpandStartSize(logicalOffset, true)
+                         return@scroll
+                     }
+@@ -426,7 +434,12 @@ fun SubcomposeLayout(
+ 
+                 // 触发compose滑动，并重新布局
+                 val comsumedDelta = scrollableState.kuiklyOnScroll(delta)
+-                kuiklyInfo.reanchorReverseNativeOffset(force = nativeOffsetOutOfBounds)
++                // A growing estimate re-anchors the reverse native frame; defer the
++                // child replay to scroll end instead of paying it per scroll event.
++                kuiklyInfo.reanchorReverseNativeOffset(
++                    force = nativeOffsetOutOfBounds,
++                    deferWhileScrolling = true,
++                )
+ 
+                 // 尝试扩容
+                 scrollableState.tryExpandStartSize(logicalOffset, true)
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
+index abfd141937df7e8386ca0b3e14b4aeac455bd070..e65fe3fba90544f8075a3e5ad724a60bf3fd14a0 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfoTest.kt
+@@ -18,7 +18,9 @@ package com.tencent.kuikly.compose.gestures
+ import com.tencent.kuikly.compose.ui.unit.IntOffset
+ import kotlin.test.Test
+ import kotlin.test.assertEquals
++import kotlin.test.assertFalse
+ import kotlin.test.assertNull
++import kotlin.test.assertTrue
+ 
+ class KuiklyScrollInfoTest {
+     private var nowNanos = 0L
+@@ -174,4 +176,28 @@ class KuiklyScrollInfoTest {
+         assertEquals(KuiklyScrollInfo.NativeScrollEventDisposition.SyncOnly, info.resolve(6_000f))
+         assertNull(info.ignoreScrollOffset)
+     }
++
++    // Reverse re-anchor deferral: during a fling the scroll handler calls with
++    // deferWhileScrolling = true so a growing content estimate does not replay every
++    // placed child per event; scroll end applies the accumulated change once.
++    // (No bound ScrollView: the reported offset falls back to contentOffset and the
++    // viewport is 0, so the anchored range is the whole 9000px content size.)
++    @Test
++    fun reverseReanchorDefersOnlyForScrollHandlerCallsInsideTheAnchoredRange() {
++        val info = reverseInfo(null).apply { contentOffset = 3_000 }
++
++        // Mid-fling scroll-handler call after the estimate grew: defer.
++        assertTrue(info.shouldDeferReverseReanchor(force = false, deferWhileScrolling = true, nativeDelta = 4_500))
++        // Callers outside the scroll stream (bind/restore, programmatic moves) never defer.
++        assertFalse(info.shouldDeferReverseReanchor(force = false, deferWhileScrolling = false, nativeDelta = 4_500))
++        // A clamped out-of-bounds report keeps the correction immediate.
++        assertFalse(info.shouldDeferReverseReanchor(force = true, deferWhileScrolling = true, nativeDelta = 4_500))
++        // No frame change: nothing to defer, the call is already free.
++        assertFalse(info.shouldDeferReverseReanchor(force = false, deferWhileScrolling = true, nativeDelta = 0))
++
++        // Native offset past the anchored maximum (reverse fling back to item 0 before
++        // scroll end flushed): the stale frame no longer applies, re-anchor now.
++        info.contentOffset = 9_060
++        assertFalse(info.shouldDeferReverseReanchor(force = false, deferWhileScrolling = true, nativeDelta = 4_500))
++    }
+ }
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+index 26d2c2ac6e0efe81eb9ec3745600f8da3dcf40b1..2e2d53b879ec5c51c0a531e48ee59af30b9ddf24 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+@@ -161,4 +161,60 @@ class ReverseScrollOffsetMappingTest {
+         assertFalse(mapping.needsNativeMove(target = 600, pendingTarget = 600, reportedNativeOffset = 0f, epsilon = 1.5f))
+         assertTrue(mapping.needsNativeMove(target = 600, pendingTarget = 900, reportedNativeOffset = 600f, epsilon = 1.5f))
+     }
++
++    // A fast fling grows the content estimate repeatedly; re-anchoring per scroll event
++    // replays every placed child through the bridge and starves the render of newly
++    // composed rows (blank rows for seconds). The re-anchor defers to scroll end while
++    // the reported offset stays inside the anchored frame.
++    @Test
++    fun reanchorDefersMidScrollInsideTheAnchoredRange() {
++        assertTrue(
++            mapping.shouldDeferReanchor(
++                nativeDelta = 4_500,
++                force = false,
++                reportedNativeOffset = 3_000f,
++                anchoredMaxNativeOffset = max,
++                epsilon = 1.5f,
++            )
++        )
++        // Both range ends are still deferrable.
++        assertTrue(mapping.shouldDeferReanchor(4_500, force = false, reportedNativeOffset = 0f, anchoredMaxNativeOffset = max, epsilon = 1.5f))
++        assertTrue(mapping.shouldDeferReanchor(4_500, force = false, reportedNativeOffset = max.toFloat(), anchoredMaxNativeOffset = max, epsilon = 1.5f))
++    }
++
++    @Test
++    fun reanchorNeverDefersWithoutAFrameChangeOrWhenForced() {
++        // No content size change: nothing to defer, the call is already free.
++        assertFalse(mapping.shouldDeferReanchor(nativeDelta = 0, force = false, reportedNativeOffset = 3_000f, anchoredMaxNativeOffset = max, epsilon = 1.5f))
++        // A clamped out-of-range report forces the correction to apply immediately.
++        assertFalse(mapping.shouldDeferReanchor(nativeDelta = 4_500, force = true, reportedNativeOffset = 3_000f, anchoredMaxNativeOffset = max, epsilon = 1.5f))
++    }
++
++    @Test
++    fun reanchorStaysImmediateWhenNativeLeftTheAnchoredRange() {
++        // Native already scrolled past the anchored maximum (the content view grew
++        // natively before the frame moved, e.g. a reverse fling back to item 0):
++        // the stale mapping no longer describes the position.
++        assertFalse(
++            mapping.shouldDeferReanchor(
++                nativeDelta = 4_500,
++                force = false,
++                reportedNativeOffset = max + 60f,
++                anchoredMaxNativeOffset = max,
++                epsilon = 1.5f,
++            )
++        )
++        // An overscroll bounce below the anchored range applies immediately too.
++        assertFalse(
++            mapping.shouldDeferReanchor(
++                nativeDelta = 4_500,
++                force = false,
++                reportedNativeOffset = -60f,
++                anchoredMaxNativeOffset = max,
++                epsilon = 1.5f,
++            )
++        )
++        // Within the epsilon tolerance the offset still counts as in range.
++        assertTrue(mapping.shouldDeferReanchor(4_500, force = false, reportedNativeOffset = -1f, anchoredMaxNativeOffset = max, epsilon = 1.5f))
++    }
+ }
