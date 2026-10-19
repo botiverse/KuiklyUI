@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Codex-Android-DevOPS=20=28=E6=9E=97=E8=88=9F=29?=
+ <codex-android-devops@agents.raft.build>
+Date: Mon, 19 Oct 2026 08:08:18 +0000
+Subject: fix(compose): keep Android bounce on reverse lazy lists
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The reverse lazy native scroll patch forced bouncesEnable(false) on every
+Android reverse list and re-synced any out-of-range native offset at once,
+so a reverse list (for example a chat thread) could not be pulled past
+either end. An Android over-scroll reports its translation as an offset
+outside the native range; the scroll handlers already clamp that offset for
+Compose, so the logical offset never moves. Keep that clamp, stop forcing
+bounce off, and skip the immediate re-sync while an Android reverse list
+bounces: native returns to the range by itself. The app's bouncesEnable
+choice is honoured again, and other platforms and normal layouts keep the
+previous behaviour.
+
+Fork-Patch: compose-reverse-lazy-android-bounce
+Origin: botiverse/mobile task #37 (thread edges cannot be pulled on Android)
+Upstream-Status: pending
+Signed-off-by: Codex-Android-DevOPS (林舟) <codex-android-devops@agents.raft.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt
+index 88a26f31661c55e9f28390923d15bd40ffbf91fa..3d9c637078a39432e95e878c3b6cdd1c856b2203 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/extension/BouncesEnable.kt
+@@ -19,8 +19,6 @@ import com.tencent.kuikly.compose.ui.Modifier
+ import com.tencent.kuikly.compose.ui.node.KNode
+ import com.tencent.kuikly.compose.ui.node.ModifierNodeElement
+ import com.tencent.kuikly.compose.ui.node.requireLayoutNode
+-import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
+-import com.tencent.kuikly.compose.views.KuiklyInfoKey
+ import com.tencent.kuikly.compose.views.KuiklyUserBouncesEnableKey
+ import com.tencent.kuikly.core.views.ScrollerView
+ 
+@@ -68,12 +66,11 @@ private class BouncesEnableNode(
+     fun update() {
+         val scrollerView = findScrollerView() ?: return
+         this.scrollerView = scrollerView
++        // Recorded for the scroll handlers: a bouncing reverse list must not be re-synced while it
++        // over-scrolls (see KuiklyScrollInfo.shouldResyncOutOfRangeNativeOffset).
+         scrollerView.extProps[KuiklyUserBouncesEnableKey] = bouncesEnable as Any
+-        // A reverse lazy list keeps Android bounce off (see updateReverseLayoutBounces).
+-        val kuiklyInfo = scrollerView.extProps[KuiklyInfoKey] as? KuiklyScrollInfo
+-        val reverseAndroid = kuiklyInfo?.reverseLayout == true && kuiklyInfo.pageData?.isAndroid == true
+         scrollerView.getViewAttr().run {
+-            bouncesEnable(bouncesEnable && !reverseAndroid)
++            bouncesEnable(bouncesEnable)
+         }
+     }
+ 
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+index 31094bf323cfe8e8a2f98db723cbbd0a9ea66d65..e28539cd154c65760c0b858b457ce1ed978b2413 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+@@ -37,6 +37,7 @@ import kotlinx.coroutines.Job
+ import kotlinx.coroutines.flow.MutableStateFlow
+ import kotlinx.coroutines.flow.filterNotNull
+ import kotlinx.coroutines.flow.first
++import com.tencent.kuikly.compose.views.KuiklyUserBouncesEnableKey
+ 
+ internal class ScrollViewBindingGate<T : Any> {
+     private val binding = MutableStateFlow<T?>(null)
+@@ -530,7 +531,27 @@ class KuiklyScrollInfo {
+             composeOffset
+         }
+ 
+-    /** Native offset the scroll handlers map: reverse lists on Android clamp (their bounce is off). */
++    /**
++     * Whether an out-of-range native offset should be pulled back into range right away.
++     * A reverse list on Android with bounce on reports the over-scroll translation as an offset
++     * past the range while the user drags or the bounce animates; that offset is visual only (it
++     * is clamped for Compose by [boundedNativeScrollOffset]) and the native bounce returns it to
++     * the range by itself. Re-syncing it would cancel the bounce mid-gesture.
++     */
++    internal fun shouldResyncOutOfRangeNativeOffset(): Boolean =
++        ReverseScrollOffsetMapping.resyncOutOfRangeNativeOffset(
++            reverseLayout = reverseLayout,
++            isAndroid = pageData?.isAndroid == true,
++            nativeBounceEnabled = nativeBounceEnabled()
++        )
++
++    private fun nativeBounceEnabled(): Boolean =
++        (scrollView?.extProps?.get(KuiklyUserBouncesEnableKey) as? Boolean) ?: true
++
++    /**
++     * Native offset the scroll handlers map. Reverse lists on Android clamp it to the range so an
++     * over-scroll (bounce) never moves the logical offset.
++     */
+     internal fun boundedNativeScrollOffset(nativeOffset: Int): Int =
+         ReverseScrollOffsetMapping.boundedNativeOffset(
+             nativeOffset,
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+index e6c9cc26ec4c538475e5eb3a41a903cde1ab655b..a37a4711e635c22e6a24d44f9ae650d4feec263e 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+@@ -61,13 +61,23 @@ internal object ReverseScrollOffsetMapping {
+         if (reverseLayout) -logicalDelta else logicalDelta
+ 
+     /**
+-     * Native offset the scroll handlers map. Only reverse lists without native bounce (Android)
+-     * clamp: an Android over-scroll translates the content view past the range, which a reverse
+-     * mapping would read as a jump at the list start.
++     * Native offset the scroll handlers map. Reverse lists on Android clamp: an Android over-scroll
++     * (bounce) translates the content view past the range, which a reverse mapping would otherwise
++     * read as a jump at the list start. The bounce itself stays visible natively.
+      */
+     fun boundedNativeOffset(nativeOffset: Int, maxNativeOffset: Int, clamp: Boolean): Int =
+         if (clamp) nativeOffset.coerceIn(0, maxNativeOffset) else nativeOffset
+ 
++    /**
++     * Whether a reported offset outside the native range must be re-synced into it at once.
++     * Not while an Android reverse list bounces: the over-scroll translation is reported as an
++     * out-of-range offset during the drag and the bounce-back, the clamped value already keeps the
++     * logical offset still, and native returns to the range by itself. Re-syncing would cancel the
++     * bounce. Every other case keeps the immediate re-sync.
++     */
++    fun resyncOutOfRangeNativeOffset(reverseLayout: Boolean, isAndroid: Boolean, nativeBounceEnabled: Boolean): Boolean =
++        !(reverseLayout && isAndroid && nativeBounceEnabled)
++
+     /** A programmatic move of a reverse list: logical result and the native move that realises it. */
+     data class Move(val logicalOffset: Int, val nativeOffset: Int, val nativeDelta: Int)
+ 
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+index 9805ce977ede2e98802909940b406e25ffdd2e23..8a3783ffa89a3911d825f7b88825ae844e1ca9c4 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+@@ -73,7 +73,6 @@ import com.tencent.kuikly.compose.ui.unit.LayoutDirection
+ import com.tencent.kuikly.compose.ui.util.fastForEach
+ import com.tencent.kuikly.compose.gestures.KuiklyScrollInfo
+ import com.tencent.kuikly.compose.views.KuiklyInfoKey
+-import com.tencent.kuikly.compose.views.KuiklyUserBouncesEnableKey
+ import com.tencent.kuikly.compose.views.VirtualNodeView
+ import com.tencent.kuikly.compose.layout.bindKuiklyInfo
+ import com.tencent.kuikly.compose.layout.checkOffScreenNode
+@@ -315,7 +314,7 @@ fun SubcomposeLayout(
+                 kuiklyInfo.contentOffset = offset
+                 (scrollableState as? PagerState)?.onNativeContentOffsetChanged(offset)
+                 (scrollableState as? DrawerInternalPagerState)?.onNativeContentOffsetChanged(offset)
+-                if (offset != rawOffset) {
++                if (offset != rawOffset && kuiklyInfo.shouldResyncOutOfRangeNativeOffset()) {
+                     kuiklyInfo.reanchorReverseNativeOffset(force = true)
+                 }
+                 // Flush a reverse re-anchor deferred while the scroll stream was active.
+@@ -333,7 +332,7 @@ fun SubcomposeLayout(
+                 val rawOffset = if (isVertical) scaleParams.offsetY.toInt() else scaleParams.offsetX.toInt()
+                 val offset = kuiklyInfo.boundedNativeScrollOffset(rawOffset)
+                 kuiklyInfo.contentOffset = offset
+-                if (offset != rawOffset) {
++                if (offset != rawOffset && kuiklyInfo.shouldResyncOutOfRangeNativeOffset()) {
+                     kuiklyInfo.reanchorReverseNativeOffset(force = true)
+                 }
+                 kuiklyInfo.isDragging = kuiklyInfo.scrollView?.isDragging ?: false
+@@ -396,7 +395,7 @@ fun SubcomposeLayout(
+                 // 忽略较小的滑动
+                 val delta = logicalOffset - kuiklyInfo.composeOffset
+                 if (delta.toInt() == 0) {
+-                    if (nativeOffsetOutOfBounds) {
++                    if (nativeOffsetOutOfBounds && kuiklyInfo.shouldResyncOutOfRangeNativeOffset()) {
+                         kuiklyInfo.reanchorReverseNativeOffset(force = true)
+                     }
+                     return@scroll
+@@ -515,7 +514,6 @@ fun SubcomposeLayout(
+                 val newKuiklyInfo = scrollableState.kuiklyInfo
+                 invalidateDeferredScrollOffsetAlignmentOnReuse(oldKuiklyInfo, newKuiklyInfo)
+                 val kuiklyInfo = bindKuiklyInfo(sv, scrollableState, orientation)
+-                updateReverseLayoutBounces(sv, oldKuiklyInfo, kuiklyInfo)
+                 transferScrollToTopCallback(oldKuiklyInfo, kuiklyInfo)
+                 restoreScrollerViewOnReuse(sv, kuiklyInfo, isPagerView, orientation, oldKuiklyInfo?.contentOffset)
+ 
+@@ -1640,25 +1638,6 @@ internal fun LayoutNode.invalidateDrawAfterSubcomposeSlotActivation() {
+     (this as? KNode<*>)?.invalidateDrawAndForceAncestors()
+ }
+ 
+-/**
+- * Android over-scroll translates the content view past the native range, which a reverse
+- * list would read as a jump at its start: keep bounce off while a reverse list is bound,
+- * and restore the user's [com.tencent.kuikly.compose.extension.bouncesEnable] choice after.
+- */
+-private fun updateReverseLayoutBounces(
+-    sv: ScrollerView<ScrollerAttr, ScrollerEvent>,
+-    oldKuiklyInfo: KuiklyScrollInfo?,
+-    kuiklyInfo: KuiklyScrollInfo,
+-) {
+-    val reverseAndroid = kuiklyInfo.pageData?.isAndroid == true && kuiklyInfo.reverseLayout
+-    if (reverseAndroid) {
+-        sv.getViewAttr().bouncesEnable(false)
+-    } else if (oldKuiklyInfo?.pageData?.isAndroid == true && oldKuiklyInfo.reverseLayout) {
+-        val userBouncesEnable = sv.extProps[KuiklyUserBouncesEnableKey] as? Boolean
+-        sv.getViewAttr().bouncesEnable(userBouncesEnable ?: true)
+-    }
+-}
+-
+ private val ReusedSlotId =
+     object {
+         override fun toString(): String = "ReusedSlotId"
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+index 2e2d53b879ec5c51c0a531e48ee59af30b9ddf24..b77f714df5a201d7f7c2a1058df42815c857dc6c 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+@@ -217,4 +217,16 @@ class ReverseScrollOffsetMappingTest {
+         // Within the epsilon tolerance the offset still counts as in range.
+         assertTrue(mapping.shouldDeferReanchor(4_500, force = false, reportedNativeOffset = -1f, anchoredMaxNativeOffset = max, epsilon = 1.5f))
+     }
++
++    @Test
++    fun androidReverseListLetsItsBounceSettleInsteadOfResyncing() {
++        // An Android reverse list with bounce on reports the over-scroll as an out-of-range offset;
++        // re-syncing it would cancel the bounce mid-drag.
++        assertFalse(mapping.resyncOutOfRangeNativeOffset(reverseLayout = true, isAndroid = true, nativeBounceEnabled = true))
++        // Bounce off (or the app disabled it): an out-of-range report is a real desync, re-sync it.
++        assertTrue(mapping.resyncOutOfRangeNativeOffset(reverseLayout = true, isAndroid = true, nativeBounceEnabled = false))
++        // Other platforms and normal layouts keep the previous behaviour.
++        assertTrue(mapping.resyncOutOfRangeNativeOffset(reverseLayout = true, isAndroid = false, nativeBounceEnabled = true))
++        assertTrue(mapping.resyncOutOfRangeNativeOffset(reverseLayout = false, isAndroid = true, nativeBounceEnabled = true))
++    }
+ }
