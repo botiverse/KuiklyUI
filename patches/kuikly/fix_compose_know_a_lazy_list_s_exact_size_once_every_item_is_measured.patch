@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex-Android-DevOPS
+ <slock-android+codex-android-devops@agents.stamp.build>
+Date: Mon, 19 Oct 2026 15:33:58 +0000
+Subject: fix(compose): know a lazy list's exact size once every item is
+ measured
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The exact content size (totalContentSize) is only computed when the last item
+is visible to Compose. During a fast native fling Compose lags far behind
+(device probe, botiverse/mobile alpha 10020011: native offset moved ~1640 px
+while Compose advanced only from item 12 to 19 of 28, lastItemVisible false for
+the whole fling), so the size stayed at the placeholder and the native list ran
+past the real end into an empty region (blank rows), correcting only at rest.
+
+LazyList measure now also sums the cached size of every item; when all items
+of a short list (<= 500) are measured, calculateLazyListContentSize uses that
+sum instead of waiting for the last item to become visible.
+
+Fork-Patch: compose-lazy-list-exact-size-from-measured-items
+Origin: botiverse/mobile task #37 (fast-fling blank rows in thread)
+Upstream-Status: pending
+Signed-off-by: Codex-Android-DevOPS (林舟) <slock-android+codex-android-devops@agents.stamp.build>
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
+index de8d1bf7c2af22ce07d683683d7bff478b32b46f..3f2f948cb5c740e28fee7077d51cc24fb9ac6691 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/foundation/lazy/LazyList.kt
+@@ -17,6 +17,7 @@
+ package com.tencent.kuikly.compose.foundation.lazy
+ 
+ import androidx.compose.runtime.Composable
++import com.tencent.kuikly.compose.scroller.measuredItemsContentSize
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
+ import androidx.compose.runtime.snapshots.Snapshot
+@@ -421,6 +422,12 @@ private fun rememberLazyListMeasurePolicy(
+ 
+         // Update sticky item key to kuiklyInfo
+         state.kuiklyInfo.stickyItemKey = measureResult.stickyItem?.key
++        state.kuiklyInfo.measuredItemsContentSize = measuredItemsContentSize(
++            itemsCount = itemsCount,
++            keyAt = itemProvider::getKey,
++            cache = state.kuiklyInfo.itemMainSpaceCache,
++            leadingPadding = beforeContentPadding,
++        )
+         
+         state.applyMeasureResult(measureResult, isLookingAhead)
+         measureResult
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+index e28539cd154c65760c0b858b457ce1ed978b2413..3ff6639b24c33891e346b745a09e1da0818f9419 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
+@@ -261,6 +261,14 @@ class KuiklyScrollInfo {
+      */
+     var realContentSize: Int? = null
+ 
++    /**
++     * Content size summed from the measured size of every item, or null while some item has
++     * not been measured yet. Lets a lazy list know its exact size before its last item becomes
++     * visible to Compose (which, during a fast native fling, may not happen before the native
++     * offset has already run past the real end).
++     */
++    internal var measuredItemsContentSize: Int? = null
++
+     /**
+      * Clear the pinned exact size so the next scroll can recompute it
+      * after a real layout change.
+@@ -421,6 +429,7 @@ class KuiklyScrollInfo {
+ 
+         // Clear list items and pagination caches
+         itemMainSpaceCache.clear()
++        measuredItemsContentSize = null
+         stickyItemKey = null
+         cachedTotalItems = 0
+         pullToRefreshTopInsetPx = 0
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+index 85e911cec1c9452e0dd74b41290279fae3e95d8a..03095bc0a1eaf63a8b423a4ab73649b1044eb38e 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+@@ -162,9 +162,34 @@ private fun LazyListState.calculateLazyListContentSize(curOffset: Float): Int? {
+     val lastItem = layoutInfo.visibleItemsInfo.lastOrNull()
+     return if (lastItem != null && lastItem.index == layoutInfo.totalItemsCount - 1) {
+         (curOffset + lastItem.offset + lastItem.size).toInt()
+-    } else null
++    } else {
++        // Every item already measured (botiverse/mobile task #37): the exact size is known even
++        // though Compose, lagging a fast native fling, has not reached the last item yet.
++        kuiklyInfo.measuredItemsContentSize
++    }
+ }
+ 
++/**
++ * Sum of the cached main-axis size (with spacing) of every item, plus [leadingPadding], or null
++ * if any item is not in [cache] or the list is longer than [maxItems] (kept O(n) cheap).
++ */
++internal fun measuredItemsContentSize(
++    itemsCount: Int,
++    keyAt: (Int) -> Any,
++    cache: Map<Any, Int>,
++    leadingPadding: Int,
++    maxItems: Int = MEASURED_CONTENT_SIZE_MAX_ITEMS,
++): Int? {
++    if (itemsCount <= 0 || itemsCount > maxItems || cache.size < itemsCount) return null
++    var sum = leadingPadding
++    for (index in 0 until itemsCount) {
++        sum += cache[keyAt(index)] ?: return null
++    }
++    return sum
++}
++
++private const val MEASURED_CONTENT_SIZE_MAX_ITEMS = 500
++
+ private fun PagerState.calculatePagerContentSize(curOffset: Float): Int? {
+     val lastItem = layoutInfo.visiblePagesInfo.lastOrNull()
+     return if (lastItem != null && lastItem.index == pageCount - 1) {
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/MeasuredItemsContentSizeTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/MeasuredItemsContentSizeTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7797e0b4b2be2976199c3f377a24392568cfc49
+--- /dev/null
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/scroller/MeasuredItemsContentSizeTest.kt
+@@ -0,0 +1,56 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.compose.scroller
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertNull
++
++/**
++ * botiverse/mobile task #37: during a fast native fling Compose lagged behind and never saw the
++ * last item, so the exact content size stayed unknown and the native list ran past the real
++ * end into the placeholder. Once every item has been measured the size is known anyway.
++ */
++class MeasuredItemsContentSizeTest {
++
++    private val keys = listOf("a", "b", "c")
++
++    @Test
++    fun sumsEveryMeasuredItemPlusLeadingPadding() {
++        val cache = mapOf<Any, Int>("a" to 100, "b" to 250, "c" to 60)
++        assertEquals(410 + 12, measuredItemsContentSize(3, keys::get, cache, leadingPadding = 12))
++    }
++
++    @Test
++    fun unknownWhileAnyItemIsUnmeasured() {
++        val cache = mapOf<Any, Int>("a" to 100, "c" to 60, "stale" to 999)
++        assertNull(measuredItemsContentSize(3, keys::get, cache, leadingPadding = 0))
++    }
++
++    @Test
++    fun staleCacheEntriesDoNotCount() {
++        // Enough entries in total, but one current item is missing: still unknown.
++        val cache = mapOf<Any, Int>("a" to 1, "b" to 2, "old1" to 3, "old2" to 4)
++        assertNull(measuredItemsContentSize(3, keys::get, cache, leadingPadding = 0))
++    }
++
++    @Test
++    fun emptyOrTooLongListsAreLeftToTheEstimate() {
++        assertNull(measuredItemsContentSize(0, keys::get, emptyMap(), leadingPadding = 0))
++        val cache = mapOf<Any, Int>("a" to 1, "b" to 2, "c" to 3)
++        assertNull(measuredItemsContentSize(3, keys::get, cache, leadingPadding = 0, maxItems = 2))
++    }
++}
