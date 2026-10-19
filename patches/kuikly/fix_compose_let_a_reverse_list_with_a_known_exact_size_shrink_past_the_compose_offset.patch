@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex-Android-DevOPS
+ <slock-android+codex-android-devops@agents.stamp.build>
+Date: Mon, 19 Oct 2026 14:16:32 +0000
+Subject: fix(compose): let a reverse list with a known exact size shrink past
+ the compose offset
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+calculateAndUpdateContentSize grows a shrinking content size back to
+composeOffset + viewport whenever the Compose offset lies past the new
+maximum. On a reverse list that state means the native fling has run past
+the oldest item into the 3000dp placeholder; growing it back keeps the
+placeholder frame for the whole gesture. Device probe on botiverse/mobile
+alpha 10020010 (raft.15): contentH held at 7058 for 40 frames of one fling
+while rowsInView fell 14 -> 0 and the uncovered viewport grew to 933 px,
+shrinking to 3749 only at scroll end.
+
+When the exact size is known, a reverse list now shrinks; the re-anchor
+(immediate for a shrink since #209) clamps the native offset to the real
+end. Normal lists and an open estimate keep the existing behaviour.
+
+Fork-Patch: compose-reverse-lazy-shrink-past-compose-offset
+Origin: botiverse/mobile task #37 (fast-fling blank rows in thread)
+Upstream-Status: pending
+Signed-off-by: Codex-Android-DevOPS (林舟) <slock-android+codex-android-devops@agents.stamp.build>
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+index 456b79eaec5464fc77f601072ea860ef16a1ca84..ffdd1411768bb99420c162b3a2dd6f94cdf38ea8 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+@@ -127,6 +127,20 @@ internal object ReverseScrollOffsetMapping {
+         )
+     }
+ 
++    /**
++     * Whether a shrinking content size must instead grow to keep the current Compose offset
++     * inside the range (the default for every list).
++     *
++     * Not for a reverse list whose exact content size is known: there the Compose offset only
++     * lies past the new maximum because the native fling ran on into the placeholder content
++     * (`DEFAULT_CONTENT_SIZE`) beyond the oldest item. Keeping the placeholder frame lets the
++     * fling continue through a region with no rows for the whole gesture (botiverse/mobile
++     * task #37: contentH held at the placeholder for 40 frames while the viewport emptied);
++     * shrinking lets the re-anchor clamp the native offset to the real end instead.
++     */
++    fun keepContentSizeForComposeOffset(reverseLayout: Boolean, exactContentSizeKnown: Boolean): Boolean =
++        !(reverseLayout && exactContentSizeKnown)
++
+     /**
+      * Whether a non-forced re-anchor of a reverse list may be deferred to the end of the
+      * active scroll stream instead of replaying every placed child per scroll event.
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+index 85e911cec1c9452e0dd74b41290279fae3e95d8a..3805116d80cb688c3239766027d8bf19bac76cb5 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
+@@ -34,6 +34,7 @@ import com.tencent.kuikly.compose.ui.unit.LayoutDirection
+ import com.tencent.kuikly.compose.ui.util.fastSumBy
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
++import com.tencent.kuikly.compose.gestures.ReverseScrollOffsetMapping
+ import kotlin.math.max
+ import kotlin.math.roundToInt
+ 
+@@ -97,7 +98,12 @@ internal fun ScrollableState.calculateAndUpdateContentSize(reanchorReverse: Bool
+     // 如果contentSize变小了，需要确保composeOffset不会超出边界
+     if (newContentSize < oldContentSize) {
+         val newMaxScrollOffset = maxOf(0, newContentSize - kuiklyInfo.viewportSize)
+-        if (kuiklyInfo.composeOffset > newMaxScrollOffset) {
++        if (kuiklyInfo.composeOffset > newMaxScrollOffset &&
++            ReverseScrollOffsetMapping.keepContentSizeForComposeOffset(
++                reverseLayout = kuiklyInfo.reverseLayout,
++                exactContentSizeKnown = kuiklyInfo.realContentSize != null,
++            )
++        ) {
+             // 如果composeOffset超出新的边界，增加contentSize来保持composeOffset不变
+             val requiredContentSize = kuiklyInfo.composeOffset.toInt() + kuiklyInfo.viewportSize
+             kuiklyInfo.currentContentSize = maxOf(newContentSize, requiredContentSize)
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+index ee0bda09b285af675a84228bb917526ac7c3e901..437c94dd69e71089e9a097641d278db1a1599442 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+@@ -199,6 +199,20 @@ class ReverseScrollOffsetMappingTest {
+         )
+     }
+ 
++    // botiverse/mobile task #37 (second device round): a fast fling towards the oldest message
++    // of a short reverse thread held contentH at the 3000dp placeholder for the whole gesture,
++    // because a shrink below the Compose offset grew the content back. With the exact size
++    // known, a reverse list shrinks so the re-anchor clamps native to the real end.
++    @Test
++    fun reverseListWithExactSizeShrinksPastTheComposeOffset() {
++        assertFalse(mapping.keepContentSizeForComposeOffset(reverseLayout = true, exactContentSizeKnown = true))
++        // Estimate still open (end not reached): keep the existing behaviour.
++        assertTrue(mapping.keepContentSizeForComposeOffset(reverseLayout = true, exactContentSizeKnown = false))
++        // Normal lists keep the existing behaviour regardless.
++        assertTrue(mapping.keepContentSizeForComposeOffset(reverseLayout = false, exactContentSizeKnown = true))
++        assertTrue(mapping.keepContentSizeForComposeOffset(reverseLayout = false, exactContentSizeKnown = false))
++    }
++
+     @Test
+     fun reanchorNeverDefersWithoutAFrameChangeOrWhenForced() {
+         // No content size change: nothing to defer, the call is already free.
