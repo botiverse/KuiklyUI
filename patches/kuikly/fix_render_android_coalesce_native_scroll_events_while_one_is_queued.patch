@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex-Android-DevOPS
+ <slock-android+codex-android-devops@agents.stamp.build>
+Date: Mon, 19 Oct 2026 23:24:35 +0000
+Subject: fix(render-android): coalesce native scroll events while one is
+ queued
+
+On a fast fling the Kuikly context thread fell up to ~550ms behind the
+native scroll events of a reverse thread list (botiverse/mobile task #37,
+device trace on 2.28.0-raft.16-diag1): every offset was queued and later
+replayed in one burst, most of them already out of range, while the native
+list ran past the rows Compose had placed (the white area).
+
+Scroll events now coalesce per view: the first event posts one context task,
+later events before it runs only replace the payload, and the task delivers
+the newest offset with the number of events it stands for
+(ScrollParams.coalesced, 1 when not reported). The task keeps the first
+event's queue position, so scroll end and drag end still run after it.
+Sync (touch) dispatch is unchanged.
+
+Fork-Patch: render-android-coalesce-native-scroll-events
+Upstream-Status: pending
+Signed-off-by: Codex-Android-DevOPS <slock-android+codex-android-devops@agents.stamp.build>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/ScaleWithDensity.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/ScaleWithDensity.kt
+index f2c5a9e43deb18480c359ff96601bf2bc025bd23..042b76f00954f4c00dc5b38131fb6a35842d28d2 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/ScaleWithDensity.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/ScaleWithDensity.kt
+@@ -45,7 +45,8 @@ fun ScrollParams.scaleWithDensity(density: Float): ScrollParams {
+         viewWidth = viewWidth * density,
+         viewHeight = viewHeight * density,
+         isDragging = isDragging,
+-        touches = touches.map { it.scaleWithDensity(density) }
++        touches = touches.map { it.scaleWithDensity(density) },
++        coalesced = coalesced
+     )
+ }
+ 
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+index fba94abbd050d80110faf0842fa408a51feeb19e..034820b5c72c3c8a66d666096621bbb6aa685317 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/layout/SubcomposeLayout.kt
+@@ -378,6 +378,7 @@ fun SubcomposeLayout(
+                 )
+                 KuiklyScrollTrace.log {
+                     "scroll raw=$rawOffset offset=$offset oob=$nativeOffsetOutOfBounds disposition=$disposition " +
++                        "coalesced=${scaleParams.coalesced} " +
+                         "logical=${kuiklyInfo.logicalOffsetFromNative(offset)} composeOffset=${kuiklyInfo.composeOffset.toInt()} " +
+                         "current=${kuiklyInfo.currentContentSize} real=${kuiklyInfo.realContentSize} " +
+                         "dragging=${kuiklyInfo.isDragging} inProgress=${scrollableState.isScrollInProgress}"
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+index eef8e391446301d7f5da47b892cbc2682b92edf2..525c22db80dcb0d9f4fe6a365954b18a41990eb8 100644
+--- a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/core/KuiklyRenderCore.kt
+@@ -49,6 +49,7 @@ import com.tencent.kuikly.core.render.android.layer.IKuiklyRenderLayerInitCallba
+ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreContextScheduler
+ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreTask
+ import com.tencent.kuikly.core.render.android.scheduler.KuiklyRenderCoreUIScheduler
++import com.tencent.kuikly.core.render.android.scheduler.LatestEventCoalescer
+ import com.tencent.kuikly.core.render.android.scheduler.TouchSyncGuard
+ import com.tencent.tdf.module.TDFBaseModule
+ import org.json.JSONObject
+@@ -80,6 +81,11 @@ class KuiklyRenderCore(
+     private var uiScheduler: KuiklyRenderCoreUIScheduler? = null
+     private val touchSyncGuard = TouchSyncGuard()
+ 
++    // Native scroll events, latest offset wins while one is still queued (botiverse/mobile
++    // task #37): a busy context thread otherwise replays a stale backlog of offsets while the
++    // native fling runs ahead of what Compose has placed.
++    private val scrollEventCoalescer = LatestEventCoalescer<Int>()
++
+     /**
+      * KTV调用Native方法的回调map
+      */
+@@ -473,6 +479,14 @@ class KuiklyRenderCore(
+                                 fireViewEventOnContext(tag, args.thirdArg(), result)
+                             }
+                         }
++                        eventName == SCROLL_EVENT_NAME -> {
++                            if (scrollEventCoalescer.offer(tag, result)) {
++                                performOnContextQueue {
++                                    val drained = scrollEventCoalescer.drain(tag) ?: return@performOnContextQueue
++                                    fireViewEventOnContext(tag, args.thirdArg(), withCoalescedCount(drained))
++                                }
++                            }
++                        }
+                         else -> {
+                             performOnContextQueue {
+                                 fireViewEventOnContext(tag, args.thirdArg(), result)
+@@ -487,6 +501,11 @@ class KuiklyRenderCore(
+ 
+     private fun isEvent(args: List<Any?>): Boolean = args.fifthArg<Int?>() == 1
+ 
++    private fun withCoalescedCount(drained: LatestEventCoalescer.Drained): Any? {
++        val params = drained.value as? Map<*, *> ?: return drained.value
++        return HashMap<Any?, Any?>(params).apply { put(SCROLL_COALESCED_KEY, drained.count) }
++    }
++
+     private fun setRenderViewFrame(method: KuiklyRenderNativeMethod, args: List<Any?>): Any? {
+         val frame = RectF(args.thirdArg(), args.fourthArg(), args.fifthArg(), args.sixthArg())
+         if (renderLayerHandler == null) {
+@@ -717,6 +736,9 @@ class KuiklyRenderCore(
+     companion object {
+         private var instanceIdProducer = 0L
+         private const val LAYOUT_VIEW_MAX_LOG_COUNT = 10
++        private const val SCROLL_EVENT_NAME = "scroll"
++        /** Number of native scroll events a delivered (coalesced) scroll event stands for. */
++        private const val SCROLL_COALESCED_KEY = "coalesced"
+     }
+ 
+ }
+diff --git a/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/LatestEventCoalescer.kt b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/LatestEventCoalescer.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..da2feb842533446b767fa57da0ed2596b9a0d6d8
+--- /dev/null
++++ b/core-render-android/src/main/java/com/tencent/kuikly/core/render/android/scheduler/LatestEventCoalescer.kt
+@@ -0,0 +1,51 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.scheduler
++
++/**
++ * Latest-value coalescing for high-frequency view events delivered to the context queue.
++ *
++ * The first [offer] for a key asks the caller to post one drain task; later offers before that
++ * task runs only replace the value. The drain task keeps the queue position of the first event,
++ * so events posted after it (scroll end, drag end) still run after it, and it delivers the
++ * newest value together with how many offers it stands for.
++ */
++internal class LatestEventCoalescer<K> {
++
++    class Drained(val value: Any?, val count: Int)
++
++    private class Slot(var value: Any?, var count: Int)
++
++    private val slots = HashMap<K, Slot>()
++
++    /** Records [value] for [key]; returns true when the caller must post a drain task. */
++    fun offer(key: K, value: Any?): Boolean = synchronized(slots) {
++        val slot = slots[key]
++        if (slot != null) {
++            slot.value = value
++            slot.count += 1
++            false
++        } else {
++            slots[key] = Slot(value, 1)
++            true
++        }
++    }
++
++    /** Removes and returns the pending value for [key], or null if nothing is pending. */
++    fun drain(key: K): Drained? = synchronized(slots) {
++        slots.remove(key)?.let { Drained(it.value, it.count) }
++    }
++}
+diff --git a/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/LatestEventCoalescerTest.kt b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/LatestEventCoalescerTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bfc4a7d6945d2376887c6c9b6435a6ac7c18514
+--- /dev/null
++++ b/core-render-android/src/test/java/com/tencent/kuikly/core/render/android/scheduler/LatestEventCoalescerTest.kt
+@@ -0,0 +1,56 @@
++/*
++ * Tencent is pleased to support the open source community by making KuiklyUI
++ * available.
++ * Copyright (C) 2025 Tencent. All rights reserved.
++ * Licensed under the License of KuiklyUI;
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * https://github.com/Tencent-TDS/KuiklyUI/blob/main/LICENSE
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.tencent.kuikly.core.render.android.scheduler
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class LatestEventCoalescerTest {
++
++    @Test
++    fun firstOfferAsksForOneDrainAndLaterOffersOnlyReplaceTheValue() {
++        val coalescer = LatestEventCoalescer<String>()
++        assertTrue(coalescer.offer("list", 1))
++        assertFalse(coalescer.offer("list", 2))
++        assertFalse(coalescer.offer("list", 3))
++        val drained = coalescer.drain("list")!!
++        assertEquals(3, drained.value)
++        assertEquals(3, drained.count)
++        assertNull(coalescer.drain("list"))
++    }
++
++    @Test
++    fun afterADrainTheNextOfferStartsANewBatch() {
++        val coalescer = LatestEventCoalescer<String>()
++        assertTrue(coalescer.offer("list", 1))
++        assertEquals(1, coalescer.drain("list")!!.count)
++        assertTrue(coalescer.offer("list", 2))
++        assertEquals(2, coalescer.drain("list")!!.value)
++    }
++
++    @Test
++    fun keysAreIndependent() {
++        val coalescer = LatestEventCoalescer<String>()
++        assertTrue(coalescer.offer("a", 1))
++        assertTrue(coalescer.offer("b", 2))
++        assertFalse(coalescer.offer("a", 3))
++        assertEquals(3, coalescer.drain("a")!!.value)
++        assertEquals(2, coalescer.drain("b")!!.value)
++    }
++}
+diff --git a/core-render-ohos/oh-package.json5 b/core-render-ohos/oh-package.json5
+index 362cc7f33d9548353a203e50dd88760825d3a466..5277d0f0780ad019d97c9682d4df4fdda79eed96 100644
+--- a/core-render-ohos/oh-package.json5
++++ b/core-render-ohos/oh-package.json5
+@@ -1,6 +1,6 @@
+ {
+   "name": "@kuikly-open/render",
+-  "version": "2.28.0-raft.16-diag1-2.0.21-ohos",
++  "version": "2.28.0-raft.16-diag2-2.0.21-ohos",
+   "description": "Kuikly is a comprehensive cross-platform solution for UI and logic based on Kotlin multi-platform. It was launched by Tencent's company-level Oteam in the front-end field. It aims to provide a high-performance, full-platform development framework with unified codebase, ultimate ease of use, and dynamic flexibility",
+   "main": "Index.ets",
+   "author": {
+diff --git a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
+index 6dc38bc114ea39543922ea7e35121376e565a968..d0754c32930379b605ae1e579702e3ebe66bd362 100644
+--- a/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
++++ b/core/src/commonMain/kotlin/com/tencent/kuikly/core/views/ScrollerView.kt
+@@ -746,7 +746,10 @@ data class ScrollParams(
+     val viewWidth: Float,  // 列表View宽度
+     val viewHeight: Float, // 列表View高度
+     val isDragging: Boolean, // 是否在dragging
+-    val touches: List<Touch> = listOf()   // Touch触摸点信息列表
++    val touches: List<Touch> = listOf(),   // Touch触摸点信息列表
++    // Native scroll events this one stands for after render-side latest-wins coalescing
++    // (1 when nothing was coalesced or the renderer does not report it).
++    val coalesced: Int = 1
+ ) { // 当前是否处于拖拽列表滚动中
+     companion object {
+         fun decode(params: JSONObject): ScrollParams {
+@@ -773,7 +776,8 @@ data class ScrollParams(
+                 viewWidth,
+                 viewHeight,
+                 isDragging,
+-                touches
++                touches,
++                params.optInt("coalesced", 1)
+             )
+         }
+     }

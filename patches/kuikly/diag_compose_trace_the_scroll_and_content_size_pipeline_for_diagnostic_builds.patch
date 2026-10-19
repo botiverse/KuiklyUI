@@ -14,20 +14,26 @@ Fork-Patch: diag-compose-scroll-content-size-trace
 Signed-off-by: Codex-Android-DevOPS <codex-android-devops@agents.raft>
 
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
-index 3ff6639b24c33891e346b745a09e1da0818f9419..5bfc6266ca24c337b5cab5267479e408bcd606e3 100644
+index 3ff6639b24c33891e346b745a09e1da0818f9419..f6330fdfbec63272092e005ab799d772824dfb10 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/KuiklyScrollInfo.kt
-@@ -401,6 +401,9 @@ class KuiklyScrollInfo {
+@@ -399,8 +399,15 @@ class KuiklyScrollInfo {
+         updateContentSizeToRender(reanchorReverse = true)
+     }
  
++    private var lastTracedFrameHeight = Float.NaN
++
      internal fun updateContentSizeToRender(reanchorReverse: Boolean) {
          val frame = createContentFrame()
-+        KuiklyScrollTrace.log {
-+            "frame current=$currentContentSize height=${if (isVertical()) frame.height else frame.width} reanchor=$reanchorReverse"
++        val tracedHeight = if (isVertical()) frame.height else frame.width
++        if (tracedHeight != lastTracedFrameHeight) KuiklyScrollTrace.log {
++            lastTracedFrameHeight = tracedHeight
++            "frame current=$currentContentSize height=$tracedHeight reanchor=$reanchorReverse"
 +        }
          scrollView?.contentView?.setFrameToRenderView(frame)
          if (reanchorReverse) {
              reanchorReverseNativeOffset()
-@@ -609,7 +612,17 @@ class KuiklyScrollInfo {
+@@ -609,7 +616,17 @@ class KuiklyScrollInfo {
              viewportSize = viewportSize,
              logicalOffset = composeOffset.toInt()
          )
@@ -39,7 +45,7 @@ index 3ff6639b24c33891e346b745a09e1da0818f9419..5bfc6266ca24c337b5cab5267479e408
 +            }
 +            return
 +        }
-+        KuiklyScrollTrace.log {
++        if (force || move.nativeDelta != 0) KuiklyScrollTrace.log {
 +            "reanchor apply force=$force defer=$deferWhileScrolling nativeDelta=${move.nativeDelta} " +
 +                "target=${move.nativeOffset} current=$currentContentSize anchored=$reverseAnchoredContentSize"
 +        }
@@ -83,7 +89,7 @@ index 0000000000000000000000000000000000000000..fae9fcb7221cab3dbf7e1b6b5ad57e40
 +    }
 +}
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
-index 03095bc0a1eaf63a8b423a4ab73649b1044eb38e..0374c5af3fd72693fa4503c91a3f80f64d4c0c33 100644
+index 03095bc0a1eaf63a8b423a4ab73649b1044eb38e..fefbcc233d29b95efcf520cc7dc76fe92ce1bc93 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/scroller/ContentSizeExtensions.kt
 @@ -15,6 +15,7 @@
@@ -98,7 +104,7 @@ index 03095bc0a1eaf63a8b423a4ab73649b1044eb38e..0374c5af3fd72693fa4503c91a3f80f6
      } else {
          kuiklyInfo.currentContentSize = newContentSize
      }
-+    KuiklyScrollTrace.log {
++    if (newContentSize != oldContentSize || kuiklyInfo.currentContentSize != oldContentSize) KuiklyScrollTrace.log {
 +        "writer=calc old=$oldContentSize new=$newContentSize applied=${kuiklyInfo.currentContentSize} " +
 +            "real=${kuiklyInfo.realContentSize} measured=${kuiklyInfo.measuredItemsContentSize} " +
 +            "composeOffset=${kuiklyInfo.composeOffset.toInt()} viewport=${kuiklyInfo.viewportSize} " +
