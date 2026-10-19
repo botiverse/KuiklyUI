@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Codex-Android-DevOPS
+ <slock-android+codex-android-devops@agents.stamp.build>
+Date: Mon, 19 Oct 2026 10:15:49 +0000
+Subject: fix(compose): apply a shrinking reverse re-anchor immediately during
+ a fling
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The scroll-end deferral of reverse re-anchoring (task #37) also deferred a
+shrinking content size. When a short thread's last item becomes visible the
+3000dp placeholder is replaced by the exact size; keeping the old, larger
+frame let the native fling continue into a region with no items. Device
+probe on botiverse/mobile alpha 10020008: placed rows fixed at 28 while the
+uncovered viewport grew 0 -> 676px over ~650ms at normal frame cadence, then
+contentH 9000 -> 4363 and a jump at scroll end. Only a growing frame, the
+case the deferral exists for, still waits for scroll end.
+
+Fork-Patch: compose-reverse-lazy-shrink-reanchor-immediate
+Origin: botiverse/mobile task #37 (fast-fling blank rows in thread)
+Upstream-Status: pending
+Signed-off-by: Codex-Android-DevOPS (林舟) <slock-android+codex-android-devops@agents.stamp.build>
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+index a37a4711e635c22e6a24d44f9ae650d4feec263e..456b79eaec5464fc77f601072ea860ef16a1ca84 100644
+--- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
++++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMapping.kt
+@@ -137,6 +137,12 @@ internal object ReverseScrollOffsetMapping {
+      * while the reported native offset stays inside the anchored range: outside it the
+      * stale frame no longer describes the position (native already scrolled into the
+      * newly grown region, or an overscroll bounce), and the re-anchor must apply now.
++     *
++     * Only a growing content size ([nativeDelta] > 0) defers. A shrinking one means the
++     * estimate overshot the real content (typically the last item just became visible and
++     * the exact size replaced the placeholder): keeping the old, larger frame lets the
++     * native fling run on into a region that has no items, which shows as blank rows that
++     * grow until scroll end and then a jump. That correction applies at once.
+      */
+     fun shouldDeferReanchor(
+         nativeDelta: Int,
+@@ -145,7 +151,7 @@ internal object ReverseScrollOffsetMapping {
+         anchoredMaxNativeOffset: Int,
+         epsilon: Float,
+     ): Boolean =
+-        !force && nativeDelta != 0 &&
++        !force && nativeDelta > 0 &&
+             reportedNativeOffset >= -epsilon &&
+             reportedNativeOffset <= anchoredMaxNativeOffset + epsilon
+ 
+diff --git a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+index b77f714df5a201d7f7c2a1058df42815c857dc6c..ee0bda09b285af675a84228bb917526ac7c3e901 100644
+--- a/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
++++ b/compose/src/commonTest/kotlin/com/tencent/kuikly/compose/gestures/ReverseScrollOffsetMappingTest.kt
+@@ -182,6 +182,23 @@ class ReverseScrollOffsetMappingTest {
+         assertTrue(mapping.shouldDeferReanchor(4_500, force = false, reportedNativeOffset = max.toFloat(), anchoredMaxNativeOffset = max, epsilon = 1.5f))
+     }
+ 
++    // botiverse/mobile task #37: a short thread's placeholder content size (3000dp) shrank to
++    // the exact size mid-fling once the oldest item became visible. Deferring that kept the
++    // larger frame, so the fling ran on into a region with no items (blank rows growing for
++    // ~650ms on device, then a jump at scroll end). A shrinking frame never defers.
++    @Test
++    fun reanchorNeverDefersAShrinkingContentSize() {
++        assertFalse(
++            mapping.shouldDeferReanchor(
++                nativeDelta = -4_637,
++                force = false,
++                reportedNativeOffset = 3_000f,
++                anchoredMaxNativeOffset = max,
++                epsilon = 1.5f,
++            )
++        )
++    }
++
+     @Test
+     fun reanchorNeverDefersWithoutAFrameChangeOrWhenForced() {
+         // No content size change: nothing to defer, the call is already free.
