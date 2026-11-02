@@ -24,10 +24,10 @@ Upstream-Status: submitted Tencent-TDS/KuiklyUI#1784
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
-diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-index ae88cb68167ec732c7f9fc5bb07a3b3b3fe370e7..7e53b3b8fd9ab3b3ae33e5f1b4e57a4be90c8ea4 100644
---- a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-+++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
+diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashLoweringTest.kt
+index 730278d19e6513aebfcf20f251604effb3b2d4ce..eff0855e57180918637c6d4bee043e3fb5d0b27f 100644
+--- a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashLoweringTest.kt
++++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashLoweringTest.kt
 @@ -21,11 +21,20 @@ import com.tencent.kuikly.compose.ui.graphics.Color
  import com.tencent.kuikly.compose.ui.graphics.PathEffect
  import com.tencent.kuikly.compose.ui.graphics.StrokeCap
@@ -57,7 +57,7 @@ index ae88cb68167ec732c7f9fc5bb07a3b3b3fe370e7..7e53b3b8fd9ab3b3ae33e5f1b4e57a4b
  import kotlin.test.assertNull
  import kotlin.test.assertTrue
  
-@@ -127,6 +137,113 @@ class KuiklyCanvasDashAndTextLoweringTest {
+@@ -135,6 +145,113 @@ class KuiklyCanvasDashLoweringTest {
          assertTrue(dashed.hashCode() != Stroke(width = 2f).hashCode())
      }
  
@@ -171,7 +171,7 @@ index ae88cb68167ec732c7f9fc5bb07a3b3b3fe370e7..7e53b3b8fd9ab3b3ae33e5f1b4e57a4b
      @Test
      fun phaseOnlyChangeDoesNotResendLineDash() {
          withCanvasFixture { fixture ->
-@@ -160,6 +277,26 @@ class KuiklyCanvasDashAndTextLoweringTest {
+@@ -168,6 +285,26 @@ class KuiklyCanvasDashLoweringTest {
          }
      }
  

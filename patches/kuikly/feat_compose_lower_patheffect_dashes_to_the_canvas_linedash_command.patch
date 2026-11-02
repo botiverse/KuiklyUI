@@ -2,6 +2,9 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: BiSheng <raft-mobile-bisheng@mail.build>
 Date: Fri, 9 Oct 2026 11:35:39 +0000
 Subject: feat(compose): lower PathEffect dashes to the canvas lineDash command
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 The vendored DrawScope kept every pathEffect parameter commented out, so a
 Compose Canvas could not draw a dashed line even though every renderer's
@@ -14,7 +17,18 @@ changes or after the canvas is rebound (reset).
 
 drawLine now also honors the paint's stroke cap, like fillOrStroke does.
 Only the dash effect is supported; phase is accepted for source
-compatibility and ignored because no renderer exposes it.
+compatibility and ignored because no renderer exposes it. Intervals are
+copied at construction and must be an even count of non-negative values
+that are not all zero.
+
+Binary compatibility: the five signatures that gained a pathEffect
+parameter (drawLine/drawPoints color+brush, Stroke) keep their old shape as
+DeprecationLevel.HIDDEN members that forward with pathEffect = null, so
+libraries compiled against the old API keep linking. Only a third-party
+DrawScope implementation compiled before this change loses the new abstract
+methods (AbstractMethodError) — noted for the release notes.
+
+Upstream review: Tencent-TDS/KuiklyUI#1783.
 
 Fork-Patch: compose-canvas-path-effect-dash
 Upstream-Status: submitted Tencent-TDS/KuiklyUI#1783
@@ -22,12 +36,12 @@ Upstream-Status: submitted Tencent-TDS/KuiklyUI#1783
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Signed-off-by: BiSheng <raft-mobile-bisheng@mail.build>
 
-diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
+diff --git a/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashLoweringTest.kt b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashLoweringTest.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..ae88cb68167ec732c7f9fc5bb07a3b3b3fe370e7
+index 0000000000000000000000000000000000000000..730278d19e6513aebfcf20f251604effb3b2d4ce
 --- /dev/null
-+++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashAndTextLoweringTest.kt
-@@ -0,0 +1,248 @@
++++ b/compose/src/androidUnitTest/kotlin/com/tencent/kuikly/compose/ui/KuiklyCanvasDashLoweringTest.kt
+@@ -0,0 +1,256 @@
 +/*
 + * Tencent is pleased to support the open source community by making KuiklyUI
 + * available.
@@ -75,7 +89,7 @@ index 0000000000000000000000000000000000000000..ae88cb68167ec732c7f9fc5bb07a3b3b
 + * CanvasView. These teeth pin how [PathEffect] and the text primitive are lowered onto
 + * that wire: which commands go out, in what order, and in density-independent units.
 + */
-+class KuiklyCanvasDashAndTextLoweringTest {
++class KuiklyCanvasDashLoweringTest {
 +
 +    private val density = Density(density = 2f)
 +
@@ -143,10 +157,18 @@ index 0000000000000000000000000000000000000000..ae88cb68167ec732c7f9fc5bb07a3b3b
 +        assertFailsWith<IllegalArgumentException> { PathEffect.dashPathEffect(floatArrayOf(4f)) }
 +        assertFailsWith<IllegalArgumentException> { PathEffect.dashPathEffect(floatArrayOf(4f, 2f, 1f)) }
 +        assertFailsWith<IllegalArgumentException> { PathEffect.dashPathEffect(floatArrayOf(4f, -2f)) }
++        assertFailsWith<IllegalArgumentException> { PathEffect.dashPathEffect(floatArrayOf(0f, 0f)) }
 +        assertEquals(
 +            PathEffect.dashPathEffect(floatArrayOf(4f, 2f)),
 +            PathEffect.dashPathEffect(floatArrayOf(4f, 2f))
 +        )
++
++        // The effect copies the interval array, so mutating the caller's array does not
++        // change equality or the lowered lineDash command.
++        val intervals = floatArrayOf(4f, 2f)
++        val effect = PathEffect.dashPathEffect(intervals)
++        intervals[0] = 99f
++        assertEquals(PathEffect.dashPathEffect(floatArrayOf(4f, 2f)), effect)
 +    }
 +
 +    @Test
@@ -228,7 +250,7 @@ index 0000000000000000000000000000000000000000..ae88cb68167ec732c7f9fc5bb07a3b3b
 +        measuredSize: String = "0|0",
 +        block: (CanvasFixture) -> Unit,
 +    ) {
-+        val pagerId = "KuiklyCanvasDashAndTextLoweringTest"
++        val pagerId = "KuiklyCanvasDashLoweringTest"
 +        val pageName = pagerId
 +        val commands = mutableListOf<RecordedCommand>()
 +        val bridge = NativeBridge().apply {
@@ -414,10 +436,10 @@ index 85da21f1f6b24ce3fe217af2ccb722826e8531ae..7ca76a519a30d54e1b8216660f2eb9f0
  }
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..b9a54a1a69c888cbf9a1a90ccd3bebd3e4e7f804
+index 0000000000000000000000000000000000000000..8fc5d97889870beadadc63964f30e877ba122bf8
 --- /dev/null
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/PathEffect.kt
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,71 @@
 +/*
 + * Copyright 2020 The Android Open Source Project
 + *
@@ -450,8 +472,9 @@ index 0000000000000000000000000000000000000000..b9a54a1a69c888cbf9a1a90ccd3bebd3
 +         * Replaces the outline of the shape with a series of dashes.
 +         *
 +         * @param intervals Array of "on" and "off" distances for the dashed line segments.
-+         * Must contain an even number of entries (>= 2). The even indices specify the "on"
-+         * intervals, the odd indices specify the "off" intervals, in pixels.
++         * Must contain an even number of entries (>= 2) that are not all zero. The even
++         * indices specify the "on" intervals, the odd indices specify the "off" intervals,
++         * in pixels. The array is copied so later mutation does not change the effect.
 +         * @param phase Pixel offset into the intervals array. The Kuikly canvas does not
 +         * support a phase offset on any renderer yet; the value is kept for source
 +         * compatibility with Jetpack Compose and is currently ignored.
@@ -465,13 +488,16 @@ index 0000000000000000000000000000000000000000..b9a54a1a69c888cbf9a1a90ccd3bebd3
 + * Dashed stroke pattern. Compared by content so the canvas can skip re-sending an
 + * unchanged `lineDash` command.
 + */
-+internal class DashPathEffect(val intervals: FloatArray, val phase: Float) : PathEffect {
++internal class DashPathEffect(intervals: FloatArray, val phase: Float) : PathEffect {
++
++    val intervals: FloatArray = intervals.copyOf()
 +
 +    init {
 +        require(intervals.size >= 2 && intervals.size % 2 == 0) {
 +            "dashPathEffect requires an even number of intervals (>= 2), got ${intervals.size}"
 +        }
 +        require(intervals.all { it >= 0f }) { "dashPathEffect intervals must not be negative" }
++        require(intervals.sum() > 0f) { "dashPathEffect intervals must not all be zero" }
 +    }
 +
 +    override fun equals(other: Any?): Boolean {
@@ -615,7 +641,7 @@ index 3b0f62e70af0f9091c9fa77866bde5909b95dbfb..4ed8ad2157d5addf742e0307108078f9
      }
  
 diff --git a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt
-index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83aa56320fc 100644
+index ebcc960717a1cb9e643f414e6ad35da24965372b..30d7bfbeb56dba8fd727e30d45fb1aca76d7b4e9 100644
 --- a/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt
 +++ b/compose/src/commonMain/kotlin/com/tencent/kuikly/compose/ui/graphics/drawscope/DrawScope.kt
 @@ -35,7 +35,7 @@ import com.tencent.kuikly.compose.ui.graphics.PointMode
@@ -627,7 +653,7 @@ index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83a
  //import com.tencent.kuikly.compose.ui.graphics.PointMode
  //import com.tencent.kuikly.compose.ui.graphics.StrokeCap
  //import com.tencent.kuikly.compose.ui.graphics.StrokeJoin
-@@ -379,7 +379,7 @@ interface DrawScope : Density {
+@@ -379,12 +379,24 @@ interface DrawScope : Density {
          end: Offset,
          strokeWidth: Float = Stroke.HairlineWidth,
          cap: StrokeCap = Stroke.DefaultCap,
@@ -636,7 +662,24 @@ index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83a
          @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
  //        colorFilter: ColorFilter? = null,
  //        blendMode: BlendMode = DefaultBlendMode
-@@ -406,7 +406,7 @@ interface DrawScope : Density {
+     )
+ 
++    @Deprecated("Maintained for binary compatibility", level = DeprecationLevel.HIDDEN)
++    fun drawLine(
++        brush: Brush,
++        start: Offset,
++        end: Offset,
++        strokeWidth: Float = Stroke.HairlineWidth,
++        cap: StrokeCap = Stroke.DefaultCap,
++        @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
++//        colorFilter: ColorFilter? = null,
++//        blendMode: BlendMode = DefaultBlendMode
++    ) = drawLine(brush, start, end, strokeWidth, cap, null, alpha)
++
+     /**
+      * Draws a line between the given points using the given paint. The line is
+      * stroked.
+@@ -406,12 +418,24 @@ interface DrawScope : Density {
          end: Offset,
          strokeWidth: Float = Stroke.HairlineWidth,
          cap: StrokeCap = Stroke.DefaultCap,
@@ -645,7 +688,24 @@ index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83a
          @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
  //        colorFilter: ColorFilter? = null,
  //        blendMode: BlendMode = DefaultBlendMode
-@@ -849,7 +849,7 @@ interface DrawScope : Density {
+     )
+ 
++    @Deprecated("Maintained for binary compatibility", level = DeprecationLevel.HIDDEN)
++    fun drawLine(
++        color: Color,
++        start: Offset,
++        end: Offset,
++        strokeWidth: Float = Stroke.HairlineWidth,
++        cap: StrokeCap = Stroke.DefaultCap,
++        @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
++//        colorFilter: ColorFilter? = null,
++//        blendMode: BlendMode = DefaultBlendMode
++    ) = drawLine(color, start, end, strokeWidth, cap, null, alpha)
++
+     /**
+      * Draws a rectangle with the given offset and size. If no offset from the top left is provided,
+      * it is drawn starting from the origin of the current translation. If no size is provided,
+@@ -849,12 +873,24 @@ interface DrawScope : Density {
          color: Color,
          strokeWidth: Float = Stroke.HairlineWidth,
          cap: StrokeCap = StrokeCap.Butt,
@@ -654,7 +714,24 @@ index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83a
          @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
  //        colorFilter: ColorFilter? = null,
  //        blendMode: BlendMode = DefaultBlendMode
-@@ -877,7 +877,7 @@ interface DrawScope : Density {
+     )
+ 
++    @Deprecated("Maintained for binary compatibility", level = DeprecationLevel.HIDDEN)
++    fun drawPoints(
++        points: List<Offset>,
++        pointMode: PointMode,
++        color: Color,
++        strokeWidth: Float = Stroke.HairlineWidth,
++        cap: StrokeCap = StrokeCap.Butt,
++        @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
++//        colorFilter: ColorFilter? = null,
++//        blendMode: BlendMode = DefaultBlendMode
++    ) = drawPoints(points, pointMode, color, strokeWidth, cap, null, alpha)
++
+     /**
+      * Draws a sequence of points according to the given [PointMode].
+      *
+@@ -877,12 +913,24 @@ interface DrawScope : Density {
          brush: Brush,
          strokeWidth: Float = Stroke.HairlineWidth,
          cap: StrokeCap = StrokeCap.Butt,
@@ -663,16 +740,43 @@ index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83a
          @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
  //        colorFilter: ColorFilter? = null,
  //        blendMode: BlendMode = DefaultBlendMode
-@@ -936,7 +936,7 @@ class Stroke(
+     )
+ 
++    @Deprecated("Maintained for binary compatibility", level = DeprecationLevel.HIDDEN)
++    fun drawPoints(
++        points: List<Offset>,
++        pointMode: PointMode,
++        brush: Brush,
++        strokeWidth: Float = Stroke.HairlineWidth,
++        cap: StrokeCap = StrokeCap.Butt,
++        @FloatRange(from = 0.0, to = 1.0) alpha: Float = 1.0f,
++//        colorFilter: ColorFilter? = null,
++//        blendMode: BlendMode = DefaultBlendMode
++    ) = drawPoints(points, pointMode, brush, strokeWidth, cap, null, alpha)
++
+     /**
+      * Helper method to offset the provided size with the offset in box width and height
+      */
+@@ -936,8 +984,17 @@ class Stroke(
      val miter: Float = DefaultMiter,
      val cap: StrokeCap = DefaultCap,
      val join: StrokeJoin = DefaultJoin,
 -//    val pathEffect: PathEffect? = null
 +    val pathEffect: PathEffect? = null
  ) : DrawStyle() {
++
++    @Deprecated("Maintained for binary compatibility", level = DeprecationLevel.HIDDEN)
++    constructor(
++        width: Float = 0.0f,
++        miter: Float = DefaultMiter,
++        cap: StrokeCap = DefaultCap,
++        join: StrokeJoin = DefaultJoin,
++    ) : this(width, miter, cap, join, null)
++
      companion object {
  
-@@ -969,7 +969,7 @@ class Stroke(
+         /**
+@@ -969,7 +1026,7 @@ class Stroke(
          if (miter != other.miter) return false
          if (cap != other.cap) return false
          if (join != other.join) return false
@@ -681,7 +785,7 @@ index ebcc960717a1cb9e643f414e6ad35da24965372b..efa5f8a2bed72db5b688dad12868d83a
  
          return true
      }
-@@ -979,12 +979,11 @@ class Stroke(
+@@ -979,12 +1036,11 @@ class Stroke(
          result = 31 * result + miter.hashCode()
          result = 31 * result + cap.hashCode()
          result = 31 * result + join.hashCode()
